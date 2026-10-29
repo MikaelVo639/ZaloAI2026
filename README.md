@@ -23,7 +23,12 @@ uv run datamate validate outputs/demo/submission.jsonl --questions data/demo/que
 uv run datamate evaluate outputs/demo/submission.jsonl --reference data/demo/answers.jsonl --output outputs/demo/metrics.json
 ```
 
-Trong Windows, khi đã có `.venv`, có thể chạy toàn bộ demo bằng một lệnh:
+Trong Windows, khi đã có `.venv`, mở File Explorer rồi nhấp đúp **`demo.cmd`**
+ở thư mục gốc repo. Cửa sổ sẽ giữ kết quả trên màn hình đến khi bạn bấm phím.
+Launcher này chạy Python trực tiếp, không phụ thuộc ứng dụng mở file `.ps1`.
+Khi chạy tự động trong terminal, dùng `demo.cmd --no-pause`.
+
+Hoặc chạy toàn bộ demo bằng một lệnh trong PowerShell:
 
 ```powershell
 .\scripts\demo.ps1
