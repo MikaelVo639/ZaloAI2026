@@ -138,11 +138,13 @@ def build_catalog(data_root: Path, business_id: str, sample_size: int = 3) -> Ca
                    if readme.is_file() else "", tuple(sampled))
 
 
-def catalog_dict(catalog: Catalog) -> dict[str, Any]:
+def catalog_dict(catalog: Catalog, *, relative_to: Path) -> dict[str, Any]:
+    """Share catalog metadata without embedding a member's filesystem paths."""
     return {
         "business_id": catalog.business_id,
         "readme": catalog.readme,
-        "tables": [{"source": str(t.path), "name": t.name, "columns": t.columns,
+        "tables": [{"source": t.path.resolve().relative_to(relative_to.resolve()).as_posix(),
+                    "name": t.name, "columns": t.columns,
                     "sample": t.sample} for t in catalog.tables],
     }
 

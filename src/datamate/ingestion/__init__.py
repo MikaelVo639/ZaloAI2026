@@ -1,4 +1,4 @@
-"""Owner 2: file readers, schema profiling and business adapters."""
+"""Data & Schema: file readers, schema profiling and business adapters."""
 
 from datamate.ingestion.catalog import build_catalog, iter_rows
 

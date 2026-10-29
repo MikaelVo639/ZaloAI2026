@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from datamate.data_tools import business_holdout, import_archive
-from datamate.demo import create_demo
+from datamate.demo import create_demo, run_smoke
 from datamate.evaluation.scorer import evaluate
 from datamate.evaluation.validation import validate_submission
 from datamate.ingestion import build_catalog
@@ -18,6 +18,9 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     demo = commands.add_parser("demo", help="Generate synthetic CSV/XLSX/SQLite smoke-test data")
     demo.add_argument("--output", type=Path, default=Path("data/demo"))
+    smoke = commands.add_parser("smoke", help="Generate/reuse demo, predict, validate and check metrics")
+    smoke.add_argument("--data-dir", type=Path, default=Path("data/demo"))
+    smoke.add_argument("--output-dir", type=Path, default=Path("outputs/demo"))
     ingest = commands.add_parser("import-data", help="Extract an organizer ZIP preserving split layout")
     ingest.add_argument("archive", type=Path)
     ingest.add_argument("--destination", type=Path, default=Path("data/raw"))
@@ -55,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "demo":
             report = create_demo(args.output)
+        elif args.command == "smoke":
+            report = run_smoke(args.data_dir, args.output_dir)
         elif args.command == "import-data":
             report = import_archive(args.archive, args.destination)
         elif args.command == "inspect":
@@ -64,7 +69,8 @@ def main(argv: list[str] | None = None) -> int:
                 if args.business not in businesses:
                     raise ValueError(f"Unknown business: {args.business}")
                 businesses = [args.business]
-            report = {"businesses": [catalog_dict(build_catalog(split.root / "data", business))
+            report = {"businesses": [catalog_dict(build_catalog(split.root / "data", business),
+                                                  relative_to=split.root)
                                       for business in businesses]}
             _save(args.output, report)
             report = {"output": str(args.output.resolve()), "businesses": len(businesses)}

@@ -1,11 +1,12 @@
 """Synthetic fixture only; never substitutes for organizer data."""
 
 import csv
+import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from datamate.io import write_jsonl
+from datamate.io import read_jsonl, write_jsonl
 
 RULEBOOK = """# Synthetic demo rules (not the organizer's rulebook)
 Hôm nay là as_of_date; không tính bản ghi tương lai.
@@ -88,3 +89,25 @@ def create_demo(root: Path) -> dict:
     write_jsonl(root / "questions.jsonl", questions)
     write_jsonl(root / "answers.jsonl", references)
     return {"data_dir": str(root.resolve()), "businesses": 3, "questions": len(questions)}
+
+
+def run_smoke(data_dir: Path, output_dir: Path) -> dict:
+    """Shared acceptance command for fresh checkouts, launchers and CI."""
+    from datamate.evaluation.scorer import evaluate
+    from datamate.evaluation.validation import validate_submission
+    from datamate.pipeline import Config, predict
+
+    if not (data_dir / "questions.jsonl").is_file():
+        create_demo(data_dir)
+    run = predict(data_dir, output_dir, Config())
+    predictions = read_jsonl(output_dir / "submission.jsonl")
+    references = read_jsonl(data_dir / "answers.jsonl")
+    validation = validate_submission(predictions, {q["id"] for q in read_jsonl(data_dir / "questions.jsonl")})
+    metrics = evaluate(predictions, references)
+    (output_dir / "metrics.json").write_text(
+        json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+    if tuple(metrics[k] for k in ("n", "correct", "wrong", "abstain")) != (24, 21, 0, 3):
+        raise ValueError("Demo acceptance failed; inspect metrics.json and per-question logs")
+    return {"status": "ok", "validation": validation,
+            "metrics": {k: v for k, v in metrics.items() if k != "outcomes"},
+            "elapsed_seconds": run["elapsed_seconds"]}

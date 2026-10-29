@@ -1,3 +1,4 @@
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -6,7 +7,7 @@ from zipfile import ZipFile
 
 from datamate.data_tools import business_holdout, import_archive
 from datamate.demo import create_demo
-from datamate.ingestion.catalog import sqlite_connection
+from datamate.ingestion.catalog import build_catalog, catalog_dict, sqlite_connection
 
 
 class DataToolTests(unittest.TestCase):
@@ -53,3 +54,21 @@ class DataToolTests(unittest.TestCase):
         self.addCleanup(connection.close)
         with self.assertRaises(sqlite3.OperationalError):
             connection.execute("INSERT INTO example VALUES (1)")
+
+    def test_shared_metadata_is_identical_in_different_checkout_paths(self):
+        original = self.root / "checkout one" / "data" / "train"
+        copied = self.root / "another checkout" / "data" / "train"
+        create_demo(original)
+        shutil.copytree(original, copied)
+        a = business_holdout(original, self.root / "first.json")
+        b = business_holdout(copied, self.root / "second.json")
+        self.assertEqual(a, b)
+        self.assertEqual(a["source"], "questions.jsonl")
+        self.assertEqual(len(a["questions_sha256"]), 64)
+        for business in ("demo_csv", "demo_xlsx", "demo_sqlite"):
+            first = catalog_dict(build_catalog(original / "data", business), relative_to=original)
+            second = catalog_dict(build_catalog(copied / "data", business), relative_to=copied)
+            self.assertEqual(first, second)
+            for table in first["tables"]:
+                self.assertTrue(table["source"].startswith(f"data/{business}/"))
+                self.assertNotIn("\\", table["source"])

@@ -1,4 +1,4 @@
-"""Owner 1: connect modules, isolate question failures, write durable outputs."""
+"""Integration: connect modules, isolate question failures, write durable outputs."""
 
 import hashlib
 import json

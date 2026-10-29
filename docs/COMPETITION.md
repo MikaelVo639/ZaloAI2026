@@ -1,7 +1,7 @@
 # Ghi nhận từ portal — 29/10/2026 (GMT+7)
 
 Nguồn: [DataMate portal, các mục Data / Evaluation / Rule / Submission Guidance](https://challenge.zalo.ai/portal/datamate).
-Đã đọc bằng Brave trong phiên đăng nhập. Portal là nguồn chuẩn khi có cập nhật.
+Mốc đối chiếu nội dung: 29/10/2026. Portal và guideline BTC là nguồn chuẩn khi có cập nhật.
 
 - Input mỗi split: `data/<business_id>/`, README từng business, `questions.jsonl`,
   `rulebook.md`, `calendar.csv`. Train thêm `answers.jsonl` với alias.
@@ -36,4 +36,4 @@ Các URL tải dữ liệu xuất hiện trong mục Data:
 - [Train ZIP](https://dl-challenge.zalo.ai/2026/datamate_dkewxftdzo/train.zip)
 - [Public test ZIP](https://dl-challenge.zalo.ai/2026/datamate_dkewxftdzo/public_test.zip)
 
-Chưa lựa chọn model, chưa upload kết quả và chưa đóng image GPU cuối ở starter này.
+Baseline không dùng model. Backend GPU cần khai báo model và đóng image theo hướng dẫn BTC.

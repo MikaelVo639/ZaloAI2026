@@ -15,10 +15,18 @@ jobs:
       - run: python -m pip install -r requirements.txt
       - run: python -m pip install --no-deps -e .
       - run: python -m unittest discover -s tests -v
-      - run: python -m datamate demo --output data/demo
-      - run: python -m datamate predict --data-dir data/demo --output-dir outputs/demo
-      - run: python -m datamate validate outputs/demo/submission.jsonl --questions data/demo/questions.jsonl
-      - run: python -m datamate evaluate outputs/demo/submission.jsonl --reference data/demo/answers.jsonl --output outputs/demo/metrics.json
+      - run: python -m datamate smoke
+      - name: Windows launcher
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          python -m venv .venv
+          if errorlevel 1 exit /b 1
+          .venv\Scripts\python -m pip install -r requirements.txt
+          if errorlevel 1 exit /b 1
+          .venv\Scripts\python -m pip install --no-deps -e .
+          if errorlevel 1 exit /b 1
+          call demo.cmd --no-pause
   docker:
     runs-on: ubuntu-latest
     steps:

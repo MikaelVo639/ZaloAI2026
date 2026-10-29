@@ -47,7 +47,11 @@ def business_holdout(data_dir: Path, output: Path, fraction: float = 0.2, seed: 
     random.Random(seed).shuffle(businesses)
     size = max(1, min(len(businesses) - 1, round(len(businesses) * fraction)))
     validation = set(businesses[:size])
-    result = {"seed": seed, "source": str(split.root),
+    with (split.root / "questions.jsonl").open("rb") as stream:
+        questions_hash = hashlib.file_digest(stream, "sha256").hexdigest()
+    result = {"seed": seed, "source": "questions.jsonl",
+              "questions_sha256": questions_hash,
+              "rulebook_sha256": hashlib.sha256(split.rulebook.encode()).hexdigest(),
               "train_businesses": sorted(set(businesses) - validation),
               "validation_businesses": sorted(validation),
               "train_ids": [q.id for q in split.questions if q.business_id not in validation],

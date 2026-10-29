@@ -54,10 +54,15 @@ hiểu là nghìn. Team cần thêm quy tắc theo nguồn khi định dạng n�
 
 ## Điểm cần phát triển
 
-Người 2 bổ sung adapter order/detail/product với kiểm tra cardinality, khóa trùng,
-độ phủ ngày và quy đổi đơn vị. Người 3 thêm kế hoạch có nguồn luật cụ thể. Người 4
-dùng model offline để lập kế hoạch, lấy số từ thực thi; sandbox/timeout worker phải
-có trước khi cho chạy code sinh tự động. Người 5 đo hiệu quả và giải thích các ca sai.
+Data & Schema bổ sung adapter order/detail/product với kiểm tra cardinality, khóa
+trùng, độ phủ ngày và quy đổi đơn vị. Semantics thêm kế hoạch có nguồn luật cụ thể.
+Agent dùng model offline để lập kế hoạch, lấy số từ thực thi; sandbox/timeout worker
+phải có trước khi cho chạy code sinh tự động. Evaluation đo hiệu quả và phân tích lỗi.
+
+Catalog xuất bằng `catalog_dict(catalog, relative_to=split.root)` có `source` là
+đường dẫn tương đối từ split, dùng dấu `/` trên mọi hệ điều hành. Holdout manifest
+ghi `source: questions.jsonl` và checksum questions/rulebook thay cho đường dẫn máy.
+Khi chuyển từ metadata có đường dẫn tuyệt đối, tạo lại catalog/holdout bằng CLI.
 
 Log cần giữ được truy vấn/code, giá trị trung gian và nguồn file/cột sau khi mở rộng.
 Ngân sách toàn lượt hiện chỉ được kiểm tra giữa các bước, không cưỡng bức dừng một

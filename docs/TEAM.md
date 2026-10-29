@@ -1,30 +1,42 @@
-# Nhận việc cho 5 người
+# Phân công và giao tiếp trong team
 
-Mỗi người một nhánh: `infra/...`, `ingestion/...`, `semantics/...`, `agent/...`,
-`evaluation/...`. Nhánh `main` phải luôn chạy được demo và test. Dùng PR nhỏ, kèm
-lệnh kiểm tra và dữ liệu chứng minh thay đổi; một người khác review trước khi ghép.
+Năm vai trò dưới đây là phạm vi sở hữu module. Team tự gán thành viên vào vai trò,
+chọn người review dự phòng và cập nhật assignee trên issue/PR khi nhận việc.
 
-| Người | Việc đầu tiên | Bàn giao có thể kiểm tra |
+| Vai trò | Sở hữu | Đầu vào -> đầu ra | Người review phù hợp |
+|---|---|---|---|
+| Integration | `pipeline.py`, `cli.py`, scripts, config, Docker, CI | các module -> submission/log có thể chạy lại | Evaluation |
+| Data & Schema | `ingestion/` | file gốc + README -> Catalog/adapter có nguồn | Agent |
+| Semantics | `semantics/` | Question + luật của split -> Plan | Data & Schema |
+| Agent | `agent/` | Plan + dữ liệu -> Candidate + evidence | Semantics |
+| Evaluation | `evaluation/`, tests | Candidate/submission + nhãn train -> kiểm tra và báo cáo | Integration |
+
+Review giao thoa theo vấn đề: join cần Data & Schema, luật nghiệp vụ cần Semantics,
+phép tính cần Agent, ảnh hưởng điểm cần Evaluation. Đổi contract cần các vai trò
+sử dụng contract cùng xem PR; vai trò sở hữu không có nghĩa chỉ một người được sửa.
+
+## Việc khởi đầu
+
+| Vai trò | Việc ưu tiên | Điều kiện hoàn thành |
 |---|---|---|
-| 1 — tích hợp | cài trên máy thứ hai; chạy CI/Docker; theo dõi runtime | lệnh chạy thống nhất, image offline, log đúng contract |
-| 2 — dữ liệu | xem `outputs/train_catalog.json`; hỗ trợ export tách order/detail | adapter với join không nhân dòng, test tổng tiền/đơn |
-| 3 — luật | chọn câu đang abstain; thêm mốc thời gian và metric cụ thể | Plan có dòng luật, ca biên as-of/tuần/tháng |
-| 4 — agent | chọn model đúng thể lệ, chạy local trong Docker | Agent dùng contract, kết quả từ thực thi, có deadline |
-| 5 — đánh giá | cố định holdout theo business, nhóm lỗi từ metrics/logs | bảng đúng/sai/bỏ qua, chênh lệch trước-sau, ngưỡng gate |
+| Integration | xác nhận checkout mới, scripts và Docker | một lệnh smoke chung; Docker đọc input read-only, đủ output/log |
+| Data & Schema | tạo catalog rồi thêm adapter order/detail/product | join không nhân dòng; có ca thiếu khóa, trùng khóa, đơn trả |
+| Semantics | mở rộng nhóm câu đang abstain | Plan có nguồn luật; ca ranh giới ngày và điều kiện chưa hỗ trợ |
+| Agent | tích hợp backend tính toán hoặc model local đúng thể lệ | kết quả từ thực thi; code/query trong evidence; worker có deadline |
+| Evaluation | cố định business holdout và nhóm lỗi | báo cáo đúng/sai/bỏ qua; so trước/sau cùng dữ liệu và config |
 
-Prompt có thể dùng khi giao việc cho coding assistant:
+## Khi giao việc cho coding assistant
 
-1. **Tích hợp:** “Đọc AGENTS.md và contracts.py. Giữ CLI hiện có chạy được.
-   Thêm [thay đổi cụ thể], chạy demo/test, báo file đổi và lệnh đã kiểm tra.”
-2. **Dữ liệu:** “Đọc catalog/README của business thuộc phần train, không hard-code id.
-   Thêm adapter cho [schema cụ thể]; giữ raw data, kiểm tra join không tăng tổng tiền,
-   thêm fixture nhỏ cho missing key/duplicate/đơn trả.”
-3. **Luật:** “Thêm [ý nghĩa câu hỏi] vào semantics. Đọc rulebook của split hiện tại,
-   trả Plan có nguồn luật, viết ca ranh giới ngày và phần câu không hỗ trợ.”
-4. **Agent:** “Thêm backend offline qua Agent protocol. Không gọi dịch vụ ngoài.
-   Tôn trọng giới hạn model, worker có timeout, ghi code/query và output vào evidence.”
-5. **Đánh giá:** “Đọc report local và log train/validation, chọn nhóm lỗi gây mất PA.
-   Không dùng test để học. Đưa ca tái hiện nhỏ, đo lại cùng holdout và phân tích sai số.”
+Luôn chỉ rõ module, hành vi cần đổi, contract giữ nguyên hay cần sửa, ca tái hiện
+và lệnh xác nhận. Yêu cầu đọc `AGENTS.md`, không đưa answers vào inference và không
+hard-code id. Thay đổi ở vai trò khác phải được ghi rõ trong báo cáo/PR.
 
-Mỗi ngày xem chung một nhóm câu sai. Giao lỗi về đúng module trước khi thêm model
-hoặc mở rộng prompt. Thay contract phải báo người dùng đầu ra đó.
+Ví dụ: “Thêm adapter cho export tách order/detail trong ingestion. Giữ raw data,
+kiểm tra cardinality và tổng tiền trước/sau join, thêm fixture nhỏ cho duplicate
+và đơn trả. Giữ Catalog/Agent contract; chạy smoke và các tests liên quan.”
+
+## Vòng phối hợp
+
+Mỗi thay đổi thuật toán bắt đầu bằng lỗi cụ thể hoặc giả thuyết đo được. Cùng xem
+câu sai/abstain, giao về đúng module, rồi đối chiếu cùng business holdout. Ghi quyết
+định trong issue/PR để người khác tiếp tục được mà không cần lịch sử chat cá nhân.
