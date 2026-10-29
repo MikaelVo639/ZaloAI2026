@@ -1,0 +1,13 @@
+.git
+.venv
+.cache
+**/__pycache__
+data
+outputs
+artifacts
+tests
+*.zip
+*.crdownload
+.env*
+build
+dist

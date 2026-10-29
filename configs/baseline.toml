@@ -1,0 +1,4 @@
+backend = "baseline"
+# A diagnostic gate, not a calibrated probability. Tune on held-out businesses.
+min_confidence = 1.0
+max_seconds = 21000

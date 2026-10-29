@@ -1,0 +1,39 @@
+# Ghi nhận từ portal — 29/10/2026 (GMT+7)
+
+Nguồn: [DataMate portal, các mục Data / Evaluation / Rule / Submission Guidance](https://challenge.zalo.ai/portal/datamate).
+Đã đọc bằng Brave trong phiên đăng nhập. Portal là nguồn chuẩn khi có cập nhật.
+
+- Input mỗi split: `data/<business_id>/`, README từng business, `questions.jsonl`,
+  `rulebook.md`, `calendar.csv`. Train thêm `answers.jsonl` với alias.
+- Mỗi câu có `id`, `business_id`, câu hỏi tiếng Việt, `as_of_date` làm mốc “hôm nay”.
+- Output JSONL có `id`, `type`, `answer`; type gồm number, percent, string, date,
+  boolean, list, table, unanswerable, abstain. Hai type cuối không cần answer.
+- PA = (số đúng − số sai) / tổng câu; abstain và thiếu dòng tính 0. Cần đúng cả type.
+- String chuẩn hóa NFC/hoa thường/khoảng trắng/dấu câu; giữ dấu tiếng Việt, chấp nhận
+  alias có trong dữ liệu và mã. List có thứ tự. Table so cột theo tên, fallback vị trí;
+  dòng là tập không có thứ tự. Local scorer trong repo chưa phải scorer BTC.
+- Phải đọc rulebook của chính split đang chạy. Không lấy bản train làm mặc định cho test.
+- Inference hoàn toàn offline trong Docker, networking bị tắt, không gọi API, không tải weights.
+- Model phải phát hành weights công khai **trước 01/10/2026**, licence cho phép sử dụng.
+  Tổng tham số của tất cả model dùng trong inference <= **15 tỷ**, kể cả model dùng lần lượt;
+  MoE tính toàn bộ tham số. Khai báo model trong README. Starter hiện dùng 0 model.
+- Không có người can thiệp, không hard-code logic theo question/business id; không lấy đáp
+  án test hoặc dùng public/private test để training.
+- `/data` mount read-only; ghi `/result/submission.jsonl` và log theo câu ở `/result/logs/`.
+  Log ít nhất gồm question id, đáp án cuối và thời gian; nên có code/query và execution output.
+- Máy tham chiếu: 2 x RTX 5090, mỗi GPU 32 GB VRAM; RAM 512 GB; tối đa 6 giờ toàn bộ private
+  test tính cả load model. Blackwell cần CUDA >=12.8 và build PyTorch/vLLM phù hợp.
+  Base image GPU cuối theo Docker guideline của BTC, không coi Docker CPU starter là bản cuối.
+- Kết quả chạy lại Docker là điểm cuối. Sai lệch PA giữa upload và chạy lại tối đa 0.03;
+  log dùng để giải trình. Nếu dừng sớm, các đáp án đã ghi mới được tính.
+- Public: tối đa 5 submission/ngày. Hạn solution **23:59 ngày 16/11/2026 GMT+7**;
+  mỗi team tối đa 2 lần nộp solution, BTC lấy lần cuối. Image lớn nộp qua link Drive công khai
+  kèm checksum theo form của BTC.
+- Private test mở **09:00 ngày 20/11/2026 GMT+7**; hạn kết quả **23:59 ngày 23/11/2026**.
+
+Các URL tải dữ liệu xuất hiện trong mục Data:
+
+- [Train ZIP](https://dl-challenge.zalo.ai/2026/datamate_dkewxftdzo/train.zip)
+- [Public test ZIP](https://dl-challenge.zalo.ai/2026/datamate_dkewxftdzo/public_test.zip)
+
+Chưa lựa chọn model, chưa upload kết quả và chưa đóng image GPU cuối ở starter này.

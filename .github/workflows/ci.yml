@@ -1,0 +1,35 @@
+name: checks
+on: [push, pull_request]
+jobs:
+  python:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pip install --no-deps -e .
+      - run: python -m unittest discover -s tests -v
+      - run: python -m datamate demo --output data/demo
+      - run: python -m datamate predict --data-dir data/demo --output-dir outputs/demo
+      - run: python -m datamate validate outputs/demo/submission.jsonl --questions data/demo/questions.jsonl
+      - run: python -m datamate evaluate outputs/demo/submission.jsonl --reference data/demo/answers.jsonl --output outputs/demo/metrics.json
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pip install --no-deps -e .
+      - run: python -m datamate demo --output data/demo
+      - run: docker build -t datamate-starter .
+      - run: mkdir -p outputs/docker
+      - run: docker run --rm --network none -v "$PWD/data/demo:/data:ro" -v "$PWD/outputs/docker:/result" datamate-starter
+      - run: python -m datamate validate outputs/docker/submission.jsonl --questions data/demo/questions.jsonl
