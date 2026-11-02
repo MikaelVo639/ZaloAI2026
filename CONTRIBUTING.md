@@ -18,8 +18,9 @@ trạng thái cài đặt cá nhân hoặc kết quả từ một phiên làm vi
 Mỗi issue nêu module, vấn đề, đầu vào/đầu ra và điều kiện hoàn thành. Gán một người
 phụ trách và một người review; phân vai tham khảo `docs/TEAM.md`.
 
-Tạo nhánh từ `main` đã cập nhật. Dùng tên mô tả, ví dụ `feat/ingestion-order-join`,
-`fix/semantics-week-window`, `chore/ci-smoke`. Một PR giải quyết một thay đổi có thể
+Tạo nhánh từ `main` đã cập nhật. Dùng tên mô tả với tiền tố `codex/`, ví dụ
+`codex/ingestion-order-join`, `codex/semantics-week-window`, `codex/ci-smoke`.
+Một PR giải quyết một thay đổi có thể
 kiểm tra độc lập; không trộn sửa format toàn repo vào thay đổi thuật toán.
 
 ## Nội dung PR
@@ -43,3 +44,10 @@ thống nhất cách ghép trước khi sửa phần dùng đầu ra đó.
 
 Người tích hợp ghép PR sau khi các điều kiện trên đạt. Việc bảo vệ nhánh và quyền
 merge được team cấu hình trên dịch vụ Git đang dùng.
+
+Cấu hình bảo vệ `main`: yêu cầu các checks `python (ubuntu-latest)`,
+`python (windows-latest)` và `docker`; nhánh phải cập nhật với main; ít nhất một
+approval và review của CODEOWNER; huỷ approval cũ khi có commit mới; giải quyết
+hết review conversations. Áp dụng cả admin; không force-push hoặc xoá main.
+`CODEOWNERS` trên nhánh mặc định mới có hiệu lực tự yêu cầu review, nên PR đầu
+tiên thêm file này cần yêu cầu reviewer thủ công. Không tự duyệt thay thành viên.

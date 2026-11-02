@@ -3,6 +3,22 @@
 Năm vai trò dưới đây là phạm vi sở hữu module. Team tự gán thành viên vào vai trò,
 chọn người review dự phòng và cập nhật assignee trên issue/PR khi nhận việc.
 
+## Thành viên và review
+
+| Người | GitHub | Vai trò | Reviewer chính |
+|---|---|---|---|
+| 1 | @MikaelVo639 | Integration / quản lý repo | @baoduong2342007 |
+| 2 | @longlth2297 | Data & Schema | @tqhuy0602 |
+| 3 | @Kurosuz | Semantics | @longlth2297 |
+| 4 | @tqhuy0602 | Agent | @Kurosuz |
+| 5 | @baoduong2342007 | Evaluation | @MikaelVo639 |
+
+Danh sách việc và điều kiện bàn giao nằm trong [BACKLOG.md](BACKLOG.md).
+`CODEOWNERS` tự đề nghị reviewer theo module; người phụ trách vẫn phải yêu cầu
+review giao thoa khi đổi luật, phép tính, join hoặc contract. Tác giả không tự
+duyệt PR của mình. Các tests dùng chung do Evaluation điều phối, chủ module bổ
+sung regression cùng thay đổi của mình.
+
 | Vai trò | Sở hữu | Đầu vào -> đầu ra | Người review phù hợp |
 |---|---|---|---|
 | Integration | `pipeline.py`, `cli.py`, scripts, config, Docker, CI | các module -> submission/log có thể chạy lại | Evaluation |

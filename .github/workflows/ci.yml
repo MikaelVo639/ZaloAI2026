@@ -1,5 +1,7 @@
 name: checks
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
 jobs:
   python:
     runs-on: ${{ matrix.os }}
@@ -12,20 +14,14 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-      - run: python -m pip install -r requirements.txt
-      - run: python -m pip install --no-deps -e .
-      - run: python -m unittest discover -s tests -v
-      - run: python -m datamate smoke
+      - run: python -m pip install uv==0.12.5
+      - run: uv sync --locked
+      - run: uv run datamate smoke
+      - run: uv run python -m unittest discover -s tests -v
       - name: Windows launcher
         if: runner.os == 'Windows'
         shell: cmd
         run: |
-          python -m venv .venv
-          if errorlevel 1 exit /b 1
-          .venv\Scripts\python -m pip install -r requirements.txt
-          if errorlevel 1 exit /b 1
-          .venv\Scripts\python -m pip install --no-deps -e .
-          if errorlevel 1 exit /b 1
           call demo.cmd --no-pause
   docker:
     runs-on: ubuntu-latest
@@ -38,6 +34,7 @@ jobs:
       - run: python -m pip install --no-deps -e .
       - run: python -m datamate demo --output data/demo
       - run: docker build -t datamate-starter .
-      - run: mkdir -p outputs/docker
-      - run: docker run --rm --network none -v "$PWD/data/demo:/data:ro" -v "$PWD/outputs/docker:/result" datamate-starter
-      - run: python -m datamate validate outputs/docker/submission.jsonl --questions data/demo/questions.jsonl
+      - run: mkdir -p outputs/docker/first outputs/docker/second
+      - run: docker run --rm --network none -v "$PWD/data/demo:/data:ro" -v "$PWD/outputs/docker/first:/result" datamate-starter
+      - run: docker run --rm --network none -v "$PWD/data/demo:/data:ro" -v "$PWD/outputs/docker/second:/result" datamate-starter
+      - run: python scripts/check_demo_output.py --data-dir data/demo outputs/docker/first outputs/docker/second

@@ -1,0 +1,15 @@
+# Reviewer theo module; bảng thành viên đầy đủ ở docs/TEAM.md.
+* @MikaelVo639
+/src/datamate/ingestion/ @tqhuy0602
+/src/datamate/semantics/ @longlth2297
+/src/datamate/agent/ @Kurosuz
+/src/datamate/evaluation/ @MikaelVo639
+/src/datamate/pipeline.py @baoduong2342007
+/src/datamate/cli.py @baoduong2342007
+/src/datamate/contracts.py @longlth2297 @Kurosuz @tqhuy0602 @baoduong2342007
+/tests/ @baoduong2342007
+/.github/ @baoduong2342007
+/scripts/ @baoduong2342007
+/configs/ @baoduong2342007
+/Dockerfile @baoduong2342007
+/predict.sh @baoduong2342007

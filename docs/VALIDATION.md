@@ -73,3 +73,13 @@ uv run datamate evaluate outputs/docker/submission.jsonl --reference data/demo/a
 Đối chiếu submission giữa hai lượt chạy cùng image/input, kiểm tra logs và thời gian.
 Job Docker trong CI dùng input read-only và `--network none`. Trạng thái build/run
 của một image phải lấy từ log CI hoặc báo cáo run, không suy ra từ việc có Dockerfile.
+
+CI chạy image hai lần vào hai thư mục output mới và xác nhận bằng:
+
+```sh
+uv run python scripts/check_demo_output.py --data-dir data/demo outputs/docker/first outputs/docker/second
+```
+
+Lệnh kiểm tra đủ ID, mốc 21 đúng/0 sai/3 abstain của fixture, đủ log khớp đáp án,
+không có lỗi thực thi, checksum input và kết quả hai lượt giống nhau. Scorer chỉ
+đọc nhãn khi kiểm tra bên ngoài container inference.
