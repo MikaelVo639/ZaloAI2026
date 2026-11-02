@@ -6,7 +6,7 @@ nếu cần mở rộng phải thống nhất với các module sử dụng trư
 
 | Việc | Phụ trách | Review | Điều kiện bàn giao |
 |---|---|---|---|
-| INT-01: cổng tích hợp | @MikaelVo639 | @baoduong2342007 | lockfile, smoke/tests Windows/Linux, hai lượt Docker offline khớp kết quả, input read-only, đủ logs; bảo vệ main nếu dịch vụ hỗ trợ |
+| INT-01: cổng tích hợp | @MikaelVo639 | @baoduong2342007 | lockfile, smoke/tests Windows/Linux, hai lượt Docker offline khớp kết quả, input read-only, đủ logs; cho phép Integration merge trực tiếp, không bật branch protection |
 | EVAL-01: baseline và phân nhóm abstain | @baoduong2342007 | @MikaelVo639 | seed 42, validation fraction 0.2, manifest/checksum cố định; correct/wrong/abstain, PA local, coverage, runtime và nhóm reason/error; artifact riêng cho mỗi run |
 | DATA-01: adapter order/detail/product | @longlth2297 | @tqhuy0602 | chọn một schema train từ nhóm lỗi adapter; đọc README; join có kiểm tra cardinality, khóa thiếu/trùng, trả một phần loại cả đơn theo luật split; đối chiếu tiền trước/sau, giữ cột/đơn vị/id nguồn; có regression |
 | SEM-01: mở rộng grammar từ lỗi train | @Kurosuz | @longlth2297 | chọn nhóm lớn trong báo cáo EVAL-01; Plan có nguồn luật, thời gian lấy as_of_date; regression ranh giới ngày và luật split thay đổi; bộ lọc chưa hỗ trợ vẫn abstain |

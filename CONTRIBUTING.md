@@ -35,19 +35,15 @@ thống nhất cách ghép trước khi sửa phần dùng đầu ra đó.
 
 ## Điều kiện ghép vào main
 
-- Smoke và tests qua; CI bắt buộc của repo qua khi chạy trên remote.
-- Một thành viên khác review code và bằng chứng tính toán liên quan.
+- Smoke và tests qua; kiểm tra kết quả CI trên remote trước khi ghép.
+- Khuyến khích một thành viên khác review code và bằng chứng tính toán liên quan.
 - Không có dữ liệu BTC, logs, credentials, weights hoặc đường dẫn cá nhân trong diff.
 - Đổi dependencies phải cập nhật `pyproject.toml`, `uv.lock`, `requirements.txt` tương ứng.
 - Không hard-code đáp án theo question/business id; không dùng public/private test để học.
 - Backend inference hoạt động offline. Lỗi thực thi dẫn đến abstain, không tự suy ra unanswerable.
 
-Người tích hợp ghép PR sau khi các điều kiện trên đạt. Việc bảo vệ nhánh và quyền
-merge được team cấu hình trên dịch vụ Git đang dùng.
-
-Cấu hình bảo vệ `main`: yêu cầu các checks `python (ubuntu-latest)`,
-`python (windows-latest)` và `docker`; nhánh phải cập nhật với main; ít nhất một
-approval và review của CODEOWNER; huỷ approval cũ khi có commit mới; giải quyết
-hết review conversations. Áp dụng cả admin; không force-push hoặc xoá main.
-`CODEOWNERS` trên nhánh mặc định mới có hiệu lực tự yêu cầu review, nên PR đầu
-tiên thêm file này cần yêu cầu reviewer thủ công. Không tự duyệt thay thành viên.
+Người tích hợp có thể merge trực tiếp sau khi kiểm tra thay đổi và kết quả CI,
+không cần chờ approval. Theo quyết định của người quản lý repo, `main` không bật
+branch protection. Các jobs `python (ubuntu-latest)`, `python (windows-latest)`
+và `docker` vẫn chạy để cung cấp bằng chứng kiểm tra. `CODEOWNERS` dùng để đề nghị
+reviewer và phối hợp theo module, không phải điều kiện bắt buộc để merge.
