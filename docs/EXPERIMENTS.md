@@ -4,6 +4,10 @@
 
 Tạo `outputs/business_split.json` bằng `split-businesses --seed 42`. Team thống nhất
 một seed/validation fraction và giữ cùng danh sách business khi so các thay đổi.
+Mốc chung cho đợt đầu: seed **42**, validation fraction **0.2**. Evaluation lưu
+manifest gốc cùng artifact baseline và chia sẻ qua kênh artifact của team. Mọi
+người đối chiếu checksum questions/rulebook và danh sách validation trước khi so
+kết quả; không tự chia lại hoặc chọn seed theo điểm.
 Manifest chứa id, seed, checksum questions/rulebook và đường dẫn tương đối tới
 `questions.jsonl`; cùng input sẽ cho cùng manifest ở các checkout khác nhau.
 
@@ -36,3 +40,19 @@ runtime khi đo tốc độ; tránh đưa tên tài khoản hoặc đường d�
 
 Kèm summary trong PR; file lớn, logs và report chi tiết được trao đổi qua kênh lưu
 artifact mà team thống nhất. PA từ scorer local không phải điểm leaderboard.
+
+## Lệnh baseline cho đợt đầu
+
+Thay `baseline-v1` bằng tên run mới, giữ nguyên seed/fraction và config khi đối chiếu:
+
+```sh
+uv run datamate split-businesses --data-dir data/raw/train --output outputs/runs/baseline-v1/business_split.json --seed 42 --validation-fraction 0.2
+uv run datamate predict --data-dir data/raw/train --output-dir outputs/runs/baseline-v1/train --config configs/baseline.toml
+uv run datamate validate outputs/runs/baseline-v1/train/submission.jsonl --questions data/raw/train/questions.jsonl
+uv run datamate evaluate outputs/runs/baseline-v1/train/submission.jsonl --reference data/raw/train/answers.jsonl --questions data/raw/train/questions.jsonl --holdout outputs/runs/baseline-v1/business_split.json --output outputs/runs/baseline-v1/train/validation_metrics.json
+```
+
+Đếm `reason` và `error` trong logs riêng biệt. Grammar/rules chưa hỗ trợ có thể
+che lỗi adapter ở bước sau, nên không suy ra một nguyên nhân duy nhất từ số
+abstain. Báo cáo toàn train và validation riêng; ghi rõ dữ liệu đã xem, không gọi
+lượt baseline đã phân tích toàn train là kiểm tra mù.

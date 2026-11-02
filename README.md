@@ -65,6 +65,7 @@ vào split có `questions.jsonl`, `rulebook.md`, `calendar.csv`, `data/<business
 | Evaluation | `evaluation/`, tests | scorer, phân tích lỗi và cổng abstain |
 
 Team phân công người phụ trách và người review theo [docs/TEAM.md](docs/TEAM.md).
+Đợt phát triển đầu tiên có điều kiện bàn giao trong [docs/BACKLOG.md](docs/BACKLOG.md).
 Contract nằm ở `src/datamate/contracts.py`. Thay đổi đầu vào/đầu ra phải được ghi
 trong PR cùng các module bị ảnh hưởng. Nhánh `main` phải luôn chạy được smoke/test.
 
