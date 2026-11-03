@@ -17,6 +17,9 @@ class Rules:
     year_to_date: bool = False          # "từ đầu năm" = 01/01 .. hết hôm nay
     calendar_quarter: bool = False      # quý = 3 tháng dương lịch tính từ tháng 1
     implicit_year: bool = False         # tháng/quý không ghi năm: năm nay, sau hôm nay thì năm trước
+    average_order: bool = False         # giá trị trung bình một đơn: làm tròn về đồng, nửa đồng lên
+    cancelled_order: bool = False       # đơn huỷ = trạng thái huỷ; đơn trả hàng không phải đơn huỷ
+    cancel_rate: bool = False           # tỉ lệ huỷ: trên mọi đơn đặt trong kỳ, mọi trạng thái, 2 số lẻ
     rule_rows: tuple[tuple[str, str], ...] = ()  # (feature, original rulebook line) used as evidence
 
     def row(self, feature: str) -> str | None:
@@ -78,5 +81,11 @@ def read_rules(rulebook: str) -> Rules:
                                 "duong lich", "3 thang", "tu thang 1"),
         implicit_year=enable("implicit_year", _find(rows, "khong ghi nam", "thang m"),
                              "nam nay neu khong sau hom nay", "nam truoc"),
+        average_order=enable("average_order", _find(rows, "trung binh mot don"),
+                             "lam tron ve dong", "nua dong lam tron len"),
+        cancelled_order=enable("cancelled_order", _find(rows, "don bi huy"),
+                               "trang thai huy", "don tra hang khong phai don huy"),
+        cancel_rate=enable("cancel_rate", _find(rows, "ti le don huy"),
+                           "moi don dat trong ky", "moi trang thai", "lam tron 2 chu so"),
         rule_rows=tuple(features.items()),
     )
