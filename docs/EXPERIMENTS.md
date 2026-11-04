@@ -1,5 +1,54 @@
 # Thí nghiệm có thể đối chiếu
 
+## Benchmark EVAL-01
+
+Chuẩn bị Python 3.12 và chạy `uv sync --locked` trong từng checkout cần đo.
+Tạo holdout một lần bằng `split-businesses --seed 42 --validation-fraction 0.2`.
+Sau đó gọi công cụ từ checkout Evaluation, các đường dẫn được tính từ thư mục
+đang gọi lệnh:
+
+```sh
+uv run datamate benchmark --checkout ../target-checkout --data-dir data/raw/train --holdout outputs/business_split.json --config configs/baseline.toml --output-dir outputs/runs/new-run
+```
+
+Thêm `--compare-to outputs/runs/previous-run` để so với run đã hoàn tất. Checkout
+đích chỉ cần có lệnh `predict`, nên cùng runner đo được revision cũ chưa có
+`benchmark`. Runner gọi trực tiếp Python trong virtualenv đích, không tải package
+hoặc model trong lúc inference. Network isolation thực tế được kiểm tra bằng
+Docker CI; lệnh benchmark tại máy không tự thay đổi cấu hình network của OS.
+
+Runner kiểm tra checksum và phân hoạch holdout trước khi chạy. `max_seconds` của
+config là giới hạn wall-clock của subprocess; quá hạn thì dừng cả cây tiến trình
+do runner tạo. Thiếu đáp án/log hoặc subprocess lỗi => `incomplete`, giữ output
+một phần và không báo điểm của một run đầy đủ. Không dùng lại thư mục output.
+
+Mỗi run có `experiment.json`, checksum input tree, bản sao config/holdout,
+`metrics.json`, CSV nhóm lỗi, `outcomes.jsonl`, `handoff.json`, `summary.md`, cùng
+`artifact.zip` và SHA256. `reference_sha256` chỉ được tính sau khi predict kết thúc.
+Input-tree checksum dùng danh sách JSON có thứ tự path POSIX + SHA256, loại
+`answers.jsonl`; không so trực tiếp checksum này với ZIP hoặc manifest tạo theo
+cách khác. So sánh yêu cầu cùng input/nhãn/holdout/config; runtime còn phụ thuộc
+hardware, Python và lockfile được ghi riêng trong metadata.
+
+`error`, `evidence.execution`, `evidence.ingestion_execution` được đọc cùng nhau;
+tổng execution error đếm số câu bị ảnh hưởng, không cộng trùng từng dấu hiệu lỗi.
+`status=ok` của worker không chứng minh adapter thành công: reason adapter vẫn
+được phân nhóm. Thiếu worker metadata ở log cũ được ghi nhận riêng. Các nhóm câu
+có tiền tố `diagnostic_` là nhãn từ khóa phục vụ phân tích, không phải Plan đã
+được agent xác nhận. Grammar có thể che lỗi ở bước sau; nhóm reason chỉ phản ánh
+bước đang chặn câu hỏi. Thời gian business lặp trong log không được cộng thành runtime.
+
+Ca AGENT-01 không cần dữ liệu BTC:
+
+```sh
+uv run python scripts/reproduce_pr9_deadlines.py --checkout ../agent-checkout
+```
+
+Hai probe mô phỏng trạng thái sau worker stop và IPC send chậm. Trường
+`reproduced=true` ghi nhận lỗi; đây không phải benchmark IPC thật. Agent bổ sung
+regression và bản sửa trong PR của mình. Evaluation giữ artifact trước/sau theo SHA,
+không tự thay đổi worker. Toàn bộ train đã được phân tích; đây không phải đánh giá mù.
+
 ## Giữ dữ liệu đánh giá cố định
 
 Tạo `outputs/business_split.json` bằng `split-businesses --seed 42`. Team thống nhất
