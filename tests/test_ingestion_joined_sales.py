@@ -7,6 +7,8 @@ from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
+from openpyxl import Workbook
+
 from datamate.ingestion.catalog import build_catalog
 from datamate.ingestion.joined_sales import (
     JoinedSalesError,
@@ -15,6 +17,7 @@ from datamate.ingestion.joined_sales import (
     RuleCapabilities,
     SourceMapping,
     load_joined_sales,
+    mapping_for_xlsx_order_detail_product,
 )
 
 
@@ -342,6 +345,195 @@ class JoinedSalesTests(unittest.TestCase):
         sales, evidence = self._load(rules=allowed)
         self.assertEqual(len(sales), 1)
         self.assertEqual(evidence["counts"]["duplicates_removed"], 1)
+
+
+class XlsxOrderDetailProductTests(unittest.TestCase):
+    ORDER_HEADER = ["Mã hóa đơn", "Thời gian", "Tổng tiền hàng", "Trạng thái"]
+    DETAIL_HEADER = [
+        "Mã hóa đơn", "Mã hàng", "Tên hàng", "Số lượng", "Đơn giá", "Giảm giá",
+        "Thành tiền", "Số lượng quy đổi", "Đơn vị tính", "STT",
+    ]
+    PRODUCT_HEADER = ["Mã hàng", "Tên hàng", "Nhóm hàng(3 Cấp)", "ĐVT"]
+
+    def setUp(self):
+        temp_root = Path(__file__).resolve().parent.parent / ".cache" / "tests"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(dir=temp_root)
+        self.addCleanup(self.temporary.cleanup)
+        self.data_root = Path(self.temporary.name) / "data"
+        self.rules = RuleCapabilities(
+            version="rules.xlsx.synthetic.v1",
+            status_mapping={
+                "Hoàn thành": "valid", "Đã hủy": "cancelled",
+                "Đã trả hàng": "returned", "Đang giao hàng": "valid",
+            },
+            whole_order_returns=True,
+            quantity_base_authoritative=True,
+            line_amount_after_discount=True,
+            deduplicate_identical_detail_rows=False,
+            service_fee_names=("Phí phục vụ",),
+            service_fee_counts_as_revenue=True,
+            service_fee_ranking_eligible=False,
+            evidence=("synthetic current-split rulebook",),
+        )
+
+    @staticmethod
+    def _write_xlsx(path, headers, rows):
+        book = Workbook()
+        sheet = book.active
+        sheet.title = "Sheet1"
+        sheet.append(headers)
+        for row in rows:
+            sheet.append(row)
+        book.save(path)
+        book.close()
+
+    def _write_sources(self, business="xlsx_shop", *, orders=None, details=None,
+                       products=None):
+        target = self.data_root / business
+        target.mkdir(parents=True)
+        orders = orders if orders is not None else [
+            ["O1", "01/01/2026", "25,000", "Hoàn thành"],
+            ["O2", "02/01/2026", "10,000", "Đã hủy"],
+            ["O3", "03/01/2026", "30,000", "Đã trả hàng"],
+            ["O4", "04/01/2026", "40,000", "Đang giao hàng"],
+        ]
+        details = details if details is not None else [
+            ["O1", "P1", "Nước", 2, "10,000", "0", "20,000", 48, "thùng", 1],
+            ["O1", "P2", "Bánh", 1, "10,000", "5,000", "5,000", 1, "gói", 2],
+            ["O2", "P1", "Nước", 1, "10,000", "0", "10,000", 24, "thùng", 1],
+            ["O3", "P2", "Bánh", 3, "10,000", "0", "30,000", 3, "gói", 1],
+            ["O4", "P2", "Bánh", 4, "10,000", "0", "40,000", 4, "gói", 1],
+        ]
+        products = products if products is not None else [
+            ["P1", "Nước", "Đồ uống", "chai"],
+            ["P2", "Bánh", "Đồ ăn", "gói"],
+        ]
+        self._write_xlsx(target / "orders-export.xlsx", self.ORDER_HEADER, orders)
+        self._write_xlsx(target / "details-export.xlsx", self.DETAIL_HEADER, details)
+        self._write_xlsx(target / "products-export.xlsx", self.PRODUCT_HEADER, products)
+        (target / "README.md").write_text(
+            "\n".join((
+                "- **Mã hóa đơn**: mã đơn",
+                "- **Thành tiền**: thành tiền sau giảm",
+                "- **STT**: số thứ tự dòng trong đơn",
+                "- **Số lượng quy đổi**: số lượng đã đổi ra đơn vị cơ bản",
+                "- **ĐVT**: đơn vị cơ bản",
+            )),
+            encoding="utf-8",
+        )
+        return target
+
+    def _load(self, business="xlsx_shop", rules=None):
+        catalog = build_catalog(self.data_root, business)
+        mapping = mapping_for_xlsx_order_detail_product(catalog)
+        return load_joined_sales(
+            catalog, mapping=mapping, rule_capabilities=rules or self.rules,
+        )
+
+    def test_valid_join_comma_thousands_dates_units_statuses_and_hashes(self):
+        target = self._write_sources()
+        before = {path.name: source_hash(path) for path in target.glob("*.xlsx")}
+
+        sales, evidence = self._load()
+
+        self.assertEqual({path.name: source_hash(path) for path in target.glob("*.xlsx")},
+                         before)
+        self.assertEqual(len(sales), 5)
+        self.assertEqual([sale.amount for sale in sales], [
+            Decimal("20000"), Decimal("5000"), Decimal("10000"),
+            Decimal("30000"), Decimal("40000"),
+        ])
+        self.assertEqual([sale.quantity_base for sale in sales], [
+            Decimal("48"), Decimal("1"), Decimal("24"), Decimal("3"), Decimal("4"),
+        ])
+        self.assertEqual([sale.status for sale in sales],
+                         ["valid", "valid", "cancelled", "returned", "valid"])
+        self.assertEqual(sales[0].day.isoformat(), "2026-01-01")
+        self.assertEqual(evidence["mapping"]["version"],
+                         "xlsx_order_detail_product.v1")
+        self.assertEqual(evidence["mapping"]["numeric_policy"]
+                         ["thousands_separator"], ",")
+        self.assertTrue(all("::Sheet1" in item["source"]
+                            for item in evidence["sources"]))
+        self.assertEqual(evidence["join"]["join_expansion"], 0)
+        self.assertEqual(evidence["parsing"]["amount_parsed"], 5)
+        self.assertEqual(evidence["parsing"]["amount_rejected"], 0)
+        self.assertEqual(evidence["amount_reconciliation"]["matches"], 5)
+        self.assertEqual(evidence["amount_reconciliation"]
+                         ["header_total_differs_from_line_sum"], 0)
+        json.dumps(evidence, ensure_ascii=False, allow_nan=False)
+
+    def test_new_schema_missing_duplicate_orphan_and_fanout_are_rejected(self):
+        cases = (
+            ("missing", None,
+             [["O1", "P1", "Nước", 2, "10,000", "0", "20,000", 48,
+               "thùng", None]], None, "MISSING_KEY"),
+            ("duplicate_detail", None, [
+                ["O1", "P1", "Nước", 2, "10,000", "0", "20,000", 48, "thùng", 1],
+                ["O1", "P2", "Bánh", 1, "5,000", "0", "5,000", 1, "gói", 1],
+            ], None, "DUPLICATE_DETAIL_KEY"),
+            ("orphan", None,
+             [["MISSING", "P1", "Nước", 2, "10,000", "0", "20,000", 48,
+               "thùng", 1]], None, "ORPHAN_FK"),
+            ("fanout", None,
+             [["O1", "P1", "Nước", 2, "10,000", "0", "20,000", 48,
+               "thùng", 1]], [
+                   ["P1", "Nước", "Đồ uống", "chai"],
+                   ["P1", "Nước khác", "Đồ uống", "chai"],
+             ], "DUPLICATE_PARENT_KEY"),
+        )
+        for business, orders, details, products, code in cases:
+            with self.subTest(business=business):
+                self._write_sources(
+                    business, orders=orders, details=details, products=products,
+                )
+                with self.assertRaises(JoinedSalesError) as caught:
+                    self._load(business)
+                self.assertEqual(caught.exception.code, code)
+
+    def test_new_schema_unknown_status_and_incompatible_rules_are_rejected(self):
+        self._write_sources(
+            "unknown_status",
+            orders=[["O1", "01/01/2026", "20,000", "Chờ xác nhận"]],
+            details=[["O1", "P1", "Nước", 2, "10,000", "0", "20,000", 48,
+                      "thùng", 1]],
+        )
+        with self.assertRaises(JoinedSalesError) as caught:
+            self._load("unknown_status")
+        self.assertEqual(caught.exception.code, "UNKNOWN_STATUS")
+
+        self._write_sources(
+            "return_without_rule",
+            orders=[["O1", "01/01/2026", "20,000", "Đã trả hàng"]],
+            details=[["O1", "P1", "Nước", 2, "10,000", "0", "20,000", 48,
+                      "thùng", 1]],
+        )
+        incompatible = replace(
+            self.rules, whole_order_returns=False,
+            evidence=("current split does not define whole-order returns",),
+        )
+        with self.assertRaises(JoinedSalesError) as caught:
+            self._load("return_without_rule", incompatible)
+        self.assertEqual(caught.exception.code, "RULE_CAPABILITY_MISSING")
+
+    def test_new_schema_mapping_requires_readme_evidence_and_is_unambiguous(self):
+        target = self._write_sources("ambiguous")
+        self._write_xlsx(
+            target / "second-orders.xlsx", self.ORDER_HEADER,
+            [["O9", "01/01/2026", "1,000", "Hoàn thành"]],
+        )
+        catalog = build_catalog(self.data_root, "ambiguous")
+        with self.assertRaises(JoinedSalesError) as caught:
+            mapping_for_xlsx_order_detail_product(catalog)
+        self.assertEqual(caught.exception.code, "MAPPING_AMBIGUOUS")
+
+        target = self._write_sources("missing_evidence")
+        (target / "README.md").write_text("undocumented export", encoding="utf-8")
+        catalog = build_catalog(self.data_root, "missing_evidence")
+        with self.assertRaises(JoinedSalesError) as caught:
+            mapping_for_xlsx_order_detail_product(catalog)
+        self.assertEqual(caught.exception.code, "MAPPING_EVIDENCE_MISSING")
 
 
 if __name__ == "__main__":

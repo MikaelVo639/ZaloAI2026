@@ -55,6 +55,7 @@ class MappingSpec:
     products: SourceMapping
     numeric_policy: NumericPolicy
     evidence: tuple[str, ...]
+    integral_line_key: bool = False
 
 
 @dataclass(frozen=True)
@@ -80,12 +81,17 @@ def _missing(value: Any) -> bool:
 
 
 def _identifier(value: Any, *, field_name: str, source: str,
-                row_ordinal: int) -> str:
+                row_ordinal: int, allow_integral_numeric: bool = False) -> str:
     if _missing(value):
         _fail(
             "MISSING_KEY", "Required identifier is missing",
             source=source, field=field_name, row_ordinal=row_ordinal,
         )
+    if allow_integral_numeric and not isinstance(value, bool) \
+            and isinstance(value, (int, float, Decimal)):
+        numeric = Decimal(str(value))
+        if numeric.is_finite() and numeric == numeric.to_integral_value():
+            return format(numeric, ".0f")
     if not isinstance(value, str):
         _fail(
             "IDENTIFIER_POLICY_REQUIRED", "Numeric identifiers require an explicit policy",
@@ -200,10 +206,14 @@ def _select_table(catalog: Catalog, source_mapping: SourceMapping,
             source=source_mapping.source,
         )
     normalized_source = source_mapping.source.replace("\\", "/").lstrip("/")
+    source_path, separator, source_table = normalized_source.rpartition("::")
+    if not separator:
+        source_path, source_table = normalized_source, ""
     matches = []
     for table in catalog.tables:
         path = table.path.as_posix()
-        if path == normalized_source or path.endswith("/" + normalized_source):
+        path_matches = path == source_path or path.endswith("/" + source_path)
+        if path_matches and (not source_table or table.name == source_table):
             matches.append(table)
     if len(matches) != 1:
         _fail(
@@ -219,6 +229,105 @@ def _select_table(catalog: Catalog, source_mapping: SourceMapping,
             source=source_mapping.source, missing_columns=missing_columns,
         )
     return table
+
+
+def _readme_evidence(catalog: Catalog, *tokens: str) -> str:
+    for line in catalog.readme.splitlines():
+        normalized = fold(line)
+        if all(token in normalized for token in tokens):
+            return line.strip()
+    _fail(
+        "MAPPING_EVIDENCE_MISSING",
+        "The current business README does not document a required schema meaning",
+        required_tokens=list(tokens),
+    )
+
+
+def _single_structural_table(catalog: Catalog, role: str,
+                             required_columns: set[str]) -> Table:
+    matches = [
+        table for table in catalog.tables
+        if table.path.suffix.lower() == ".xlsx" and required_columns <= set(table.columns)
+    ]
+    if len(matches) != 1:
+        _fail(
+            "MAPPING_AMBIGUOUS" if matches else "SCHEMA_MISMATCH",
+            "Verified XLSX schema roles must each match exactly one table",
+            role=role, match_count=len(matches),
+        )
+    return matches[0]
+
+
+def mapping_for_xlsx_order_detail_product(catalog: Catalog) -> MappingSpec:
+    """Build the reviewed XLSX O/D/P mapping from structure and local README evidence.
+
+    This is intentionally one schema policy, not a general workbook guesser. The caller
+    still supplies capabilities from the current split's rulebook to ``load_joined_sales``.
+    """
+    orders = _single_structural_table(catalog, "orders", {
+        "Mã hóa đơn", "Thời gian", "Tổng tiền hàng", "Trạng thái",
+    })
+    details = _single_structural_table(catalog, "details", {
+        "Mã hóa đơn", "Mã hàng", "Tên hàng", "Số lượng", "Đơn giá", "Giảm giá",
+        "Thành tiền", "Số lượng quy đổi", "Đơn vị tính", "STT",
+    })
+    products = _single_structural_table(catalog, "products", {
+        "Mã hàng", "Tên hàng", "Nhóm hàng(3 Cấp)", "ĐVT",
+    })
+    order_evidence = _readme_evidence(catalog, "ma hoa don", "ma don")
+    amount_evidence = _readme_evidence(
+        catalog, "thanh tien", "thanh tien sau giam",
+    )
+    line_key_evidence = _readme_evidence(catalog, "stt", "so thu tu dong")
+    quantity_evidence = _readme_evidence(
+        catalog, "so luong quy doi", "don vi co ban",
+    )
+    product_evidence = _readme_evidence(catalog, "dvt", "don vi co ban")
+
+    def source(table: Table) -> str:
+        return f"{table.path.name}::{table.name}"
+
+    mapping_evidence = (
+        order_evidence, amount_evidence, line_key_evidence, quantity_evidence,
+        product_evidence,
+        "money fields use schema-scoped comma thousands and dot decimals",
+    )
+    return MappingSpec(
+        version="xlsx_order_detail_product.v1",
+        orders=SourceMapping(
+            source=source(orders),
+            fields={
+                "order_id": "Mã hóa đơn", "date": "Thời gian",
+                "status": "Trạng thái", "total_due": "Tổng tiền hàng",
+            },
+            key=("order_id",), grain="one row per invoice",
+            evidence=(order_evidence,),
+        ),
+        details=SourceMapping(
+            source=source(details),
+            fields={
+                "order_id": "Mã hóa đơn", "line_no": "STT",
+                "product_id": "Mã hàng", "amount": "Thành tiền",
+                "quantity": "Số lượng", "quantity_base": "Số lượng quy đổi",
+                "unit": "Đơn vị tính", "unit_price": "Đơn giá",
+                "discount": "Giảm giá",
+            },
+            key=("order_id", "line_no"), grain="one row per invoice line",
+            evidence=(amount_evidence, line_key_evidence, quantity_evidence),
+        ),
+        products=SourceMapping(
+            source=source(products),
+            fields={
+                "product_id": "Mã hàng", "product_name": "Tên hàng",
+                "base_unit": "ĐVT", "category": "Nhóm hàng(3 Cấp)",
+            },
+            key=("product_id",), grain="one row per product",
+            evidence=(product_evidence,),
+        ),
+        numeric_policy=NumericPolicy(decimal_separator=".", thousands_separator=","),
+        evidence=mapping_evidence,
+        integral_line_key=True,
+    )
 
 
 def _mapping_payload(mapping: MappingSpec) -> dict[str, Any]:
@@ -253,6 +362,7 @@ def _mapping_payload(mapping: MappingSpec) -> dict[str, Any]:
             "amount_decimal_separator": mapping.numeric_policy.amount_decimal_separator,
             "amount_thousands_separator": mapping.numeric_policy.amount_thousands_separator,
         },
+        "integral_line_key": mapping.integral_line_key,
         "evidence": list(mapping.evidence),
     }
 
@@ -303,7 +413,7 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
     _validate_capabilities(mapping, rule_capabilities)
     orders_table = _select_table(
         catalog, mapping.orders,
-        {"order_id", "date", "status", "total_due", "payment_method"},
+        {"order_id", "date", "status", "total_due"},
     )
     details_table = _select_table(
         catalog, mapping.details,
@@ -365,7 +475,10 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             "status": canonical_status,
             "total_due": total_due,
             "row_ordinal": row_ordinal,
-            "payment_method": raw.get(mapping.orders.fields["payment_method"]),
+            "payment_method": (
+                raw.get(mapping.orders.fields["payment_method"])
+                if "payment_method" in mapping.orders.fields else None
+            ),
         }
         status_counts[canonical_status] += 1
 
@@ -406,6 +519,7 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             line_no = _identifier(
                 raw.get(mapping.details.fields["line_no"]), field_name="line_no",
                 source=mapping.details.source, row_ordinal=row_ordinal,
+                allow_integral_numeric=mapping.integral_line_key,
             )
             product_id = _identifier(
                 raw.get(mapping.details.fields["product_id"]), field_name="product_id",
