@@ -156,6 +156,26 @@ class BenchmarkTests(unittest.TestCase):
             if proc.exists():
                 self.assertEqual(proc.read_text().split()[2], "Z")
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows inherited handle semantics")
+    def test_waits_for_log_handle_release_and_bounds_wait(self):
+        import threading
+
+        from datamate.evaluation.benchmark import wait_windows_log_release
+
+        path = self.root / "locked log"
+        writer = path.open("wb")
+        try:
+            with self.assertRaises(TimeoutError):
+                wait_windows_log_release([path], timeout=0.03)
+            timer = threading.Timer(0.1, writer.close)
+            timer.start()
+            self.addCleanup(timer.join)
+            wait_windows_log_release([path])
+            self.assertTrue(writer.closed)
+            path.unlink()  # No sharing violation immediately after the wait.
+        finally:
+            writer.close()
+
     def test_runner_uses_target_python_and_reads_labels_only_after_exit(self):
         checkout = self.root / "checkout with spaces"
         python = (

@@ -121,6 +121,43 @@ def topic(log):
     return "diagnostic_other"
 
 
+def wait_windows_log_release(paths, timeout=5):
+    """Wait for asynchronous termination to close inherited Windows log handles."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    deadline = time.monotonic() + timeout
+    pending = list(paths)
+    while pending:
+        for path in pending[:]:
+            # No sharing: succeeds only after every inherited writer has closed.
+            handle = create(str(path.resolve()), 0x80000000, 0, None, 3, 0, None)
+            if handle != ctypes.c_void_p(-1).value:
+                kernel.CloseHandle(handle)
+                pending.remove(path)
+            else:
+                error = ctypes.get_last_error()
+                if error not in (32, 33):
+                    raise ctypes.WinError(error)
+        if pending:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Timed-out process tree still holds benchmark log files")
+            time.sleep(0.01)
+
+
 def run_process(command, cwd, timeout, stdout, stderr):
     options = {"start_new_session": True} if os.name != "nt" else {}
     environment = dict(os.environ)
@@ -136,7 +173,7 @@ def run_process(command, cwd, timeout, stdout, stderr):
             err.write(str(exc).encode("utf-8"))
             return 127, False
         try:
-            return process.wait(timeout=timeout), False
+            result = process.wait(timeout=timeout), False
         except subprocess.TimeoutExpired:
             if os.name == "nt":
                 subprocess.run(
@@ -148,7 +185,12 @@ def run_process(command, cwd, timeout, stdout, stderr):
             else:
                 os.killpg(process.pid, signal.SIGKILL)
             process.wait()
-            return process.returncode, True
+            result = process.returncode, True
+    # Close our own streams first. taskkill returning and the parent exiting do
+    # not guarantee that descendants have finished closing inherited handles.
+    if os.name == "nt" and result[1]:
+        wait_windows_log_release((stdout, stderr))
+    return result
 
 
 def source_metadata(checkout):
