@@ -30,6 +30,40 @@ def order_count(selected: list[Sale]) -> int:
     return len({s.order_id for s in selected})
 
 
+def select_period(sales: list[Sale], start: date, end: date) -> list[Sale]:
+    """All rows ordered in the period, any status (needed for cancellation rates)."""
+    return [s for s in sales if start <= s.day <= end]
+
+
+def cancelled_orders(rows: list[Sale]) -> int:
+    # Order status is per order: the adapter rejects conflicting states for one order.
+    return len({s.order_id for s in rows if s.status == "cancelled"})
+
+
+def cancel_rate(rows: list[Sale]) -> float | None:
+    orders = {s.order_id: s.status for s in rows}
+    if not orders:
+        return None
+    cancelled = sum(1 for status in orders.values() if status == "cancelled")
+    rate = Decimal(cancelled) * 100 / Decimal(len(orders))
+    return float(rate.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def average_order_value(selected: list[Sale]) -> int | None:
+    orders = {s.order_id for s in selected}
+    if not orders:
+        return None
+    total = sum((s.amount for s in selected), Decimal(0))
+    return int((total / len(orders)).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
+def daily_revenue(selected: list[Sale]) -> list[tuple[date, Decimal]]:
+    by_day: dict[date, Decimal] = defaultdict(Decimal)
+    for sale in selected:
+        by_day[sale.day] += sale.amount
+    return sorted(by_day.items(), key=lambda item: (-item[1], item[0]))
+
+
 def product_ranking(selected: list[Sale]) -> list[tuple[str, str, Decimal]]:
     quantities: dict[str, Decimal] = defaultdict(Decimal)
     names: dict[str, str] = {}
@@ -77,7 +111,14 @@ def prepare_sales(cache: dict[str, Any], catalog: Catalog) -> dict[str, Any]:
             "data_last_day": max(days).isoformat() if days else None}
 
 
+INTENTS = frozenset({"revenue", "order_count", "top_products", "average_order",
+                     "cancel_count", "cancel_rate", "best_day"})
+
+
 def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan) -> Candidate:
+    if plan.intent not in INTENTS:
+        # A Plan intent this backend cannot compute must not fall through to a ranking.
+        return Candidate(reason=f"Intent {plan.intent!r} not supported by baseline agent")
     prepared = prepare_sales(cache, catalog)
     if not prepared["ok"]:
         return Candidate(reason=prepared["reason"])
@@ -104,9 +145,26 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan) -> Candidat
                                  evidence=evidence)
         return Candidate(reason="No sales in period; business coverage is not established",
                          evidence=evidence)
+    window = f"date.fromisoformat({plan.start.isoformat()!r}), date.fromisoformat({plan.end.isoformat()!r})"
+    if plan.intent in ("cancel_count", "cancel_rate"):
+        rows = select_period(sales, plan.start, plan.end)
+        evidence["inputs"].update(period_rows=len(rows),
+                                  period_orders=len({s.order_id for s in rows}))
+        if plan.intent == "cancel_count":
+            value = cancelled_orders(rows)
+            evidence.update(calculation="count distinct order_id with status cancelled",
+                            code=_code(f"cancelled_orders(select_period(sales, {window}))",
+                                       select_period, cancelled_orders), result=value)
+            return Candidate("number", value, 1.0, "", evidence)
+        rate = cancel_rate(rows)
+        evidence.update(calculation="100 * cancelled / all orders (any status); 2 decimals half up",
+                        code=_code(f"cancel_rate(select_period(sales, {window}))",
+                                   select_period, cancel_rate), result=rate)
+        if rate is None:
+            return Candidate(reason="No orders in period; rate undefined", evidence=evidence)
+        return Candidate("percent", rate, 1.0, "", evidence)
     selected = select_valid(sales, plan.start, plan.end)
-    selection = (f"select_valid(sales, date.fromisoformat({plan.start.isoformat()!r}), "
-                 f"date.fromisoformat({plan.end.isoformat()!r}))")
+    selection = f"select_valid(sales, {window})"
     evidence["selected_rows"] = len(selected)
     evidence["inputs"].update(selected_rows=len(selected),
                               selected_orders=len({s.order_id for s in selected}))
@@ -121,6 +179,30 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan) -> Candidat
                         code=_code(f"order_count({selection})", select_valid, order_count),
                         result=value)
         return Candidate("number", value, 1.0, "", evidence)
+    if plan.intent == "average_order":
+        value = average_order_value(selected)
+        evidence.update(calculation="revenue / valid orders; round VND half up",
+                        code=_code(f"average_order_value({selection})",
+                                   select_valid, average_order_value), result=value)
+        if value is None:
+            return Candidate(reason="No valid orders in period; average undefined",
+                             evidence=evidence)
+        return Candidate("number", value, 1.0, "", evidence)
+    if plan.intent == "best_day":
+        days_ranked = daily_revenue(selected)
+        evidence.update(calculation="argmax of daily revenue on valid whole orders",
+                        code=_code(f"daily_revenue({selection})[0]", select_valid, daily_revenue),
+                        # Two rows show whether the top is a tie.
+                        ranking=[{"day": d.isoformat(), "revenue": str(v)} for d, v in days_ranked[:2]])
+        if not days_ranked:
+            return Candidate(reason="No valid sales in period", evidence=evidence)
+        if len(days_ranked) > 1 and days_ranked[1][1] == days_ranked[0][1]:
+            return Candidate(reason="Tie for the best day; rulebook gives no date tie-break",
+                             evidence=evidence)
+        evidence["result"] = days_ranked[0][0].isoformat()
+        return Candidate("date", evidence["result"], 1.0, "", evidence)
+    if plan.intent != "top_products":  # unreachable while INTENTS is checked; keep explicit
+        return Candidate(reason=f"Intent {plan.intent!r} not supported", evidence=evidence)
     if not selected or any(s.quantity_base is None or not s.product_id or not s.product_name
                            for s in selected):
         return Candidate(reason="Ranking needs explicit base quantities and product ids/names",
