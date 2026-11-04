@@ -23,7 +23,7 @@ class BenchmarkTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="eval paths with spaces ")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.data = self.root / "data"
         create_demo(self.data)
         self.manifest = business_holdout(self.data, self.root / "holdout.json")
