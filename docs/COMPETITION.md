@@ -2,6 +2,7 @@
 
 Nguồn: [DataMate portal, các mục Data / Evaluation / Rule / Submission Guidance](https://challenge.zalo.ai/portal/datamate).
 Mốc đối chiếu nội dung: 29/10/2026. Portal và guideline BTC là nguồn chuẩn khi có cập nhật.
+Cập nhật riêng mục Rule ngày 04/11/2026: hạn phát hành weights là trước 26/10/2026.
 
 - Input mỗi split: `data/<business_id>/`, README từng business, `questions.jsonl`,
   `rulebook.md`, `calendar.csv`. Train thêm `answers.jsonl` với alias.
@@ -14,7 +15,7 @@ Mốc đối chiếu nội dung: 29/10/2026. Portal và guideline BTC là nguồ
   dòng là tập không có thứ tự. Local scorer trong repo chưa phải scorer BTC.
 - Phải đọc rulebook của chính split đang chạy. Không lấy bản train làm mặc định cho test.
 - Inference hoàn toàn offline trong Docker, networking bị tắt, không gọi API, không tải weights.
-- Model phải phát hành weights công khai **trước 01/10/2026**, licence cho phép sử dụng.
+- Model phải phát hành weights công khai **trước 26/10/2026**, licence cho phép sử dụng.
   Tổng tham số của tất cả model dùng trong inference <= **15 tỷ**, kể cả model dùng lần lượt;
   MoE tính toàn bộ tham số. Khai báo model trong README. Starter hiện dùng 0 model.
 - Không có người can thiệp, không hard-code logic theo question/business id; không lấy đáp
