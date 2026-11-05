@@ -18,7 +18,7 @@ from datamate.ingestion.joined_sales import (
     load_joined_sales,
     mapping_for_xlsx_order_detail_product,
 )
-from datamate.ingestion.sales import Sale, load_sales
+from datamate.ingestion.sales import STATUS_ALIASES, Sale, load_sales
 from datamate.semantics.text import fold
 
 
@@ -67,6 +67,24 @@ def _required_rule(rows: list[tuple[str, str, str]], key: str,
     )
 
 
+def _status_rule(rows: list[tuple[str, str, str]]) -> str:
+    return _required_rule(
+        rows, "trang thai don", "hoan thanh", "huy", "tra hang", "dang giao",
+    )
+
+
+def _flat_status_rule(rows: list[tuple[str, str, str]]) -> str:
+    """Require either the canonical states or an equivalent revenue validity rule."""
+    try:
+        return _status_rule(rows)
+    except JoinedSalesError:
+        # A rule saying every non-cancelled, non-returned order counts also covers
+        # completed and in-flight orders without inventing aliases for source labels.
+        return _required_rule(
+            rows, "don tinh vao doanh thu", "khong huy", "khong tra",
+        )
+
+
 def _joined_rules(rulebook: str) -> RuleCapabilities:
     rows = _rule_rows(rulebook)
     validity = _required_rule(
@@ -83,15 +101,10 @@ def _joined_rules(rulebook: str) -> RuleCapabilities:
     duplicates = _required_rule(
         rows, "hai dong cua cung mot don giong nhau o moi o", "tinh mot lan",
     )
-    statuses = _required_rule(
-        rows, "trang thai don", "hoan thanh", "huy", "tra hang", "dang giao",
-    )
+    statuses = _status_rule(rows)
     return RuleCapabilities(
         version="joined_rules.current_split.v1",
-        status_mapping={
-            "completed": "valid", "cancelled": "cancelled",
-            "returned": "returned", "shipping": "valid",
-        },
+        status_mapping=STATUS_ALIASES,
         whole_order_returns=True,
         quantity_base_authoritative=True,
         line_amount_after_discount=True,
@@ -209,7 +222,11 @@ def load_business_sales(
     """
     mapping = _joined_mapping(catalog)
     if mapping is None:
-        sales, evidence = load_sales(catalog)
+        status_evidence = _flat_status_rule(_rule_rows(rulebook))
+        sales, evidence = load_sales(
+            catalog, status_mapping=STATUS_ALIASES,
+            status_evidence=(status_evidence,),
+        )
         return sales, {**evidence, "adapter": "flat_sales"}, None
     rules = _joined_rules(rulebook)
     sales, evidence = load_joined_sales(

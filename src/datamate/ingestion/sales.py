@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Mapping
 
 from datamate.contracts import Catalog
 from datamate.ingestion.catalog import iter_rows
@@ -20,7 +20,7 @@ ALIASES = {
     "product_name": ("product_name", "Tên hàng", "Tên hàng hóa", "Tên sản phẩm", "Sản phẩm"),
     "quantity_base": ("quantity_base", "Số lượng quy đổi", "SL quy đổi"),
 }
-STATUSES = {
+STATUS_ALIASES = {
     "completed": "valid", "hoan thanh": "valid", "da hoan thanh": "valid", "ok": "valid",
     "dang giao": "valid", "dang giao hang": "valid", "shipping": "valid",
     "cancelled": "cancelled", "canceled": "cancelled", "huy": "cancelled", "da huy": "cancelled",
@@ -28,6 +28,8 @@ STATUSES = {
     "returned": "returned", "tra hang": "returned", "da tra hang": "returned",
     "da hoan hang": "returned",
 }
+# Backward-compatible name for callers that imported the original constant.
+STATUSES = STATUS_ALIASES
 
 
 @dataclass(frozen=True)
@@ -104,7 +106,15 @@ def column_mapping(columns: tuple[str, ...]) -> dict[str, str]:
     return mapping
 
 
-def load_sales(catalog: Catalog) -> tuple[list[Sale], dict[str, Any]]:
+def load_sales(catalog: Catalog, *, status_mapping: Mapping[str, str] | None = None,
+               status_evidence: tuple[str, ...] = ()) -> tuple[list[Sale], dict[str, Any]]:
+    statuses = {
+        fold(raw): canonical
+        for raw, canonical in (status_mapping or STATUS_ALIASES).items()
+    }
+    invalid_states = sorted(set(statuses.values()) - {"valid", "cancelled", "returned"})
+    if invalid_states:
+        raise ValueError(f"Unsupported canonical status states: {invalid_states}")
     tables = []
     for table in catalog.tables:
         mapping = column_mapping(table.columns)
@@ -141,7 +151,7 @@ def load_sales(catalog: Catalog) -> tuple[list[Sale], dict[str, Any]]:
                 continue
             seen.add(fingerprint)
             day = parse_date(row["date"], table.name)
-            status = STATUSES.get(fold(row["status"]))
+            status = statuses.get(fold(row["status"]))
             if status is None:
                 raise ValueError(f"Unknown status {row['status']!r} in {table.key}")
             if order_id in order_states and order_states[order_id] != (day, status):
@@ -154,5 +164,12 @@ def load_sales(catalog: Catalog) -> tuple[list[Sale], dict[str, Any]]:
                 parse_number(row["quantity_base"])
                 if row.get("quantity_base") not in (None, "") else None,
             ))
-    return sales, {"tables": [t.key for t, _ in tables], "raw_rows": raw_count,
-                   "sales_rows": len(sales), "duplicates_removed": raw_count - len(sales)}
+    return sales, {
+        "tables": [t.key for t, _ in tables], "raw_rows": raw_count,
+        "sales_rows": len(sales), "duplicates_removed": raw_count - len(sales),
+        "status_policy": {
+            "version": "rulebook_status_aliases.v1" if status_evidence else "legacy_default.v1",
+            "canonical_states": sorted(set(statuses.values())),
+            "evidence": list(status_evidence),
+        },
+    }

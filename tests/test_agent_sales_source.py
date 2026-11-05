@@ -164,6 +164,51 @@ class AgentSalesSourceTests(unittest.TestCase):
         self.assertIn("NUMERIC_AMBIGUOUS", prepared["reason"])
         self.assertNotIn("answer", prepared)
 
+    def test_flat_status_aliases_are_gated_by_current_rulebook(self):
+        target = self.data_root / "statuses"
+        self._write_csv(
+            target / "sales.csv",
+            ["order_id", "order_date", "status", "line_amount", "product_name"],
+            [
+                ["O1", "2026-01-01", "Hoàn thành", "10", "A"],
+                ["O2", "2026-01-01", "Đã hủy", "20", "B"],
+                ["O3", "2026-01-01", "Đã trả hàng", "30", "C"],
+                ["O4", "2026-01-01", "Đang giao hàng", "40", "D"],
+            ],
+        )
+        catalog = build_catalog(self.data_root, "statuses")
+        sales, evidence, _ = source_module.load_business_sales(catalog, RULEBOOK)
+        self.assertEqual([sale.status for sale in sales],
+                         ["valid", "cancelled", "returned", "valid"])
+        self.assertEqual(evidence["status_policy"]["version"],
+                         "rulebook_status_aliases.v1")
+        self.assertIn("Trạng thái đơn", evidence["status_policy"]["evidence"][0])
+
+        changed = RULEBOOK.replace(
+            "| Trạng thái đơn | mỗi đơn là hoàn thành, huỷ, trả hàng hoặc đang giao |\n",
+            "",
+        ).replace(
+            "| Đơn tính vào doanh thu | đơn không huỷ và không trả hàng; có trả thì bỏ cả đơn. Đơn đang giao vẫn tính |\n",
+            "| Đơn tính vào doanh thu | mọi trạng thái đều tính |\n",
+        )
+        with self.assertRaises(JoinedSalesError) as caught:
+            source_module.load_business_sales(catalog, changed)
+        self.assertEqual(caught.exception.code, "RULE_CAPABILITY_MISSING")
+
+    def test_unreviewed_status_remains_an_ingestion_abstain(self):
+        target = self.data_root / "unknown-status"
+        self._write_csv(
+            target / "sales.csv",
+            ["order_id", "order_date", "status", "line_amount", "product_name"],
+            [["O1", "2026-01-01", "Thành công", "10", "A"]],
+        )
+        prepared = compute.prepare_sales(
+            {}, build_catalog(self.data_root, "unknown-status"), RULEBOOK,
+        )
+        self.assertFalse(prepared["ok"])
+        self.assertIn("Unknown status 'Thành công'", prepared["reason"])
+        self.assertNotIn("answer", prepared)
+
 
 if __name__ == "__main__":
     unittest.main()
