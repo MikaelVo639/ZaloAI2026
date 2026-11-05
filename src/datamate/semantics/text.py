@@ -17,6 +17,7 @@ GRAMMAR_WORDS = frozenset("""
     mat may minh moi mon mot nam nao nay nhat nhieu nhiu nhung pham phan quan qua quy roi
     san so tai tam thai thang theo thu ti tien toi tong tram trang tren trong truoc trung
     tu tuan ty vay ve xem xet
+    cung doi giam hay hon kem ke ky liet lien ngoai tang top truong voi vs
 """.split())
 # Whole-token abbreviations and misspellings seen in everyday questions.
 ABBREVIATIONS = {
@@ -28,6 +29,8 @@ _TONE_KEYS = "sfrxj"
 
 def _untelex(token: str) -> str:
     """Decode Telex keystrokes left in a folded token: dd, aa/ee/oo, aw/ow/uw, tone key."""
+    if "/" in token and not any(c.isdigit() for c in token):
+        return "/".join(_untelex(part) for part in token.split("/"))  # "tawng/giamr"
     if len(token) < 3 or not token.isalpha():
         return token
     decoded = re.sub(r"(?<=[aou])w", "", re.sub(r"([aeo])\1", r"\1", token.replace("dd", "d")))
@@ -46,6 +49,7 @@ def normalize_question(value: object) -> str:
     tokens = [_untelex(token) for token in fold(str(value).replace("%", " phần trăm ")).split()]
     text = " ".join(ABBREVIATIONS.get(token, token) for token in tokens)
     text = re.sub(r"\bbua (nay|qua)\b", r"hom \1", text)
+    text = re.sub(r"\bth (truoc|roi|nay|lien truoc)\b", r"thang \1", text)  # "th trước"
     # "tháng 8 năm 2025" / "quý 2 năm 2026" -> "tháng 8/2025" / "quý 2/2026"
     text = re.sub(r"\b(thang|quy) (\d{1,2}) nam (\d{4})\b", r"\1 \2/\3", text)
     return text

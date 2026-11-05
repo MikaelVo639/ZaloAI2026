@@ -20,6 +20,9 @@ class Rules:
     average_order: bool = False         # giá trị trung bình một đơn: làm tròn về đồng, nửa đồng lên
     cancelled_order: bool = False       # đơn huỷ = trạng thái huỷ; đơn trả hàng không phải đơn huỷ
     cancel_rate: bool = False           # tỉ lệ huỷ: trên mọi đơn đặt trong kỳ, mọi trạng thái, 2 số lẻ
+    change_percent: bool = False        # % thay đổi so với kỳ trước, giảm ra số âm
+    same_days_last_month: bool = False  # tháng này so với tháng trước: cùng số ngày
+    product_names: bool = False         # tên gọi cùng chỉ một thứ là một; file có mã thì theo mã
     rule_rows: tuple[tuple[str, str], ...] = ()  # (feature, original rulebook line) used as evidence
 
     def row(self, feature: str) -> str | None:
@@ -87,5 +90,11 @@ def read_rules(rulebook: str) -> Rules:
                                "trang thai huy", "don tra hang khong phai don huy"),
         cancel_rate=enable("cancel_rate", _find(rows, "ti le don huy"),
                            "moi don dat trong ky", "moi trang thai", "lam tron 2 chu so"),
+        change_percent=enable("change_percent", _find(rows, "phan tram thay doi"),
+                              "so voi ky truoc", "so am"),
+        same_days_last_month=enable("same_days_last_month", _find(rows, "thang nay"),
+                                    "so voi thang truoc", "cung so ngay"),
+        product_names=enable("product_names", _find(rows, "ten goi"),
+                             "cung chi mot thu", "theo ma"),
         rule_rows=tuple(features.items()),
     )

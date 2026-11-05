@@ -26,6 +26,7 @@ class BaselineAgent:
     # Worker tasks; module-level functions so the spawn worker can import them.
     prepare = staticmethod(tasks.prepare_sales)
     compute = staticmethod(tasks.answer_plan)
+    names = staticmethod(tasks.product_names)
 
     def __init__(self, question_timeout: float = QUESTION_TIMEOUT_SECONDS,
                  ingestion_timeout: float = INGESTION_TIMEOUT_SECONDS) -> None:
@@ -45,6 +46,11 @@ class BaselineAgent:
             context.cache["rules"] = read_rules(context.split.rulebook)
         plan = plan_question(question, context.cache["rules"])
         if plan is None:
+            # Retry with this business's product names/codes ("doanh thu <mặt hàng> …").
+            names = self._product_names(context)
+            if names:
+                plan = plan_question(question, context.cache["rules"], names)
+        if plan is None:
             return Candidate(reason="Question or split rules outside baseline grammar")
         planned = {"intent": plan.intent, "start": plan.start.isoformat(),
                    "end": plan.end.isoformat(), "rules": plan.evidence}
@@ -60,6 +66,19 @@ class BaselineAgent:
         candidate: Candidate = result.value
         candidate.evidence["execution"] = result.execution()
         return candidate
+
+    def _product_names(self, context: BusinessContext) -> list[str]:
+        """Names/codes read once per business in the worker; [] when the data cannot load."""
+        if "product_names" not in context.cache:
+            names: list[str] = []
+            if self._prepare(context) is None:
+                result = self.worker.run(self.names, self.question_timeout,
+                                         catalog=context.catalog,
+                                         rulebook=context.split.rulebook)
+                if result.ok:
+                    names = result.value
+            context.cache["product_names"] = names
+        return context.cache["product_names"]
 
     def _prepare(self, context: BusinessContext) -> Candidate | None:
         """Load the business in the worker once; never retry a failed business."""
