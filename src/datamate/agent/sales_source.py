@@ -16,6 +16,7 @@ from datamate.ingestion.joined_sales import (
     RuleCapabilities,
     SourceMapping,
     load_joined_sales,
+    mapping_for_xlsx_order_detail_product,
 )
 from datamate.ingestion.sales import Sale, load_sales
 from datamate.semantics.text import fold
@@ -36,6 +37,12 @@ _JOIN_ANCHORS = {
     "orders": {"Số phiếu", "Tình trạng đơn"},
     "details": {"Số CT", "TT dòng", "Mã hàng bán"},
     "products": {"Mã HH", "Tên sản phẩm"},
+}
+
+_XLSX_JOIN_ANCHORS = {
+    "orders": {"Mã hóa đơn", "Thời gian", "Trạng thái"},
+    "details": {"Mã hóa đơn", "Mã hàng", "Thành tiền", "STT"},
+    "products": {"Mã hàng", "ĐVT", "Nhóm hàng(3 Cấp)"},
 }
 
 
@@ -96,17 +103,11 @@ def _joined_rules(rulebook: str) -> RuleCapabilities:
     )
 
 
-def _joined_mapping(catalog: Catalog) -> MappingSpec | None:
+def _legacy_joined_mapping(catalog: Catalog) -> MappingSpec:
     candidates = {
         role: [table for table in catalog.tables if required <= set(table.columns)]
         for role, required in _JOIN_COLUMNS.items()
     }
-    detected = {
-        role: [table for table in catalog.tables if anchors <= set(table.columns)]
-        for role, anchors in _JOIN_ANCHORS.items()
-    }
-    if not any(detected.values()):
-        return None
     if any(len(candidates[role]) != 1 for role in _JOIN_COLUMNS):
         raise JoinedSalesError(
             "AMBIGUOUS_JOINED_MAPPING",
@@ -162,6 +163,34 @@ def _joined_mapping(catalog: Catalog) -> MappingSpec | None:
         ),
         evidence=structural_evidence,
     )
+
+
+def _has_joined_signature(catalog: Catalog, anchors: dict[str, set[str]]) -> bool:
+    """Return whether any table identifies a reviewed joined-schema family."""
+    return any(
+        required <= set(table.columns)
+        for required in anchors.values()
+        for table in catalog.tables
+    )
+
+
+def _joined_mapping(catalog: Catalog) -> MappingSpec | None:
+    """Select one reviewed mapping policy without falling through on partial schemas."""
+    policies = []
+    if _has_joined_signature(catalog, _JOIN_ANCHORS):
+        policies.append(("verified_csv_order_detail_product", _legacy_joined_mapping))
+    if _has_joined_signature(catalog, _XLSX_JOIN_ANCHORS):
+        policies.append(("verified_xlsx_order_detail_product",
+                         mapping_for_xlsx_order_detail_product))
+    if not policies:
+        return None
+    if len(policies) != 1:
+        raise JoinedSalesError(
+            "AMBIGUOUS_JOINED_MAPPING",
+            "Multiple reviewed joined-sales schema policies match this catalog",
+            {"matching_policies": [name for name, _ in policies]},
+        )
+    return policies[0][1](catalog)
 
 
 def _compact_joined_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
