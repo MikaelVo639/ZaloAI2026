@@ -1,12 +1,14 @@
-import re
-from collections import defaultdict
-from datetime import date
-from decimal import ROUND_HALF_UP, Decimal
+import math
+from typing import Any
 
+from datamate.agent import compute as tasks
+from datamate.agent.worker import Worker, WorkerResult
 from datamate.contracts import BusinessContext, Candidate, Question
-from datamate.ingestion.sales import load_sales
 from datamate.semantics.planner import plan_question
 from datamate.semantics.rules import read_rules
+
+QUESTION_TIMEOUT_SECONDS = 30.0
+INGESTION_TIMEOUT_SECONDS = 300.0
 
 
 class AbstainAgent:
@@ -15,61 +17,73 @@ class AbstainAgent:
 
 
 class BaselineAgent:
+    """Plans in-process (pure, fast); loads data and calculates in a deadline worker.
+
+    A timeout or worker error is an abstain: failing to compute proves nothing
+    about whether the data can answer the question.
+    """
+
+    # Worker tasks; module-level functions so the spawn worker can import them.
+    prepare = staticmethod(tasks.prepare_sales)
+    compute = staticmethod(tasks.answer_plan)
+
+    def __init__(self, question_timeout: float = QUESTION_TIMEOUT_SECONDS,
+                 ingestion_timeout: float = INGESTION_TIMEOUT_SECONDS) -> None:
+        for name, value in (("question_timeout", question_timeout),
+                            ("ingestion_timeout", ingestion_timeout)):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be a positive number of seconds")
+        self.question_timeout = question_timeout
+        self.ingestion_timeout = ingestion_timeout
+        self.worker = Worker()
+
+    def close(self) -> None:
+        self.worker.close()
+
     def answer(self, question: Question, context: BusinessContext) -> Candidate:
         if "rules" not in context.cache:
             context.cache["rules"] = read_rules(context.split.rulebook)
         plan = plan_question(question, context.cache["rules"])
         if plan is None:
             return Candidate(reason="Question or split rules outside baseline grammar")
-        if "sales" not in context.cache:
-            # Cache adapter failures as well: do not rescan a bad workbook per question.
-            try:
-                context.cache["sales"] = load_sales(context.catalog)
-            except (ValueError, OSError) as exc:
-                context.cache["sales"] = exc
-        cached = context.cache["sales"]
-        if isinstance(cached, Exception):
-            return Candidate(reason=str(cached))
-        sales, source = cached
-        evidence = {**source, "intent": plan.intent, "start": plan.start.isoformat(),
-                    "end": plan.end.isoformat(), "rules": plan.evidence}
-        if not sales or plan.start > plan.end:
-            return Candidate(reason="Empty data or future-only period", evidence=evidence)
-        days = [s.day for s in sales]
-        if plan.end < min(days) or plan.start > max(days):
-            # Absence of sales alone does not establish the business's coverage.
-            coverage = re.search(r"Khoảng dữ liệu:\s*(\d{4}-\d{2}-\d{2})\s+đến\s+"
-                                 r"(\d{4}-\d{2}-\d{2})", context.catalog.readme)
-            if coverage:
-                first, last = map(date.fromisoformat, coverage.groups())
-                if plan.end < first or plan.start > last:
-                    evidence["coverage_source"] = coverage.group()
-                    return Candidate(type="unanswerable", confidence=1.0,
-                                     reason="Kỳ hỏi nằm hoàn toàn ngoài khoảng dữ liệu ghi trong README",
-                                     evidence=evidence)
-            return Candidate(reason="No sales in period; business coverage is not established",
-                             evidence=evidence)
-        selected = [s for s in sales if plan.start <= s.day <= plan.end and s.status == "valid"]
-        evidence["selected_rows"] = len(selected)
-        if plan.intent == "revenue":
-            value = sum((s.amount for s in selected), Decimal(0)).quantize(
-                Decimal(1), rounding=ROUND_HALF_UP)
-            evidence["calculation"] = "sum(line_amount) on valid whole orders; round VND half up"
-            return Candidate("number", int(value), 1.0, "", evidence)
-        if plan.intent == "order_count":
-            evidence["calculation"] = "count distinct order_id on valid whole orders"
-            return Candidate("number", len({s.order_id for s in selected}), 1.0, "", evidence)
-        if not selected or any(s.quantity_base is None or not s.product_id or not s.product_name
-                               for s in selected):
-            return Candidate(reason="Ranking needs explicit base quantities and product ids/names",
-                             evidence=evidence)
-        quantities: dict[str, Decimal] = defaultdict(Decimal)
-        names = {}
-        for sale in selected:
-            quantities[sale.product_id] += sale.quantity_base
-            names.setdefault(sale.product_id, sale.product_name)
-        ranked = sorted(quantities, key=lambda key: (-quantities[key], key))[:plan.top_k]
-        answer = [names[key] for key in ranked]
-        evidence["calculation"] = "sum(quantity_base) by product_id, descending; ties by id"
-        return Candidate("string" if plan.top_k == 1 else "list",
-                         answer[0] if plan.top_k == 1 else answer, 1.0, "", evidence)
+        planned = {"intent": plan.intent, "start": plan.start.isoformat(),
+                   "end": plan.end.isoformat(), "rules": plan.evidence}
+        failure = self._prepare(context)
+        if failure is not None:
+            failure.evidence = {**planned, **failure.evidence}
+            return failure
+        result = self.worker.run(self.compute, self.question_timeout,
+                                 catalog=context.catalog, plan=plan)
+        if not result.ok:
+            return _execution_failure("Calculation", result, planned)
+        candidate: Candidate = result.value
+        candidate.evidence["execution"] = result.execution()
+        return candidate
+
+    def _prepare(self, context: BusinessContext) -> Candidate | None:
+        """Load the business in the worker once; never retry a failed business."""
+        state = context.cache.get("worker_sales")
+        if state is not None and not state["ok"]:
+            return Candidate(reason=state["reason"], evidence=dict(state["evidence"]))
+        if state is not None and state["generation"] == self.worker.generation:
+            return None
+        # First question of the business, or the worker was replaced after a timeout.
+        result = self.worker.run(self.prepare, self.ingestion_timeout, catalog=context.catalog)
+        evidence: dict[str, Any] = {"ingestion_execution": result.execution()}
+        if result.ok and result.value["ok"]:
+            context.cache["worker_sales"] = {"ok": True, "generation": self.worker.generation}
+            return None
+        reason = result.value["reason"] if result.ok else _failure_reason("Sales ingestion", result)
+        context.cache["worker_sales"] = {"ok": False, "reason": reason, "evidence": evidence}
+        return Candidate(reason=reason, evidence=dict(evidence))
+
+
+def _failure_reason(step: str, result: WorkerResult) -> str:
+    if result.timed_out:
+        return f"{step} timed out after {result.timeout_seconds:g}s"
+    return f"{step} worker failed: {result.error}"
+
+
+def _execution_failure(step: str, result: WorkerResult, evidence: dict[str, Any]) -> Candidate:
+    return Candidate(reason=_failure_reason(step, result),
+                     evidence={**evidence, "execution": result.execution()})
