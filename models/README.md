@@ -6,7 +6,7 @@ Baseline là grammar và phép tính Python xác định; tổng số tham số 
 Trước khi thêm model, cập nhật README chính và ghi cho mỗi thành phần:
 
 - tên/revision và URL nguồn;
-- ngày phát hành weights (phải trước 01/10/2026 theo thể lệ đã đọc);
+- ngày phát hành weights (phải trước 26/10/2026 theo Rule 2 của DataMate);
 - licence và số tham số đầy đủ;
 - định dạng/quantization, checksum weights;
 - cách tải trong giai đoạn chuẩn bị image, đường dẫn offline khi inference;

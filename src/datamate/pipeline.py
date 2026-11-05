@@ -59,6 +59,8 @@ def predict(data_dir: Path, output_dir: Path, config: Config,
         for business_index, (business_id, questions) in enumerate(groups.items(), 1):
             if progress:
                 progress(f"[{business_index}/{len(groups)}] {business_id}: {len(questions)} questions")
+            # All questions enter this business batch before its shared catalog read.
+            batch_started = time.perf_counter()
             context = None
             catalog_error = ""
             ingestion_started = time.perf_counter()
@@ -72,6 +74,7 @@ def predict(data_dir: Path, output_dir: Path, config: Config,
                 question_started = time.perf_counter()
                 error = ""
                 candidate = Candidate()
+                agent_called = False
                 try:
                     if time.perf_counter() - started >= config.max_seconds:
                         candidate = Candidate(reason="Run time budget reached")
@@ -81,18 +84,36 @@ def predict(data_dir: Path, output_dir: Path, config: Config,
                     elif context is None:
                         candidate = Candidate(reason="Explicit abstain backend")
                     else:
+                        agent_called = True
                         candidate = agent.answer(question, context)
                     record = finalize(question.id, candidate, config.min_confidence)
                 except Exception as exc:
                     error = f"{type(exc).__name__}: {exc}"
                     record = {"id": question.id, "type": "abstain"}
+                answered_at = time.perf_counter()
                 # Flush completed answers so an interrupted run retains partial results.
                 stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
                 stream.flush()
                 counts[record["type"]] += 1
-                elapsed = time.perf_counter() - question_started
+                elapsed = answered_at - question_started
+                code = ("src/datamate/agent/baseline.py::BaselineAgent.answer"
+                        if agent_called and isinstance(agent, BaselineAgent) else
+                        candidate.evidence.get("code") if agent_called else None)
+                inputs = ({"question": question.question,
+                           "as_of_date": question.as_of_date.isoformat(),
+                           "data_dir": str(split.root / "data" / business_id),
+                           "intent": candidate.evidence.get("intent"),
+                           "start": candidate.evidence.get("start"),
+                           "end": candidate.evidence.get("end")}
+                          if code and isinstance(agent, BaselineAgent) else None)
                 log = {"id": question.id, "business_id": question.business_id,
                        "question": question.question, "as_of_date": question.as_of_date.isoformat(),
+                       "answer": record,
+                       "elapsed_ms": max(0, int((answered_at - batch_started) * 1000)),
+                       "thinking": None,
+                       "code": code, "inputs": inputs,
+                       "output": (candidate.answer if record["type"] != "unanswerable" else record)
+                       if code and record["type"] != "abstain" else None,
                        "final_answer": record, "elapsed_seconds": elapsed,
                        "business_ingestion_seconds": ingestion_seconds,
                        "candidate_confidence": candidate.confidence,

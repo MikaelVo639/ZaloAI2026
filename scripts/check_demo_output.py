@@ -28,10 +28,14 @@ def check(data_dir: Path, runs: list[Path]) -> None:
         for key in questions:
             log_path = run / "logs" / (hashlib.sha256(key.encode()).hexdigest() + ".json")
             log = json.loads(log_path.read_text(encoding="utf-8"))
-            if log["id"] != key or log["final_answer"] != indexed[key] or log["error"]:
+            if (log["id"] != key or log["answer"] != indexed[key]
+                    or log["final_answer"] != indexed[key] or log["error"]):
                 raise ValueError("Log does not match submission or contains an execution error")
-            if log["elapsed_seconds"] < 0:
+            if (type(log.get("elapsed_ms")) is not int or log["elapsed_ms"] < 0
+                    or log["elapsed_seconds"] < 0 or log.get("thinking") is not None):
                 raise ValueError("Invalid elapsed time in log")
+            if indexed[key]["type"] != "abstain" and (not log.get("code") or log.get("output") is None):
+                raise ValueError("Answered question lacks computation evidence")
         manifest = json.loads((run / "run.json").read_text(encoding="utf-8"))
         for filename, field in (("questions.jsonl", "questions_sha256"),
                                 ("calendar.csv", "calendar_sha256")):
