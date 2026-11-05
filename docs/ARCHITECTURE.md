@@ -64,6 +64,9 @@ Catalog xuất bằng `catalog_dict(catalog, relative_to=split.root)` có `sourc
 ghi `source: questions.jsonl` và checksum questions/rulebook thay cho đường dẫn máy.
 Khi chuyển từ metadata có đường dẫn tuyệt đối, tạo lại catalog/holdout bằng CLI.
 
-Log cần giữ được truy vấn/code, giá trị trung gian và nguồn file/cột sau khi mở rộng.
-Ngân sách toàn lượt hiện chỉ được kiểm tra giữa các bước, không cưỡng bức dừng một
-lần gọi model hoặc ingestion đang chạy. Tiến trình tương lai phải có deadline riêng.
+Log giữ code/call, input, result và nguồn file/cột của bộ tính. Prototype `local_plan`
+của AGENT-02 thêm JSON Plan từ model local và metadata weights/runtime; xem
+[AGENT_02.md](AGENT_02.md). Baseline vẫn là backend mặc định.
+Ngân sách toàn lượt chỉ được kiểm tra giữa các bước. Ingestion/compute và model
+load/generate có deadline riêng trong worker, gồm spawn và IPC; đây chưa phải hard
+deadline của toàn pipeline.

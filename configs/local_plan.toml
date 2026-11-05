@@ -1,0 +1,13 @@
+# Experimental AGENT-02 only. Baseline remains the default.
+backend = "local_plan"
+# Fixed diagnostic score for model plans, NOT a calibrated probability.
+# Evaluate on the team's seed-42 business holdout before promoting this backend.
+min_confidence = 0.5
+max_seconds = 20000
+model_path = "models/qwen2.5-coder-7b-instruct"
+question_timeout = 30
+ingestion_timeout = 300
+model_load_timeout = 600
+model_timeout = 30
+max_input_tokens = 8192
+max_new_tokens = 1024

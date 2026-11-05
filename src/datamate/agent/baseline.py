@@ -2,6 +2,7 @@ import math
 from typing import Any
 
 from datamate.agent import compute as tasks
+from datamate.agent.validation import check_executed
 from datamate.agent.worker import Worker, WorkerResult
 from datamate.contracts import BusinessContext, Candidate, Question
 from datamate.semantics.planner import plan_question
@@ -57,7 +58,7 @@ class BaselineAgent:
                                  rulebook=context.split.rulebook)
         if not result.ok:
             return _execution_failure("Calculation", result, planned)
-        candidate: Candidate = result.value
+        candidate = check_executed(result.value, plan)
         candidate.evidence["execution"] = result.execution()
         return candidate
 
@@ -66,7 +67,8 @@ class BaselineAgent:
         state = context.cache.get("worker_sales")
         if state is not None and not state["ok"]:
             return Candidate(reason=state["reason"], evidence=dict(state["evidence"]))
-        if state is not None and state["generation"] == self.worker.generation:
+        if (state is not None and self.worker.alive
+                and state["generation"] == self.worker.generation):
             return None
         # First question of the business, or the worker was replaced after a timeout.
         result = self.worker.run(self.prepare, self.ingestion_timeout,

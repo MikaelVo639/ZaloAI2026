@@ -12,6 +12,7 @@ reference) and take ``cache`` as their first argument.
 
 import math
 import multiprocessing as mp
+import threading
 import time
 import weakref
 from dataclasses import dataclass
@@ -82,36 +83,60 @@ class Worker:
         self._finalizer: weakref.finalize | None = None
         # Incremented every time a new child starts; its cache starts empty.
         self.generation = 0
+        self._lifecycle = threading.Lock()
+
+    @property
+    def alive(self) -> bool:
+        return self._process is not None and self._process.is_alive()
 
     def run(self, function: Callable[..., Any], timeout: float, **kwargs: Any) -> WorkerResult:
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("timeout must be a positive number of seconds")
-        if self._process is None or not self._process.is_alive():
-            self._start()
-        assert self._connection is not None
         started = time.perf_counter()
-        try:
-            self._connection.send((function, kwargs))
-            if not self._connection.poll(timeout):
-                self.stop()
-                return WorkerResult(False, error=f"Timed out after {timeout:g}s", timed_out=True,
-                                    elapsed_seconds=time.perf_counter() - started,
-                                    timeout_seconds=timeout)
-            ok, value, error = self._connection.recv()
-        except (EOFError, OSError) as exc:
-            exitcode = self._process.exitcode if self._process is not None else None
+        cancelled = threading.Event()
+        reply: list[tuple[bool, Any, str]] = []
+
+        def exchange() -> None:
+            # send() and recv() can block even when poll() succeeded (large payloads).
+            # Keep all IPC and spawn under the parent's one wall-clock deadline.
+            try:
+                if not self.alive:
+                    self._start(cancelled)
+                connection = self._connection
+                if cancelled.is_set() or connection is None:
+                    return
+                connection.send((function, kwargs))
+                reply.append(connection.recv())
+            except Exception as exc:
+                reply.append((False, None, f"Worker exited or IPC failed: "
+                              f"{type(exc).__name__}: {exc}"))
+
+        thread = threading.Thread(target=exchange, daemon=True, name="datamate-ipc")
+        thread.start()
+        thread.join(max(0.0, timeout - (time.perf_counter() - started)))
+        if thread.is_alive() or time.perf_counter() - started >= timeout:
+            cancelled.set()
             self.stop()
-            return WorkerResult(False, error=f"Worker exited (code {exitcode}): "
-                                             f"{type(exc).__name__}",
+            return WorkerResult(False, error=f"Timed out after {timeout:g}s", timed_out=True,
                                 elapsed_seconds=time.perf_counter() - started,
                                 timeout_seconds=timeout)
+        if not reply:
+            self.stop()
+            return WorkerResult(False, error="Worker exited without a reply",
+                                elapsed_seconds=time.perf_counter() - started,
+                                timeout_seconds=timeout)
+        ok, value, error = reply[0]
+        if not ok and error.startswith("Worker exited or IPC failed"):
+            self.stop()
         return WorkerResult(ok, value, error, False, time.perf_counter() - started, timeout)
 
     def stop(self) -> None:
         """Kill the child immediately; the next run starts a new one."""
-        if self._finalizer is not None:
-            self._finalizer()
-        self._process = self._connection = self._finalizer = None
+        with self._lifecycle:
+            finalizer = self._finalizer
+            self._process = self._connection = self._finalizer = None
+        if finalizer is not None:
+            finalizer()
 
     def close(self) -> None:
         """Ask an idle child to exit, then make sure it is gone."""
@@ -123,14 +148,19 @@ class Worker:
                 pass
         self.stop()
 
-    def _start(self) -> None:
+    def _start(self, cancelled: threading.Event) -> None:
         self.stop()
         parent, child = _CONTEXT.Pipe()
         process = _CONTEXT.Process(target=_serve, args=(child,), daemon=True,
                                    name="datamate-worker")
         process.start()
         child.close()
-        self._process, self._connection = process, parent
-        # Kill the child when this Worker is garbage-collected or at interpreter exit.
-        self._finalizer = weakref.finalize(self, _terminate, process, parent)
-        self.generation += 1
+        with self._lifecycle:
+            if not cancelled.is_set():
+                self._process, self._connection = process, parent
+                # Kill the child at GC/interpreter exit as well as on timeout.
+                self._finalizer = weakref.finalize(self, _terminate, process, parent)
+                self.generation += 1
+                return
+        # A slow spawn may finish after run() has already timed out.
+        _terminate(process, parent)

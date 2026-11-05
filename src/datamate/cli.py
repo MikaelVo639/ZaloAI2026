@@ -1,6 +1,7 @@
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from datamate.data_tools import business_holdout, import_archive
@@ -36,7 +37,7 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--data-dir", type=Path, required=True)
     run.add_argument("--output-dir", type=Path, default=Path("outputs/baseline"))
     run.add_argument("--config", type=Path)
-    run.add_argument("--backend", choices=("baseline", "abstain"))
+    run.add_argument("--backend", choices=("baseline", "abstain", "local_plan"))
     validate = commands.add_parser("validate", help="Check format, IDs and completeness")
     validate.add_argument("submission", type=Path)
     validate.add_argument("--questions", type=Path, required=True)
@@ -85,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "predict":
             config = Config.load(args.config)
             if args.backend:
-                config = Config(args.backend, config.min_confidence, config.max_seconds)
+                config = replace(config, backend=args.backend)
             report = predict(args.data_dir, args.output_dir, config,
                              progress=lambda message: print(message, file=sys.stderr, flush=True))
         elif args.command == "validate":

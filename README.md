@@ -8,6 +8,12 @@ Baseline chỉ hỗ trợ một số câu hỏi và bảng bán hàng dạng ph�
 chưa hỗ trợ sẽ thành `abstain`. Đây là nền tảng để phát triển, chưa phải solution
 hoàn chỉnh; điểm demo không đại diện cho điểm thi.
 
+AGENT-02 có backend thử nghiệm `local_plan`: Qwen2.5-Coder-7B-Instruct (7,61 tỷ
+tham số, Apache-2.0, weights 19/09/2024) sinh JSON Plan rồi worker Python tính số.
+Backend mặc định vẫn là `baseline`. Khai báo và nạp offline ở
+[models/README.md](models/README.md), cách chạy/thành phần còn chờ ở
+[docs/AGENT_02.md](docs/AGENT_02.md). Chưa có benchmark model trên holdout/GPU.
+
 ## Bắt đầu sau khi clone
 
 Chạy các lệnh từ thư mục gốc repo, trên Windows, Linux hoặc macOS:

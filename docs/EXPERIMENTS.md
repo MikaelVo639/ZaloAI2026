@@ -1,5 +1,30 @@
 # Thí nghiệm có thể đối chiếu
 
+## AGENT-02 — kiểm tra prototype ngày 05/11/2026
+
+Nhánh `codex/agent-local-plan-prototype`, base revision `5701f829a60d06c14e02ffe1700bf84b3beae7ed`,
+working tree có thay đổi chưa commit. Giả thuyết: JSON Plan có kiểm tra + worker
+deadline có thể dùng lại executor và cung cấp evidence trước khi đo chất lượng model.
+Thiết kế và hướng dẫn A/B ở [AGENT_02.md](AGENT_02.md); không thay baseline mặc định.
+
+- `uv sync --locked`, `uv run datamate smoke`, unittest discover đều hoàn tất.
+  Suite có 132 test: 131 qua, 1 test riêng Windows skip trên macOS.
+- Smoke trên demo tổng hợp giữ 21 correct / 0 wrong / 3 abstain, PA local 0.875,
+  coverage 0.875. Đây là baseline trên fixture, **không phải điểm model hay leaderboard**.
+- Hai probe `reproduce_pr9_deadlines.py` không còn tái hiện lỗi: ingestion được gọi
+  lại sau stop và IPC send quá hạn trả timeout. Probe là mô phỏng, không đo tải thật.
+- Kiểm tra planner giả lập bao phủ Plan → compute → output/log; lỗi/timeout và kết
+  quả bất thường thành abstain; boolean/table qua kiểm tra format scorer hiện tại.
+- Không có train/weights/GPU trong checkout dùng kiểm tra; **chưa chạy holdout** seed
+  42/0.2, chưa chọn confidence threshold và chưa ước tính thời gian private test.
+
+Artifact của lượt này giữ ở thư mục ignored
+`outputs/runs/agent02-synthetic-20261105/`: receipt/checksums, probe deadline, và log
+code/output của một câu tổng hợp dùng planner giả lập. Không đưa artifact vào Git.
+Quyết định: sẵn sàng review code prototype; chưa có bằng chứng chấp nhận hướng B.
+Evaluation cần benchmark model thật; Semantics/Data cần thống nhất contract mở rộng;
+Integration cần xác minh runtime GPU và image offline.
+
 ## Benchmark EVAL-01
 
 Chuẩn bị Python 3.12 và chạy `uv sync --locked` trong từng checkout cần đo.

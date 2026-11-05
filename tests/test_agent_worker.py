@@ -5,6 +5,7 @@ import unittest
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from datamate.agent import compute
 from datamate.agent.baseline import BaselineAgent
@@ -103,6 +104,48 @@ class WorkerTests(unittest.TestCase):
         for timeout in (0, -1, float("nan"), float("inf")):
             with self.assertRaises(ValueError):
                 self.worker.run(double, timeout, value=1)
+
+    def test_deadline_includes_blocked_send_and_receive(self):
+        class Process:
+            def is_alive(self):
+                return True
+
+        class Connection:
+            def __init__(self, slow_step):
+                self.slow_step = slow_step
+
+            def send(self, message):
+                if self.slow_step == "send":
+                    time.sleep(0.2)
+
+            def recv(self):
+                if self.slow_step == "recv":
+                    time.sleep(0.2)
+                return True, 42, ""
+
+        for step in ("send", "recv"):
+            with self.subTest(step=step):
+                self.worker._process = Process()
+                self.worker._connection = Connection(step)
+                started = time.perf_counter()
+                result = self.worker.run(double, 0.02, value=21)
+                self.assertLess(time.perf_counter() - started, 0.15)
+                self.assertTrue(result.timed_out)
+                self.assertFalse(self.worker.alive)
+
+    def test_deadline_covers_slow_start_and_late_child_is_cleaned_up(self):
+        original = self.worker._start
+
+        def slow_start(cancelled):
+            time.sleep(0.15)
+            original(cancelled)
+
+        with patch.object(self.worker, "_start", side_effect=slow_start):
+            result = self.worker.run(double, 0.02, value=21)
+            self.assertTrue(result.timed_out)
+            time.sleep(0.35)
+        self.assertFalse(self.worker.alive)
+        self.assertEqual(self.worker.run(double, 10, value=2).value, 4)
 
 
 def sale(order, day, status, product, quantity, amount):
@@ -203,6 +246,16 @@ class AgentDeadlineTests(unittest.TestCase):
         self.assertEqual(candidate.type, "abstain")
         self.assertIn("KeyError", candidate.reason)
         self.assertEqual(candidate.evidence["execution"]["status"], "error")
+
+    def test_stopped_or_dead_worker_reloads_under_ingestion_deadline(self):
+        for stop in (lambda w: w.stop(), lambda w: (w._process.kill(), w._process.join())):
+            with self.subTest(stop=stop):
+                agent, context = self.agent(), self.context()
+                self.assertIsNone(agent._prepare(context))
+                stop(agent.worker)
+                with patch.object(agent.worker, "run", wraps=agent.worker.run) as run:
+                    self.assertIsNone(agent._prepare(context))
+                    self.assertEqual(run.call_args.args[1], agent.ingestion_timeout)
 
     def test_ingestion_timeout_is_not_retried_for_each_question(self):
         agent = self.agent(type("SlowLoadAgent", (BaselineAgent,),

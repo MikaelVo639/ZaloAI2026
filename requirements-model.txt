@@ -1,0 +1,7 @@
+# Optional preparation/GPU environment; baseline uv.lock remains CPU-only.
+# Linux GPU environment only. Archive the resolved environment after GPU validation.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.7.1+cu128
+transformers==4.51.3
+huggingface-hub==0.31.4
+safetensors==0.5.3
