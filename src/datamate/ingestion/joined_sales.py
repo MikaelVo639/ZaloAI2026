@@ -192,8 +192,8 @@ def _parse_decimal(value: Any, policy: NumericPolicy, *, allow_amount_suffix: bo
     return _parse_localized_decimal(text, decimal_separator, thousands_separator) * multiplier
 
 
-def _select_table(catalog: Catalog, source_mapping: SourceMapping,
-                  required_fields: set[str]) -> Table:
+def _select_tables(catalog: Catalog, source_mapping: SourceMapping,
+                   required_fields: set[str]) -> list[Table]:
     missing_fields = sorted(required_fields - set(source_mapping.fields))
     if missing_fields:
         _fail(
@@ -213,22 +213,37 @@ def _select_table(catalog: Catalog, source_mapping: SourceMapping,
     for table in catalog.tables:
         path = table.path.as_posix()
         path_matches = path == source_path or path.endswith("/" + source_path)
-        if path_matches and (not source_table or table.name == source_table):
+        table_matches = not source_table or source_table == "*" or table.name == source_table
+        if path_matches and table_matches:
             matches.append(table)
+    expected_many = source_table == "*"
+    if not matches or (not expected_many and len(matches) != 1):
+        _fail(
+            "SOURCE_SELECTION_ERROR",
+            "Declared source must match its catalog table scope",
+            source=source_mapping.source, match_count=len(matches),
+        )
+    required_columns = set(source_mapping.fields.values())
+    for table in matches:
+        missing_columns = sorted(required_columns - set(table.columns))
+        if missing_columns:
+            _fail(
+                "SCHEMA_MISMATCH", "Declared source is missing mapped columns",
+                source=f"{table.path.name}::{table.name}",
+                missing_columns=missing_columns,
+            )
+    return sorted(matches, key=lambda table: (table.path.as_posix(), table.name))
+
+
+def _select_table(catalog: Catalog, source_mapping: SourceMapping,
+                  required_fields: set[str]) -> Table:
+    matches = _select_tables(catalog, source_mapping, required_fields)
     if len(matches) != 1:
         _fail(
             "SOURCE_SELECTION_ERROR", "Declared source must match exactly one catalog table",
             source=source_mapping.source, match_count=len(matches),
         )
-    table = matches[0]
-    required_columns = set(source_mapping.fields.values())
-    missing_columns = sorted(required_columns - set(table.columns))
-    if missing_columns:
-        _fail(
-            "SCHEMA_MISMATCH", "Declared source is missing mapped columns",
-            source=source_mapping.source, missing_columns=missing_columns,
-        )
-    return table
+    return matches[0]
 
 
 def _readme_evidence(catalog: Catalog, *tokens: str) -> str:
@@ -243,12 +258,16 @@ def _readme_evidence(catalog: Catalog, *tokens: str) -> str:
     )
 
 
-def _single_structural_table(catalog: Catalog, role: str,
-                             required_columns: set[str]) -> Table:
-    matches = [
+def _structural_tables(catalog: Catalog, required_columns: set[str]) -> list[Table]:
+    return [
         table for table in catalog.tables
         if table.path.suffix.lower() == ".xlsx" and required_columns <= set(table.columns)
     ]
+
+
+def _single_structural_table(catalog: Catalog, role: str,
+                             required_columns: set[str]) -> Table:
+    matches = _structural_tables(catalog, required_columns)
     if len(matches) != 1:
         _fail(
             "MAPPING_AMBIGUOUS" if matches else "SCHEMA_MISMATCH",
@@ -264,12 +283,24 @@ def mapping_for_xlsx_order_detail_product(catalog: Catalog) -> MappingSpec:
     This is intentionally one schema policy, not a general workbook guesser. The caller
     still supplies capabilities from the current split's rulebook to ``load_joined_sales``.
     """
-    orders = _single_structural_table(catalog, "orders", {
+    order_tables = _structural_tables(catalog, {
         "Mã hóa đơn", "Thời gian", "Tổng tiền hàng", "Trạng thái",
     })
+    if not order_tables:
+        _fail(
+            "SCHEMA_MISMATCH", "Verified XLSX schema roles must match a source",
+            role="orders", match_count=0,
+        )
+    order_paths = {table.path.resolve() for table in order_tables}
+    if len(order_paths) != 1:
+        _fail(
+            "MAPPING_AMBIGUOUS",
+            "Orders may span sheets only when they belong to one reviewed workbook",
+            role="orders", match_count=len(order_tables),
+        )
     details = _single_structural_table(catalog, "details", {
         "Mã hóa đơn", "Mã hàng", "Tên hàng", "Số lượng", "Đơn giá", "Giảm giá",
-        "Thành tiền", "Số lượng quy đổi", "Đơn vị tính", "STT",
+        "Thành tiền", "Số lượng quy đổi", "STT",
     })
     products = _single_structural_table(catalog, "products", {
         "Mã hàng", "Tên hàng", "Nhóm hàng(3 Cấp)", "ĐVT",
@@ -287,6 +318,19 @@ def mapping_for_xlsx_order_detail_product(catalog: Catalog) -> MappingSpec:
     def source(table: Table) -> str:
         return f"{table.path.name}::{table.name}"
 
+    orders_source = (
+        source(order_tables[0]) if len(order_tables) == 1
+        else f"{order_tables[0].path.name}::*"
+    )
+    detail_fields = {
+        "order_id": "Mã hóa đơn", "line_no": "STT",
+        "product_id": "Mã hàng", "amount": "Thành tiền",
+        "quantity": "Số lượng", "quantity_base": "Số lượng quy đổi",
+        "unit_price": "Đơn giá", "discount": "Giảm giá",
+    }
+    if "Đơn vị tính" in details.columns:
+        detail_fields["unit"] = "Đơn vị tính"
+
     mapping_evidence = (
         order_evidence, amount_evidence, line_key_evidence, quantity_evidence,
         product_evidence,
@@ -295,7 +339,7 @@ def mapping_for_xlsx_order_detail_product(catalog: Catalog) -> MappingSpec:
     return MappingSpec(
         version="xlsx_order_detail_product.v1",
         orders=SourceMapping(
-            source=source(orders),
+            source=orders_source,
             fields={
                 "order_id": "Mã hóa đơn", "date": "Thời gian",
                 "status": "Trạng thái", "total_due": "Tổng tiền hàng",
@@ -305,13 +349,7 @@ def mapping_for_xlsx_order_detail_product(catalog: Catalog) -> MappingSpec:
         ),
         details=SourceMapping(
             source=source(details),
-            fields={
-                "order_id": "Mã hóa đơn", "line_no": "STT",
-                "product_id": "Mã hàng", "amount": "Thành tiền",
-                "quantity": "Số lượng", "quantity_base": "Số lượng quy đổi",
-                "unit": "Đơn vị tính", "unit_price": "Đơn giá",
-                "discount": "Giảm giá",
-            },
+            fields=detail_fields,
             key=("order_id", "line_no"), grain="one row per invoice line",
             evidence=(amount_evidence, line_key_evidence, quantity_evidence),
         ),
@@ -411,20 +449,20 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
                       rule_capabilities: RuleCapabilities) -> tuple[list[Sale], dict[str, Any]]:
     """Load one declared O/D/P schema without changing the shared flat adapter."""
     _validate_capabilities(mapping, rule_capabilities)
-    orders_table = _select_table(
+    orders_tables = _select_tables(
         catalog, mapping.orders,
         {"order_id", "date", "status", "total_due"},
     )
     details_table = _select_table(
         catalog, mapping.details,
         {"order_id", "line_no", "product_id", "amount", "quantity",
-         "quantity_base", "unit", "unit_price", "discount"},
+         "quantity_base", "unit_price", "discount"},
     )
     products_table = _select_table(
         catalog, mapping.products,
         {"product_id", "product_name", "base_unit", "category"},
     )
-    selected = [orders_table, details_table, products_table]
+    selected = [*orders_tables, details_table, products_table]
     before_hashes = {table.path: _sha256(table.path) for table in selected}
     status_lookup = _status_lookup(rule_capabilities)
     diagnostics: list[dict[str, Any]] = []
@@ -432,55 +470,58 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
     orders: dict[str, dict[str, Any]] = {}
     status_counts: Counter[str] = Counter()
     header_total_parse_failures = 0
-    for row_ordinal, raw in enumerate(iter_rows(orders_table), 1):
-        order_id = _identifier(
-            raw.get(mapping.orders.fields["order_id"]), field_name="order_id",
-            source=mapping.orders.source, row_ordinal=row_ordinal,
-        )
-        if order_id in orders:
-            _fail(
-                "DUPLICATE_PARENT_KEY", "Order parent key is duplicated",
-                source=mapping.orders.source, key_fields=list(mapping.orders.key),
-                duplicate_count=1,
+    for orders_table in orders_tables:
+        actual_source = f"{orders_table.path.name}::{orders_table.name}"
+        for row_ordinal, raw in enumerate(iter_rows(orders_table), 1):
+            order_id = _identifier(
+                raw.get(mapping.orders.fields["order_id"]), field_name="order_id",
+                source=actual_source, row_ordinal=row_ordinal,
             )
-        raw_status = raw.get(mapping.orders.fields["status"])
-        canonical_status = status_lookup.get(fold(str(raw_status))) if not _missing(raw_status) else None
-        if canonical_status is None:
-            _fail(
-                "UNKNOWN_STATUS", "Order status is not covered by split rule capabilities",
-                source=mapping.orders.source, row_ordinal=row_ordinal,
+            if order_id in orders:
+                _fail(
+                    "DUPLICATE_PARENT_KEY", "Order parent key is duplicated",
+                    source=actual_source, key_fields=list(mapping.orders.key),
+                    duplicate_count=1,
+                )
+            raw_status = raw.get(mapping.orders.fields["status"])
+            canonical_status = (
+                status_lookup.get(fold(str(raw_status))) if not _missing(raw_status) else None
             )
-        if canonical_status == "returned" and not rule_capabilities.whole_order_returns:
-            _fail(
-                "RULE_CAPABILITY_MISSING", "Returned order requires whole-order return semantics",
-                source=mapping.orders.source, row_ordinal=row_ordinal,
-            )
-        try:
-            day = parse_date(raw.get(mapping.orders.fields["date"]), orders_table.name)
-        except (TypeError, ValueError) as exc:
-            raise JoinedSalesError(
-                "DATE_INVALID", "Order date could not be parsed",
-                {"source": mapping.orders.source, "row_ordinal": row_ordinal},
-            ) from exc
-        total_due = None
-        try:
-            total_due = _parse_decimal(
-                raw.get(mapping.orders.fields["total_due"]), mapping.numeric_policy,
-                allow_amount_suffix=False, allow_currency_suffix=True,
-            )
-        except ValueError:
-            header_total_parse_failures += 1
-        orders[order_id] = {
-            "day": day,
-            "status": canonical_status,
-            "total_due": total_due,
-            "row_ordinal": row_ordinal,
-            "payment_method": (
-                raw.get(mapping.orders.fields["payment_method"])
-                if "payment_method" in mapping.orders.fields else None
-            ),
-        }
-        status_counts[canonical_status] += 1
+            if canonical_status is None:
+                _fail(
+                    "UNKNOWN_STATUS", "Order status is not covered by split rule capabilities",
+                    source=actual_source, row_ordinal=row_ordinal,
+                )
+            if canonical_status == "returned" and not rule_capabilities.whole_order_returns:
+                _fail(
+                    "RULE_CAPABILITY_MISSING",
+                    "Returned order requires whole-order return semantics",
+                    source=actual_source, row_ordinal=row_ordinal,
+                )
+            try:
+                day = parse_date(raw.get(mapping.orders.fields["date"]), orders_table.name)
+            except (TypeError, ValueError) as exc:
+                raise JoinedSalesError(
+                    "DATE_INVALID", "Order date could not be parsed",
+                    {"source": actual_source, "row_ordinal": row_ordinal},
+                ) from exc
+            total_due = None
+            try:
+                total_due = _parse_decimal(
+                    raw.get(mapping.orders.fields["total_due"]), mapping.numeric_policy,
+                    allow_amount_suffix=False, allow_currency_suffix=True,
+                )
+            except ValueError:
+                header_total_parse_failures += 1
+            orders[order_id] = {
+                "day": day, "status": canonical_status, "total_due": total_due,
+                "row_ordinal": row_ordinal, "source": actual_source,
+                "payment_method": (
+                    raw.get(mapping.orders.fields["payment_method"])
+                    if "payment_method" in mapping.orders.fields else None
+                ),
+            }
+            status_counts[canonical_status] += 1
 
     products: dict[str, dict[str, Any]] = {}
     for row_ordinal, raw in enumerate(iter_rows(products_table), 1):
@@ -630,7 +671,7 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             "sale_index": sale_index,
             "line_key": [order_id, line_no],
             "detail": {"source": mapping.details.source, "row_ordinal": row_ordinal},
-            "order": {"source": mapping.orders.source,
+            "order": {"source": order["source"],
                       "row_ordinal": order["row_ordinal"]},
             "product": {"source": mapping.products.source,
                         "row_ordinal": product["row_ordinal"]},
@@ -683,8 +724,14 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
         _fail("CHECKSUM_CHANGED", "A source changed while the adapter was reading it")
 
     sources = []
-    for table, source_mapping in zip(
-            selected, (mapping.orders, mapping.details, mapping.products)):
+    for table in orders_tables:
+        sources.append({
+            "source": f"{table.path.name}::{table.name}",
+            "table": table.name,
+            "sha256": before_hashes[table.path],
+        })
+    for table, source_mapping in (
+            (details_table, mapping.details), (products_table, mapping.products)):
         sources.append({
             "source": source_mapping.source,
             "table": table.name,

@@ -388,6 +388,19 @@ class XlsxOrderDetailProductTests(unittest.TestCase):
         book.save(path)
         book.close()
 
+    @staticmethod
+    def _write_xlsx_sheets(path, headers, sheets):
+        book = Workbook()
+        default = book.active
+        book.remove(default)
+        for name, rows in sheets:
+            sheet = book.create_sheet(name)
+            sheet.append(headers)
+            for row in rows:
+                sheet.append(row)
+        book.save(path)
+        book.close()
+
     def _write_sources(self, business="xlsx_shop", *, orders=None, details=None,
                        products=None):
         target = self.data_root / business
@@ -463,6 +476,57 @@ class XlsxOrderDetailProductTests(unittest.TestCase):
         self.assertEqual(evidence["amount_reconciliation"]
                          ["header_total_differs_from_line_sum"], 0)
         json.dumps(evidence, ensure_ascii=False, allow_nan=False)
+
+    def test_orders_sharded_across_one_workbook_and_optional_detail_unit(self):
+        target = self._write_sources("sharded")
+        orders = [
+            ["O1", "01/01/2026", "25,000", "Hoàn thành"],
+            ["O2", "02/01/2026", "10,000", "Đã hủy"],
+            ["O3", "03/01/2026", "30,000", "Đã trả hàng"],
+            ["O4", "04/01/2026", "40,000", "Đang giao hàng"],
+        ]
+        self._write_xlsx_sheets(
+            target / "orders-export.xlsx", self.ORDER_HEADER,
+            (("01.2026", orders[:2]), ("02.2026", orders[2:])),
+        )
+        detail_header = [column for column in self.DETAIL_HEADER
+                         if column != "Đơn vị tính"]
+        detail_rows = [
+            ["O1", "P1", "Nước", 2, "10,000", "0", "20,000", 48, 1],
+            ["O1", "P2", "Bánh", 1, "10,000", "5,000", "5,000", 1, 2],
+            ["O2", "P1", "Nước", 1, "10,000", "0", "10,000", 24, 1],
+            ["O3", "P2", "Bánh", 3, "10,000", "0", "30,000", 3, 1],
+            ["O4", "P2", "Bánh", 4, "10,000", "0", "40,000", 4, 1],
+        ]
+        self._write_xlsx(target / "details-export.xlsx", detail_header, detail_rows)
+
+        sales, evidence = self._load("sharded")
+
+        self.assertEqual(len(sales), 5)
+        self.assertEqual(evidence["mapping"]["orders"]["source"],
+                         "orders-export.xlsx::*")
+        self.assertNotIn("unit", evidence["mapping"]["details"]["fields"])
+        order_sources = [source for source in evidence["sources"]
+                         if source["source"].startswith("orders-export.xlsx::")]
+        self.assertEqual([source["table"] for source in order_sources],
+                         ["01.2026", "02.2026"])
+        self.assertEqual(evidence["join"]["join_expansion"], 0)
+
+    def test_sharded_orders_reject_duplicate_parent_across_sheets(self):
+        target = self._write_sources(
+            "duplicate_shard",
+            orders=[["O1", "01/01/2026", "20,000", "Hoàn thành"]],
+            details=[["O1", "P1", "Nước", 2, "10,000", "0", "20,000", 48,
+                      "thùng", 1]],
+        )
+        self._write_xlsx_sheets(
+            target / "orders-export.xlsx", self.ORDER_HEADER,
+            (("01.2026", [["O1", "01/01/2026", "20,000", "Hoàn thành"]]),
+             ("02.2026", [["O1", "02/02/2026", "20,000", "Hoàn thành"]])),
+        )
+        with self.assertRaises(JoinedSalesError) as caught:
+            self._load("duplicate_shard")
+        self.assertEqual(caught.exception.code, "DUPLICATE_PARENT_KEY")
 
     def test_new_schema_missing_duplicate_orphan_and_fanout_are_rejected(self):
         cases = (
