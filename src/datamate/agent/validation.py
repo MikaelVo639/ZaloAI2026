@@ -3,6 +3,7 @@
 import math
 from datetime import date
 
+from datamate.agent.compute import unsupported
 from datamate.contracts import Candidate, Plan
 from datamate.evaluation.validation import validate_record
 
@@ -25,6 +26,10 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
             raise ValueError("Worker evidence must be a dictionary")
         if candidate.type == "abstain":
             return candidate
+        if plan is not None:
+            reason = unsupported(plan)
+            if reason:
+                raise ValueError(reason)
         if (isinstance(candidate.confidence, bool)
                 or not math.isfinite(candidate.confidence)
                 or not 0 <= candidate.confidence <= 1):
@@ -42,13 +47,17 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
             raise ValueError("Answer needs executed code evidence")
         if "result" not in evidence or evidence["result"] != candidate.answer:
             raise ValueError("Answer differs from execution output")
-        if candidate.type == "percent" and not 0 <= candidate.answer <= 100:
-            raise ValueError("Cancellation percentage outside [0, 100]")
         if plan is not None:
-            expected = ("string" if plan.top_k == 1 else "list") \
-                if plan.intent == "top_products" else ANSWER_TYPES.get(plan.intent)
+            if plan.comparison == "change_percent":
+                expected = "percent"
+            elif plan.intent == "top_products":
+                expected = "string" if plan.top_k == 1 else "list"
+            else:
+                expected = ANSWER_TYPES.get(plan.intent)
             if expected is None or candidate.type != expected:
                 raise ValueError("Answer type disagrees with Plan")
+            if plan.intent == "cancel_rate" and not 0 <= candidate.answer <= 100:
+                raise ValueError("Cancellation percentage outside [0, 100]")
             if plan.intent in {"order_count", "cancel_count"}:
                 count = candidate.answer
                 bound_key = "period_orders" if plan.intent == "cancel_count" else "selected_orders"

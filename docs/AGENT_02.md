@@ -17,7 +17,12 @@ planner giả lập là kết quả của Qwen. Chưa đủ bằng chứng để
 | `boolean`/`table` | Có kiểm tra format theo scorer và regression; **chưa thêm intent** khi chưa thống nhất Plan mở rộng |
 | Holdout/threshold/GPU 6 giờ | Chờ môi trường/dữ liệu và quy trình Evaluation/Integration bên dưới |
 
-Không sửa `contracts.py`, adapter Data hay grammar Semantics. Thay đổi giao thoa:
+Đã tích hợp main `e045f3f` (SEM-01 #18): `Plan` có kỳ so sánh và `Filter` sản phẩm.
+Agent dùng chung đường lập Plan deterministic, gồm bước lấy tên sản phẩm, trước
+khi gọi model. Bộ kiểm tra nhận `percent` cho `revenue/change_percent`, cho phép
+giá trị âm hoặc trên 100%; chỉ tỷ lệ huỷ đơn bị giới hạn [0,100]. Không mở rộng
+thêm contract hay grammar so với SEM-01; model vẫn chỉ sinh tập Plan đơn kỳ không lọc.
+Thay đổi giao thoa:
 pipeline/CLI đăng ký backend và các timeout theo cấu hình; manifest ghi model thực
 sự đã nạp; CLI override dùng `dataclasses.replace` để giữ các trường mới. Pipeline
 đóng worker do nó tạo kể cả khi ghi output lỗi. Probe deadline của Evaluation được
@@ -25,7 +30,8 @@ bổ sung split giả để tiếp tục chạy sau bản sửa cache.
 
 ## Cách prototype quyết định
 
-1. Grammar hiện tại lập được Plan thì chạy baseline và giữ confidence của baseline.
+1. Grammar hiện tại (kể cả so sánh kỳ và thử lại với tên sản phẩm từ worker) lập được
+   Plan thì chạy baseline và giữ confidence của baseline, không gọi model.
 2. Câu còn lại chỉ đi tới model nếu rulebook của split bật được phép tính và parser
    thời gian hiện tại xác định đúng một kỳ dương lịch. Schema giữ cột, kiểu Python
    quan sát được và mẫu có sẵn; đơn vị được giữ trong README/cột gốc, không đoán.
@@ -108,9 +114,10 @@ mô thì không thể khẳng định dưới 6 giờ. `max_seconds=20000` đư�
 không phải hard deadline của toàn pipeline; runner benchmark có process deadline.
 Threshold chỉ được chọn bằng business train rồi kiểm lại validation một lần.
 
-## Đề xuất Plan mở rộng cần Semantics + Data thống nhất
+## Phần Plan còn cần Semantics + Data thống nhất
 
-Đây là đề xuất để reviewer thảo luận, chưa đổi contract hay viết intent mới:
+SEM-01 #18 đã thêm `Filter` và các trường kỳ so sánh; dùng lại contract đó. Các khả
+năng tiếp theo bên dưới vẫn là đề xuất, chưa viết intent mới trong AGENT-02:
 
 | Thành phần | Đề xuất và điều kiện |
 |---|---|
@@ -121,7 +128,7 @@ Threshold chỉ được chọn bằng business train rồi kiểm lại validat
 | Evidence | Nguồn luật và lineage adapter cho mỗi predicate, metric, kỳ; code/call/output của toàn biểu thức |
 | Unsupported | Điều kiện, unit, join, null/tie/zero-denominator chưa có luật → abstain |
 
-Giữ `Plan` cũ cho các callers hiện tại, thống nhất biểu diễn additive/versioned trước
-khi triển khai. Semantics cần định nghĩa parsing và nguồn luật, Data cần xác nhận
+Giữ tương thích với callers hiện tại, thống nhất các phần chưa có trong contract
+trước khi triển khai. Semantics cần định nghĩa parsing và nguồn luật, Data cần xác nhận
 schema/join/units, Agent sẽ tính và kiểm kết quả. Bộ kiểm tra format boolean/table
 hiện có không được coi là đã trả lời được những câu hỏi này.

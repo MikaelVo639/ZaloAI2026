@@ -1,5 +1,22 @@
 # Thí nghiệm có thể đối chiếu
 
+## AGENT-02 — tích hợp SEM-01 #18 ngày 05/11/2026
+
+Commit prototype `26724e1` được ghép với main `e045f3f` trên nhánh Agent. Giữ contract
+`Filter`/kỳ so sánh của SEM-01; bộ kiểm tra nhận `percent` cho revenue/change_percent
+và chỉ áp [0,100] cho cancel_rate. Baseline và local_plan dùng chung bước lập Plan
+có thử lại với tên sản phẩm trước khi gọi model.
+
+`uv sync --locked`, smoke và unittest discover đã hoàn tất. Suite có **150 test:
+149 qua, 1 test riêng Windows skip**. Regression thực thi kiểm tra thay đổi doanh
+thu −50% / 150%, bộ lọc doanh thu/số đơn theo sản phẩm không gọi model, phạm vi tỷ
+lệ huỷ và trường Plan chưa hỗ trợ. Smoke giữ **21 đúng / 0 sai / 3 abstain**, PA
+local proxy 0.875 trên fixture tổng hợp. Đây không phải kết quả Qwen hay leaderboard.
+
+Artifact của lượt tích hợp nằm ở ignored `outputs/runs/agent02-main-merge-20261105/`.
+Chưa chạy model thật, benchmark train/holdout hay đo GPU; các điều kiện chọn hướng B
+và bàn giao trong `AGENT_02.md` vẫn giữ nguyên.
+
 ## AGENT-02 — kiểm tra prototype ngày 05/11/2026
 
 Nhánh `codex/agent-local-plan-prototype`, base revision `5701f829a60d06c14e02ffe1700bf84b3beae7ed`,

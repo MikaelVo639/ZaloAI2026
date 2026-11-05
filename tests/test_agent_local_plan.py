@@ -1,5 +1,6 @@
 """Synthetic AGENT-02 probes. Fake planners test plumbing, never model quality."""
 
+import csv
 import json
 import os
 import socket
@@ -19,8 +20,9 @@ from datamate.agent.model_runtime import (
     MODEL_ID, MODEL_PARAMETERS, MODEL_REVISION, prepare_model, sha256, verify_snapshot,
 )
 from datamate.agent.validation import check_executed
-from datamate.contracts import BusinessContext, Candidate, Plan, Question
-from datamate.demo import RULEBOOK, create_demo
+from datamate.agent.baseline import BaselineAgent
+from datamate.contracts import BusinessContext, Candidate, Filter, Plan, Question
+from datamate.demo import COLUMNS, ROWS, RULEBOOK, create_demo
 from datamate.evaluation.scorer import matches
 from datamate.evaluation.validation import finalize, validate_record
 from datamate.ingestion import build_catalog
@@ -171,6 +173,48 @@ class LocalAgentTests(unittest.TestCase):
         self.assertEqual(finalize("q", candidate, 1)["type"], "abstain")
         self.assertEqual(finalize("q", candidate, 0.5)["answer"], 130000)
 
+    def test_product_filter_uses_baseline_before_model(self):
+        names_rule = "| Tên gọi, nhãn | Các tên cùng chỉ một thứ là cùng một thứ. File có mã thì theo mã |"
+        context = replace(self.context, cache={}, split=replace(
+            self.split, rulebook=RULEBOOK + names_rule + "\n"))
+        agent = self.agent()
+        with patch.object(agent.planner_worker, "run", side_effect=AssertionError("Unexpected model call")):
+            for text, expected in (("Doanh thu của Cà phê sữa tháng này", 100000),
+                                   ("Số đơn của Cà phê sữa tháng này", 2)):
+                candidate = agent.answer(replace(self.question, question=text), context)
+                self.assertEqual((candidate.type, candidate.answer, candidate.confidence),
+                                 ("number", expected, 1.0))
+                self.assertEqual(candidate.evidence["filters"][0]["field"], "product")
+                self.assertNotIn("model", candidate.evidence)
+
+    def test_comparisons_preserve_baseline_output_without_model(self):
+        book = RULEBOOK.replace(
+            "| Tháng này | Từ ngày 1 đến hết hôm nay |",
+            "| Tháng này | Từ ngày 1 đến hết hôm nay. So với tháng trước thì lấy cùng số ngày của tháng trước |")
+        book += "| Phần trăm thay đổi, tăng trưởng | So với kỳ trước; giảm thì ra số âm |\n"
+        context = replace(self.context, split=replace(self.split, rulebook=book),
+                          catalog=replace(self.context.catalog, readme=
+                                          "Khoảng dữ liệu: 2026-07-01 đến 2026-08-28"))
+        question = replace(self.question,
+                           question="Doanh thu tháng này thay đổi bao nhiêu % so với tháng trước")
+        path = self.split.root / "data/demo_csv/sales.csv"
+        for previous, expected in ((260000, -50.0), (52000, 150.0)):
+            with self.subTest(previous=previous):
+                with path.open("w", encoding="utf-8-sig", newline="") as stream:
+                    writer = csv.writer(stream)
+                    writer.writerow(COLUMNS)
+                    writer.writerows(ROWS)
+                    writer.writerow(("PREV", "2026-07-01", "completed", "P1", "Cà phê sữa", 1, previous))
+                local = self.agent()
+                baseline = BaselineAgent()
+                self.addCleanup(baseline.close)
+                with patch.object(local.planner_worker, "run", side_effect=AssertionError("Unexpected model call")):
+                    for agent in (baseline, local):
+                        candidate = agent.answer(question, replace(context, cache={}))
+                        self.assertEqual((candidate.type, candidate.answer, candidate.confidence),
+                                         ("percent", expected, 1.0))
+                        self.assertEqual(candidate.evidence["execution"]["status"], "ok")
+
     def test_no_reference_reads_or_network_during_parent_inference(self):
         # Child tasks are fixed synthetic Python; they perform no model/library I/O.
         original = Path.open
@@ -253,7 +297,7 @@ class ExecutedOutputTests(unittest.TestCase):
 
     def test_rejects_nonfinite_bad_types_malformed_tables_and_unproven_output(self):
         cases = [("boolean", "true"), ("boolean", 1), ("number", True),
-                 ("number", float("inf")), ("percent", -0.1), ("percent", 100.01),
+                 ("number", float("inf")),
                  ("table", {"columns": ["a", "a"], "rows": []}),
                  ("table", {"columns": ["a"], "rows": [[1, 2]]}),
                  ("table", {"columns": ["a"], "rows": [[float("nan")]]}),
@@ -276,6 +320,30 @@ class ExecutedOutputTests(unittest.TestCase):
         self.assertEqual(check_executed(self.candidate("boolean", True), plan).type, "abstain")
         plan = replace(plan, intent="best_day")
         self.assertEqual(check_executed(self.candidate("date", "2026-08-28"), plan).type, "abstain")
+
+    def test_revenue_change_accepts_negative_and_above_100_percent(self):
+        plan = Plan("revenue", date(2026, 8, 1), date(2026, 8, 27),
+                    compare_start=date(2026, 7, 1), compare_end=date(2026, 7, 27),
+                    comparison="change_percent")
+        for value in (-100.0, -50.0, 0, 25.0, 150.0):
+            with self.subTest(value=value):
+                candidate = check_executed(self.candidate("percent", value), plan)
+                self.assertEqual((candidate.type, candidate.answer), ("percent", value))
+        self.assertEqual(check_executed(self.candidate("number", 25), plan).type, "abstain")
+
+    def test_cancellation_percentage_still_requires_0_to_100(self):
+        plan = Plan("cancel_rate", date(2026, 8, 1), date(2026, 8, 27))
+        for value in (-0.1, 100.01):
+            self.assertEqual(check_executed(self.candidate("percent", value), plan).type, "abstain")
+        for value in (0, 100):
+            self.assertEqual(check_executed(self.candidate("percent", value), plan).answer, value)
+
+    def test_result_validator_rejects_unsupported_plan_fields(self):
+        plan = Plan("revenue", date(2026, 8, 1), date(2026, 8, 27))
+        for invalid in (replace(plan, filters=(Filter("payment_method", "tiền mặt"),)),
+                        replace(plan, comparison="difference", compare_start=date(2026, 7, 1),
+                                compare_end=date(2026, 7, 27))):
+            self.assertEqual(check_executed(self.candidate("number", 10), invalid).type, "abstain")
 
 
 class SnapshotTests(unittest.TestCase):

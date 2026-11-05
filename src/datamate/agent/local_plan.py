@@ -20,7 +20,7 @@ from datamate.agent.validation import check_executed
 from datamate.agent.worker import Worker
 from datamate.contracts import BusinessContext, Candidate, Plan, Question
 from datamate.ingestion.catalog import json_value
-from datamate.semantics.planner import _period, plan_question
+from datamate.semantics.planner import _period
 from datamate.semantics.rules import read_rules
 from datamate.semantics.text import normalize_question
 
@@ -74,7 +74,7 @@ def resolved_period(question: Question, rulebook: str) -> tuple[date, date] | No
     if parsed is None:
         return None
     start, end, leftover = parsed
-    # Multiple periods require a comparison contract, even if model drops the second.
+    # Model proposals remain a single-period subset of the shared Plan contract.
     if _period(leftover, question.as_of_date, rules) is not None:
         return None
     end = min(end, question.as_of_date)
@@ -197,8 +197,9 @@ class LocalPlanAgent(BaselineAgent):
         return [dict(self._model_info)] if self._model_info else []
 
     def answer(self, question: Question, context: BusinessContext) -> Candidate:
-        if plan_question(question, read_rules(context.split.rulebook)) is not None:
-            return super().answer(question, context)
+        plan = self._plan(question, context)
+        if plan is not None:
+            return self._answer_plan(plan, context)
         if not _capabilities(context.split.rulebook) or resolved_period(question, context.split.rulebook) is None:
             return Candidate(reason="Local planner requires supported split rules and one resolved period")
         if _UNSUPPORTED.search(normalize_question(question.question)):
