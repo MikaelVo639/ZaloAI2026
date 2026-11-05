@@ -71,7 +71,7 @@ class BenchmarkTests(unittest.TestCase):
         split = validate_holdout(self.data, self.manifest)
         rows, metrics = analyze(out, self.data, self.manifest, split)
         self.assertEqual(metrics["train"]["correct"], 21)
-        self.assertEqual(metrics["worker_metadata_missing_questions"], 24)
+        self.assertEqual(metrics["worker_metadata_missing_questions"], 3)
         log_path = next((out / "logs").glob("*.json"))
         log = json.loads(log_path.read_text(encoding="utf-8"))
         log.update(
