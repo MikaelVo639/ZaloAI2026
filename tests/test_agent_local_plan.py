@@ -8,13 +8,13 @@ import tempfile
 import time
 import unittest
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from datamate.agent.local_plan import (
-    MAX_PROMPT_CHARACTERS, LocalPlanAgent, build_messages, parse_model_plan,
+    MAX_PROMPT_CHARACTERS, LocalPlanAgent, build_messages, calendar_context, parse_model_plan,
 )
 from datamate.agent.model_runtime import (
     MODEL_ID, MODEL_PARAMETERS, MODEL_REVISION, prepare_model, sha256, verify_snapshot,
@@ -145,7 +145,9 @@ class LocalAgentTests(unittest.TestCase):
         payload = json.loads(messages[1]["content"])
         self.assertEqual(payload["rulebook"], self.split.rulebook)
         self.assertEqual(payload["business_readme"], self.context.catalog.readme)
-        self.assertEqual(payload["calendar"], self.split.calendar_path.read_text(encoding="utf-8-sig"))
+        self.assertEqual(payload["calendar"]["sha256"], sha256(self.split.calendar_path))
+        self.assertEqual(payload["calendar"]["rows"][0]["solar_date"], "2026-08-27")
+        self.assertIn("lunar planning unsupported", payload["calendar"]["scope"])
         self.assertNotIn("id", payload)
         self.assertNotIn("business_id", payload)
         self.assertNotIn(str(self.root), messages[1]["content"])
@@ -159,6 +161,37 @@ class LocalAgentTests(unittest.TestCase):
             self.context.catalog, readme="x" * MAX_PROMPT_CHARACTERS))
         with self.assertRaisesRegex(ValueError, "budget"):
             build_messages(self.question, context)
+
+    def test_calendar_scope_reads_all_rows_and_exposes_only_requested_dates(self):
+        path = self.split.calendar_path
+        first = date(2020, 1, 1)
+        with path.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(("date", "lunar_day", "holiday"))
+            for index in range(4000):
+                writer.writerow(((first + timedelta(days=index)).isoformat(), 1, "synthetic calendar"))
+        self.assertGreater(path.stat().st_size, MAX_PROMPT_CHARACTERS)
+        payload = json.loads(build_messages(self.question, self.context)[1]["content"])
+        self.assertEqual(payload["calendar"]["total_rows"], 4000)
+        self.assertEqual(len(payload["calendar"]["rows"]), 2)  # month start and as-of/end
+        self.assertEqual(payload["calendar"]["sha256"], sha256(path))
+        self.assertEqual(payload["calendar"]["missing_requested_dates"], [])
+
+    def test_bad_or_duplicate_calendar_dates_abstain_in_prompt_building(self):
+        for content in ("date,lunar_day\n2026-08-27,1\n2026-08-27,2\n",
+                        "date,lunar_day\n2026-02-30,1\n", "unknown,lunar_day\n2026-08-27,1\n",
+                        "date,lunar_day\n2026-08-27\n"):
+            self.split.calendar_path.write_text(content, encoding="utf-8")
+            with self.subTest(content=content), self.assertRaises(ValueError):
+                calendar_context(self.split.calendar_path, {"2026-08-27"})
+
+    def test_invalid_context_never_starts_loading_model(self):
+        self.split.calendar_path.write_text("date\ninvalid-date\n", encoding="utf-8")
+        agent = self.agent()
+        with patch.object(agent.planner_worker, "run", side_effect=AssertionError("Unexpected model load")):
+            candidate = agent.answer(self.question, self.context)
+        self.assertEqual(candidate.type, "abstain")
+        self.assertIn("Local context rejected", candidate.reason)
 
     def test_model_plan_executes_in_worker_and_has_code_and_output(self):
         candidate = self.agent().answer(self.question, self.context)
@@ -370,6 +403,7 @@ class SnapshotTests(unittest.TestCase):
                 self.assertTrue(call.kwargs["local_files_only"])
                 self.assertFalse(call.kwargs["trust_remote_code"])
             self.assertTrue(auto_model.from_pretrained.call_args.kwargs["use_safetensors"])
+            self.assertEqual(auto_model.from_pretrained.call_args.kwargs["attn_implementation"], "sdpa")
             self.assertEqual(os.environ["HF_HUB_OFFLINE"], "1")
             self.assertEqual(os.environ["TRANSFORMERS_OFFLINE"], "1")
             self.assertEqual(info["actual_parameters"], 7_615_616_512)

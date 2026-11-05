@@ -36,9 +36,12 @@ bổ sung split giả để tiếp tục chạy sau bản sửa cache.
    thời gian hiện tại xác định đúng một kỳ dương lịch. Schema giữ cột, kiểu Python
    quan sát được và mẫu có sẵn; đơn vị được giữ trong README/cột gốc, không đoán.
    Đây là view tạm từ Catalog, chưa thay đầu ra schema/units chính thức của DATA-03.
-3. Prompt gồm câu hỏi, `as_of_date`, schema, README, rulebook, calendar của split.
+3. Prompt gồm câu hỏi, `as_of_date`, schema, README, rulebook và calendar của split.
    Không đưa question id/business id vào prompt, không có few-shot lấy từ test/nhãn.
-   Không cắt ngầm luật/schema/calendar khi vượt ngân sách ký tự hoặc token.
+   Calendar được đọc/kiểm tra toàn bộ, giữ SHA256 và số dòng, nhưng prompt chỉ có
+   dòng cho biên kỳ đã resolve và `as_of_date`, kèm scope và các ngày nguồn không có.
+   Model không hỗ trợ kỳ âm lịch; không dùng bản calendar tóm tắt này để suy luận Tết.
+   Rulebook/README/schema không bị cắt ngầm. Vượt giới hạn vẫn abstain.
 4. Model chỉ xuất JSON Plan với intent, start/end, top_k, unsupported và các dòng luật
    trích nguyên văn. Từ chối JSON trùng key, NaN, code, đáp án tự sinh, field lạ, intent
    chưa hỗ trợ, kỳ không khớp parser và thiếu luật từ split hiện tại.
@@ -82,6 +85,14 @@ uv run --no-sync datamate validate outputs/runs/agent02-b/submission.jsonl --que
 Khi đóng image, copy config mới trỏ tới thư mục weights trong image. Không tải model
 trong predict. Chuẩn bị runtime xong thì chạy lại với network tắt, `/data` read-only;
 artifact/checksum weights giữ ngoài Git.
+
+Config thử nghiệm dùng input tối đa 24.576 token, output 1.024, tổng dưới context
+mặc định 32.768 của snapshot. Tokenizer thật đã xác nhận 5 prompt business train sau
+khi scope calendar còn 9.250–18.852 token; trước sửa là 45.541–55.065. Đây chỉ là
+kiểm tra đầu vào bằng tokenizer, không phải model generation/benchmark GPU.
+Loader dùng `attn_implementation="sdpa"` để runtime có thể chọn attention kernel
+tiết kiệm bộ nhớ thay vì luôn tạo attention matrix eager; [Qwen2 hỗ trợ SDPA](https://huggingface.co/docs/transformers/v4.51.3/model_doc/qwen2).
+Hiệu năng/VRAM và tính lặp lại vẫn cần xác minh trên GPU thật.
 
 ## Bàn giao Evaluation và đo thời gian
 

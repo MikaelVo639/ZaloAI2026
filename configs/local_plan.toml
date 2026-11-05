@@ -9,5 +9,6 @@ question_timeout = 30
 ingestion_timeout = 300
 model_load_timeout = 600
 model_timeout = 30
-max_input_tokens = 8192
+# Full current rulebook/README/schema; calendar is scoped explicitly with a full-file checksum.
+max_input_tokens = 24576
 max_new_tokens = 1024

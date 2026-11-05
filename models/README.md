@@ -54,6 +54,9 @@ Không đặt weights trong split `/data`.
 `local_plan` chỉ nhận thư mục tồn tại, xác minh manifest/checksum rồi gọi
 `from_pretrained(..., local_files_only=True, trust_remote_code=False, use_safetensors=True)`.
 Worker đặt `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1` trước khi import runtime.
+Attention dùng SDPA với deterministic algorithms được bật; kernel, VRAM và kết quả
+lặp lại cần xác minh trên GPU thực. Config thử nghiệm giới hạn 24.576 input + 1.024
+output token; tokenizer-only kiểm tra trên CPU không được tính là đã chạy model.
 Xem [hướng dẫn offline chính chủ](https://huggingface.co/docs/transformers/v4.46.3/installation#offline-mode).
 Model load và generate đều có deadline; timeout/error luôn `abstain`.
 Worker là cơ chế deadline, không phải sandbox thực thi Python bất kỳ; prototype

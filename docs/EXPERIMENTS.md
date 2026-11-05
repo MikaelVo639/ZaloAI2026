@@ -1,5 +1,29 @@
 # Thí nghiệm có thể đối chiếu
 
+## AGENT-02 — sửa ngân sách prompt bằng tokenizer thật ngày 05/11/2026
+
+Sau khi có train, chọn 5 câu đủ kỳ dương lịch thuộc **business train** của manifest
+seed 42/0.2; không dùng nhãn hay public/private test. Chuẩn bị riêng tokenizer đúng
+revision Qwen đã khai báo, không tải weights; Transformers 4.51.3, Tokenizers 0.21.4,
+Jinja2 3.1.6, `local_files_only=True` và offline flags khi tokenize.
+
+Prompt ban đầu chứa toàn calendar: **45.541–55.065 token**, vượt cả context 32.768;
+calendar riêng chiếm 35.133 token. Đây là lỗi input bị phát hiện trước khi có GPU.
+Đã scope calendar tường minh về biên kỳ/as_of_date, giữ checksum toàn file/số dòng/
+ngày thiếu; vẫn đọc và kiểm tra mọi dòng, không đổi rulebook/README/schema hay source.
+Calendar có ngày trùng/sai header/ragged/ngày không hợp lệ làm abstain trước load.
+
+Trên đúng 5 prompt đó sau sửa: **9.250–18.852 token**, calendar 269–347 token.
+Config local_plan tăng input limit từ 8.192 lên 24.576, output 1.024; tổng dưới
+32.768. Prompt khác vẫn được kiểm budget và abstain nếu vượt, không bảo đảm 5 mẫu
+đại diện cho mọi schema. Loader chuyển sang SDPA; chưa đo GPU/VRAM hoặc generation.
+
+Counts và prompt probes giữ trong ignored `outputs/runs/agent02-readiness-20261105/`.
+Tokenization này không có model parameters chạy, không có đáp án hoặc điểm A/B mới.
+Sau bản sửa, sync/smoke/full unittest hoàn tất: **163 test, 162 qua, 1 test Windows
+skip**; smoke giữ 21 đúng / 0 sai / 3 abstain. Log suite giữ riêng trong ignored
+`outputs/runs/agent02-prompt-budget-20261105/`.
+
 ## AGENT-02 — benchmark train thật và bộ chạy acceptance ngày 05/11/2026
 
 Đã tự chuẩn bị train công khai từ URL BTC trong `COMPETITION.md`, không tải public/

@@ -5,6 +5,7 @@ validation cannot prove its interpretation, so confidence is deliberately diagno
 and this backend needs Evaluation's business holdout gate before promotion.
 """
 
+import csv
 import hashlib
 import json
 import math
@@ -15,7 +16,7 @@ from typing import Any
 
 from datamate.agent.baseline import BaselineAgent, _execution_failure
 from datamate.agent.compute import INTENTS
-from datamate.agent.model_runtime import generate_plan, prepare_model
+from datamate.agent.model_runtime import generate_plan, prepare_model, sha256
 from datamate.agent.validation import check_executed
 from datamate.agent.worker import Worker
 from datamate.contracts import BusinessContext, Candidate, Plan, Question
@@ -81,6 +82,38 @@ def resolved_period(question: Question, rulebook: str) -> tuple[date, date] | No
     return (start, end) if start <= end else None
 
 
+def calendar_context(path: Path, dates: set[str]) -> dict[str, Any]:
+    """Read/validate the whole split calendar, expose an explicit Gregorian scope.
+
+    The model may only propose the already resolved Gregorian period. Lunar
+    questions are unsupported; unrelated years of calendar rows are not prompt
+    context. Preserve a checksum and state every requested date absent from source.
+    """
+    seen, selected = set(), []
+    with path.open(encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        columns = reader.fieldnames or []
+        date_columns = [column for column in ("date", "solar_date") if column in columns]
+        if len(date_columns) != 1 or len(set(columns)) != len(columns):
+            raise ValueError("Calendar needs one explicit date/solar_date column and unique headers")
+        for row in reader:
+            if len(seen) >= 20000 or None in row or any(value is None for value in row.values()):
+                raise ValueError("Calendar is ragged or exceeds the row budget")
+            value = row[date_columns[0]]
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                raise ValueError("Calendar date must be ISO YYYY-MM-DD")
+            date.fromisoformat(value)
+            if value in seen:
+                raise ValueError("Calendar contains duplicate solar dates")
+            seen.add(value)
+            if value in dates:
+                selected.append(row)
+    return {"source": path.name, "sha256": sha256(path), "total_rows": len(seen),
+            "scope": "Resolved Gregorian period boundaries and as_of_date only; lunar planning unsupported",
+            "requested_dates": sorted(dates), "missing_requested_dates": sorted(dates - seen),
+            "rows": selected}
+
+
 def build_messages(question: Question, context: BusinessContext) -> list[dict[str, str]]:
     """Provisional schema view; replace through DATA-03 without changing Plan.
 
@@ -95,12 +128,11 @@ def build_messages(question: Question, context: BusinessContext) -> list[dict[st
                                                               for row in table.sample})}
                                    for column in table.columns],
                        "samples": table.sample})
-    # Only the calendar passed by this split; no discovery of reference labels.
-    with context.split.calendar_path.open(encoding="utf-8-sig") as stream:
-        calendar = stream.read(MAX_PROMPT_CHARACTERS + 1)
-    if len(calendar) > MAX_PROMPT_CHARACTERS:
-        raise ValueError("Calendar exceeds prompt budget; refusing partial context")
     period = resolved_period(question, context.split.rulebook)
+    dates = {question.as_of_date.isoformat()}
+    if period:
+        dates.update(day.isoformat() for day in period)
+    calendar = calendar_context(context.split.calendar_path, dates)
     payload = {"question": question.question, "as_of_date": question.as_of_date.isoformat(),
                "schema": schema, "business_readme": context.catalog.readme,
                "rulebook": context.split.rulebook, "calendar": calendar,
@@ -206,6 +238,10 @@ class LocalPlanAgent(BaselineAgent):
             return Candidate(reason="Question has conditions outside the current Plan contract")
         if self._model_error is not None:
             return Candidate(reason=self._model_error.reason, evidence=dict(self._model_error.evidence))
+        try:
+            messages = build_messages(question, context)
+        except (ValueError, TypeError, OSError) as exc:
+            return Candidate(reason=f"Local context rejected: {exc}")
         if self._model_generation != self.planner_worker.generation or not self.planner_worker.alive:
             loaded = self.planner_worker.run(self.load_model, self.model_load_timeout,
                                              model_path=self.model_path)
@@ -218,7 +254,6 @@ class LocalPlanAgent(BaselineAgent):
         evidence: dict[str, Any] = {"model": self._model_info,
                                     "planner_confidence": PROTOTYPE_CONFIDENCE}
         try:
-            messages = build_messages(question, context)
             evidence["prompt_sha256"] = hashlib.sha256(
                 json.dumps(messages, ensure_ascii=False).encode()).hexdigest()
             generated = self.planner_worker.run(

@@ -76,7 +76,7 @@ def prepare_model(cache: dict[str, Any], model_path: str) -> dict[str, Any]:
                                               trust_remote_code=False)
     model = AutoModelForCausalLM.from_pretrained(
         str(path), local_files_only=True, trust_remote_code=False, use_safetensors=True,
-        torch_dtype=torch.bfloat16, attn_implementation="eager")
+        torch_dtype=torch.bfloat16, attn_implementation="sdpa")
     actual_parameters = sum(parameter.numel() for parameter in model.parameters())
     if not 7_600_000_000 <= actual_parameters <= 7_620_000_000:
         raise ValueError("Loaded model parameter count differs from the declared 7.61B model")
@@ -86,6 +86,7 @@ def prepare_model(cache: dict[str, Any], model_path: str) -> dict[str, Any]:
             "manifest_sha256": sha256(path / "model_manifest.json"),
             "total_parameters": manifest["total_parameters"],
             "actual_parameters": actual_parameters,
+            "attention": "sdpa",
             "torch": torch.__version__, "transformers": transformers.__version__,
             "cuda": torch.version.cuda, "gpu": torch.cuda.get_device_name(0)}
     cache["model_info"] = info
