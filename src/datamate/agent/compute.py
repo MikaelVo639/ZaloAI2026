@@ -14,7 +14,8 @@ from functools import lru_cache
 from typing import Any, Callable
 
 from datamate.contracts import Candidate, Catalog, Plan
-from datamate.ingestion.sales import Sale, load_sales
+from datamate.agent.sales_source import load_business_sales
+from datamate.ingestion.sales import Sale
 
 
 def select_valid(sales: list[Sale], start: date, end: date) -> list[Sale]:
@@ -64,6 +65,13 @@ def daily_revenue(selected: list[Sale]) -> list[tuple[date, Decimal]]:
     return sorted(by_day.items(), key=lambda item: (-item[1], item[0]))
 
 
+def ranking_candidates(sales: list[Sale], eligible: frozenset[int] | None) -> list[Sale]:
+    """Rows allowed into a product ranking (the joined adapter excludes service fees)."""
+    if eligible is None:
+        return list(sales)
+    return [s for index, s in enumerate(sales) if index in eligible]
+
+
 def product_ranking(selected: list[Sale]) -> list[tuple[str, str, Decimal]]:
     quantities: dict[str, Decimal] = defaultdict(Decimal)
     names: dict[str, str] = {}
@@ -91,14 +99,21 @@ def _catalog_key(catalog: Catalog) -> tuple:
     return catalog.business_id, tuple((str(t.path), t.name) for t in catalog.tables)
 
 
-def prepare_sales(cache: dict[str, Any], catalog: Catalog) -> dict[str, Any]:
-    """Load one business into the worker cache; adapter failures are cached as well."""
+def prepare_sales(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -> dict[str, Any]:
+    """Load one business into the worker cache; adapter failures are cached as well.
+
+    ``rulebook`` is the current split's rulebook: the joined adapter's capabilities
+    come from it, so a different rulebook reloads the business.
+    """
     key = _catalog_key(catalog)
-    if cache.get("sales_key") != key:
+    if cache.get("sales_key") != key or cache.get("sales_rulebook", "") != rulebook:
         cache.clear()  # one business at a time keeps worker memory bounded
         cache["sales_key"] = key
+        cache["sales_rulebook"] = rulebook
         try:
-            cache["sales"] = load_sales(catalog)
+            sales, source, eligible = load_business_sales(catalog, rulebook)
+            cache["sales"] = (sales, source)
+            cache["ranking_eligible"] = eligible
         except (ValueError, OSError) as exc:
             cache["sales"] = exc
     loaded = cache["sales"]
@@ -115,11 +130,12 @@ INTENTS = frozenset({"revenue", "order_count", "top_products", "average_order",
                      "cancel_count", "cancel_rate", "best_day"})
 
 
-def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan) -> Candidate:
+def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                rulebook: str = "") -> Candidate:
     if plan.intent not in INTENTS:
         # A Plan intent this backend cannot compute must not fall through to a ranking.
         return Candidate(reason=f"Intent {plan.intent!r} not supported by baseline agent")
-    prepared = prepare_sales(cache, catalog)
+    prepared = prepare_sales(cache, catalog, rulebook)
     if not prepared["ok"]:
         return Candidate(reason=prepared["reason"])
     sales, source = cache["sales"]
@@ -203,17 +219,25 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan) -> Candidat
         return Candidate("date", evidence["result"], 1.0, "", evidence)
     if plan.intent != "top_products":  # unreachable while INTENTS is checked; keep explicit
         return Candidate(reason=f"Intent {plan.intent!r} not supported", evidence=evidence)
-    if not selected or any(s.quantity_base is None or not s.product_id or not s.product_name
-                           for s in selected):
+    eligible = cache.get("ranking_eligible")
+    ranked_rows = select_valid(ranking_candidates(sales, eligible), plan.start, plan.end)
+    evidence["ranking_rows"] = len(ranked_rows)
+    if not ranked_rows or any(s.quantity_base is None or not s.product_id or not s.product_name
+                              for s in ranked_rows):
         return Candidate(reason="Ranking needs explicit base quantities and product ids/names",
                          evidence=evidence)
-    ranking = product_ranking(selected)
+    ranking = product_ranking(ranked_rows)
+    # ``eligible`` (sale indices from the adapter lineage) can be large: log its size only.
+    candidates = "ranking_candidates(sales, None)" if eligible is None else \
+        "ranking_candidates(sales, eligible)"
+    if eligible is not None:
+        evidence["inputs"]["ranking_eligible_rows"] = len(eligible)
     answer = [name for _, name, _ in ranking[:plan.top_k]]
     result = answer[0] if plan.top_k == 1 else answer
     evidence.update(
         calculation="sum(quantity_base) by product_id, descending; ties by id",
-        code=_code(f"product_ranking({selection})[:{plan.top_k}]",
-                   select_valid, product_ranking),
+        code=_code(f"product_ranking(select_valid({candidates}, {window}))[:{plan.top_k}]",
+                   ranking_candidates, select_valid, product_ranking),
         # One row past k shows whether the boundary is a tie.
         ranking=[{"product_id": key, "product_name": name, "quantity_base": str(quantity)}
                  for key, name, quantity in ranking[:plan.top_k + 1]],

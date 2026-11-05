@@ -44,17 +44,17 @@ def unpicklable(cache):
     return lambda: None
 
 
-def slow_revenue(cache, catalog, plan):
+def slow_revenue(cache, catalog, plan, rulebook=""):
     if plan.intent == "revenue":
         time.sleep(60)
-    return compute.answer_plan(cache, catalog, plan)
+    return compute.answer_plan(cache, catalog, plan, rulebook)
 
 
-def failing_calculation(cache, catalog, plan):
+def failing_calculation(cache, catalog, plan, rulebook=""):
     raise KeyError("amount")
 
 
-def slow_prepare(cache, catalog):
+def slow_prepare(cache, catalog, rulebook=""):
     time.sleep(60)
 
 

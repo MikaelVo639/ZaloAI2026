@@ -53,7 +53,8 @@ class BaselineAgent:
             failure.evidence = {**planned, **failure.evidence}
             return failure
         result = self.worker.run(self.compute, self.question_timeout,
-                                 catalog=context.catalog, plan=plan)
+                                 catalog=context.catalog, plan=plan,
+                                 rulebook=context.split.rulebook)
         if not result.ok:
             return _execution_failure("Calculation", result, planned)
         candidate: Candidate = result.value
@@ -68,7 +69,8 @@ class BaselineAgent:
         if state is not None and state["generation"] == self.worker.generation:
             return None
         # First question of the business, or the worker was replaced after a timeout.
-        result = self.worker.run(self.prepare, self.ingestion_timeout, catalog=context.catalog)
+        result = self.worker.run(self.prepare, self.ingestion_timeout,
+                                 catalog=context.catalog, rulebook=context.split.rulebook)
         evidence: dict[str, Any] = {"ingestion_execution": result.execution()}
         if result.ok and result.value["ok"]:
             context.cache["worker_sales"] = {"ok": True, "generation": self.worker.generation}
