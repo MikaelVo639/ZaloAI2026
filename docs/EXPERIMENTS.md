@@ -1,5 +1,52 @@
 # Thí nghiệm có thể đối chiếu
 
+## AGENT-02 — benchmark train thật và bộ chạy acceptance ngày 05/11/2026
+
+Đã tự chuẩn bị train công khai từ URL BTC trong `COMPETITION.md`, không tải public/
+private test. Archive SHA256:
+`c1adbc654a301c30e4cf20b55d301381025f49db1162d88322b552d7472fea01`.
+File nguồn giữ nguyên ở ignored `data/raw/train`; không đưa dữ liệu/log vào Git.
+
+Lệnh đã chạy:
+
+```sh
+uv run datamate split-businesses --data-dir data/raw/train --output outputs/business_split.json --seed 42 --validation-fraction 0.2
+uv run datamate benchmark --checkout . --data-dir data/raw/train --holdout outputs/business_split.json --config configs/baseline.toml --output-dir outputs/runs/agent02-real-train-baseline-20261105
+```
+
+Inference revision `43cf869`, metadata `dirty=true`; config `configs/baseline.toml`.
+Holdout seed 42/0.2 có 24 business train và 6 validation. SHA256 manifest:
+`7e356421711fd5ffe4a7ed29e49b67e03c809fa70e1d8aa0cf3c0a787fea2164`.
+Input-tree SHA256 (không gồm answers):
+`ab2cfe298b3f3a93a825f973a1e5f479ab5067eadc44bbb1d64fb08ef2fef54d`.
+Đã xem câu hỏi thuộc business train để chuẩn bị đề xuất contract; không gọi kết quả
+này là đánh giá mù. Evaluation cần đối chiếu checksum manifest với bản team lưu.
+
+| Phân hoạch | N | Đúng | Sai | Abstain | PA local | Coverage |
+|---|---:|---:|---:|---:|---:|---:|
+| Toàn bộ train | 3000 | 151 | 0 | 2849 | 0.050333 | 0.050333 |
+| Validation business | 630 | 78 | 0 | 552 | 0.123810 | 0.123810 |
+
+Thời gian inference subprocess **82,72 giây**, macOS ARM64, 10 logical CPUs, RAM
+16 GiB, Python 3.12.16. Model load/generation = **0**. Số liệu khớp kết quả được báo
+trong SEM-01 #18, không có thay đổi thuật toán inference ở lượt này. Đây là baseline
+CPU/local proxy, **không phải kết quả Qwen, GPU hoặc leaderboard**.
+
+Artifact gồm experiment/input tree/config/holdout/metrics/outcomes/handoff và archive
+ở ignored `outputs/runs/agent02-real-train-baseline-20261105/`. Artifact SHA256:
+`d40425aa70e817e08301e5e44c5010e83742e50ff4c56d3cb2f23add779b2793`.
+
+`scripts/run_agent02_acceptance.py` chuẩn bị lượt A/B/model repeat trên môi trường
+GPU cấp sẵn. Nó kiểm tra CUDA/model local, gọi runner Evaluation, so từng câu mới
+thành sai, checksum submission hai lượt và thời gian gồm load/startup. Tạo phép
+chiếu theo số câu/business khi người chạy cung cấp quy mô private. Không tải model,
+không thuê cloud, không gọi một run baseline là model run.
+
+Máy hiện tại chưa có CUDA/runtime/weights; preflight đã báo thiếu và dừng trước
+inference. Người dùng xác nhận chưa có môi trường GPU. Vì vậy chưa có A/B model
+thật, ngưỡng confidence hiệu chỉnh hay kết luận private dưới 6 giờ. Contract boolean/
+table được soạn ở `AGENT_02_CONTRACT.md`, chờ Semantics và Data xác nhận trước code.
+
 ## AGENT-02 — tích hợp SEM-01 #18 ngày 05/11/2026
 
 Commit prototype `26724e1` được ghép với main `e045f3f` trên nhánh Agent. Giữ contract

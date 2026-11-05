@@ -85,6 +85,27 @@ artifact/checksum weights giữ ngoài Git.
 
 ## Bàn giao Evaluation và đo thời gian
 
+Đã thêm bộ chạy acceptance cho máy GPU **đã được cấp sẵn**, không tải dependency
+hay weights trong lúc chạy:
+
+```sh
+uv run --no-sync python scripts/run_agent02_acceptance.py --check-environment
+uv run --no-sync python scripts/run_agent02_acceptance.py --data-dir data/raw/train --holdout outputs/business_split.json --output-dir outputs/runs/agent02-gpu-acceptance
+```
+
+Lệnh đầu chỉ kiểm tra runtime/CUDA >=12.8 và manifest local. Lệnh sau chạy baseline
+một lần, model hai lần qua runner Evaluation có hard process deadline, rồi kiểm tra
+đúng input/holdout/reference, kết quả lặp lại, từng câu mới chuyển sang sai, và PA
+validation. Run phải có model generation trên GPU thực; chỉ có câu trả lời baseline
+không được tính là đã thử hướng B. Quyết định A/B cuối vẫn do Evaluation/Integration.
+
+`acceptance.json` tách thời gian model load, phần theo câu và catalog theo business;
+đồng hồ subprocess gồm cả startup/import và load model. Khi biết quy mô private,
+truyền cả `--private-questions N --private-businesses B` để có phép chiếu tuyến tính.
+Đây là ước tính theo phân bố workload/hardware tương đương, không bảo đảm cho input
+chưa biết. Không tự thuê cloud hoặc phát sinh chi phí. Trên máy chưa có CUDA/weights,
+preflight báo thiếu và dừng; không chạy fallback rồi ghi nhận thành đo model.
+
 Dùng đúng manifest holdout team đã cố định, seed 42, validation fraction 0.2; nếu
 chưa có manifest thì Evaluation tạo một lần theo `EXPERIMENTS.md`. Không chọn seed
 hoặc threshold theo validation/test. Chạy A/B trên cùng questions/rulebook/calendar
@@ -115,6 +136,9 @@ không phải hard deadline của toàn pipeline; runner benchmark có process d
 Threshold chỉ được chọn bằng business train rồi kiểm lại validation một lần.
 
 ## Phần Plan còn cần Semantics + Data thống nhất
+
+Đề xuất cụ thể cho boolean tăng doanh thu liên tục và table công nợ nằm ở
+[AGENT_02_CONTRACT.md](AGENT_02_CONTRACT.md), chưa sửa grammar hay shared contract.
 
 SEM-01 #18 đã thêm `Filter` và các trường kỳ so sánh; dùng lại contract đó. Các khả
 năng tiếp theo bên dưới vẫn là đề xuất, chưa viết intent mới trong AGENT-02:

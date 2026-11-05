@@ -26,3 +26,9 @@ Confidence của Plan do model là hằng số chẩn đoán **0.5**, không l�
 hiệu chỉnh. Config thử nghiệm nhận mức này để Evaluation có thể đo sai/đúng; ngưỡng
 1.0 mặc định chỉ giữ đáp án baseline. Việc bật ngưỡng 0.5 không chứng minh an toàn
 ngữ nghĩa; xem giới hạn và bàn giao ở [AGENT_02.md](../docs/AGENT_02.md).
+
+Sau khi có GPU/weights đã chuẩn bị, dùng `scripts/run_agent02_acceptance.py` để
+chạy baseline, model và model repeat trên cùng input/holdout. `--check-environment`
+kiểm tra readiness mà không tải gì. Bộ chạy ghi cấu hình thực tế vào artifact;
+`--private-questions` và `--private-businesses` chỉ tạo ước tính theo workload tương
+đương, không phải đo private test. Xem hướng dẫn trong `docs/AGENT_02.md`.
