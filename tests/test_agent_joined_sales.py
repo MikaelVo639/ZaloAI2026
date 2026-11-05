@@ -6,12 +6,15 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
-import datamate.agent.baseline as baseline_module
+import datamate.agent.sales_source as source_module
 import datamate.io as io_module
+from datamate.agent import compute
 from datamate.agent.baseline import BaselineAgent
 from datamate.contracts import BusinessContext, Question, Split
 from datamate.ingestion.catalog import build_catalog
 from datamate.pipeline import Config, predict
+from datamate.semantics.planner import plan_question
+from datamate.semantics.rules import read_rules
 
 
 RULEBOOK = """# Synthetic current-split rules
@@ -96,10 +99,22 @@ class JoinedSalesAgentTests(unittest.TestCase):
     def _question(text, business="shop", identifier="q"):
         return Question(identifier, business, text, date(2026, 1, 31))
 
+    def _agent(self):
+        agent = BaselineAgent()
+        self.addCleanup(agent.close)
+        return agent
+
+    def _answer_in_process(self, question, context, cache=None):
+        """Run the worker task in this process so adapter patches apply."""
+        plan = plan_question(question, read_rules(context.split.rulebook))
+        self.assertIsNotNone(plan)
+        return compute.answer_plan({} if cache is None else cache, context.catalog, plan,
+                                   context.split.rulebook)
+
     def test_joined_revenue_order_count_ranking_statuses_and_service_fee(self):
         self._write_joined()
         context = self._context()
-        agent = BaselineAgent()
+        agent = self._agent()
 
         revenue = agent.answer(self._question("Doanh thu ngày 01/01/2026"), context)
         orders = agent.answer(self._question("Có bao nhiêu đơn ngày 01/01/2026"), context)
@@ -117,6 +132,9 @@ class JoinedSalesAgentTests(unittest.TestCase):
         self.assertEqual(revenue.evidence["service_fee"]["rows"], 1)
         self.assertEqual(ranking.evidence["selected_rows"], 3)
         self.assertEqual(ranking.evidence["ranking_rows"], 2)
+        self.assertEqual(ranking.evidence["inputs"]["ranking_eligible_rows"], 4)
+        self.assertIn("ranking_candidates(sales, eligible)", ranking.evidence["code"]["call"])
+        self.assertEqual(revenue.evidence["execution"]["status"], "ok")
         self.assertNotIn("lineage", revenue.evidence)
         json.dumps(revenue.evidence, ensure_ascii=False, allow_nan=False)
 
@@ -129,7 +147,7 @@ class JoinedSalesAgentTests(unittest.TestCase):
             [["F1", "2026-01-01", "completed", "10", "P", "Flat product", "3"]],
         )
         context = self._context("flat")
-        result = BaselineAgent().answer(
+        result = self._agent().answer(
             self._question("Doanh thu ngày 01/01/2026", "flat"), context
         )
         self.assertEqual((result.type, result.answer), ("number", 10))
@@ -138,19 +156,24 @@ class JoinedSalesAgentTests(unittest.TestCase):
     def test_partial_or_ambiguous_joined_schema_abstains_without_flat_fallback(self):
         self._write_joined()
         self._write_csv(self.data / "shop" / "orders-copy.csv", ORDER_HEADER, [])
-        with patch.object(baseline_module, "load_sales",
+        with patch.object(source_module, "load_sales",
                           side_effect=AssertionError("must not fall back")):
-            result = BaselineAgent().answer(
+            result = self._answer_in_process(
                 self._question("Doanh thu ngày 01/01/2026"), self._context()
             )
         self.assertEqual(result.type, "abstain")
         self.assertIn("AMBIGUOUS_JOINED_MAPPING", result.reason)
+        through_worker = self._agent().answer(
+            self._question("Doanh thu ngày 01/01/2026"), self._context()
+        )
+        self.assertEqual(through_worker.type, "abstain")
+        self.assertIn("AMBIGUOUS_JOINED_MAPPING", through_worker.reason)
 
         (self.data / "shop" / "orders-copy.csv").unlink()
         (self.data / "shop" / "products.csv").unlink()
-        with patch.object(baseline_module, "load_sales",
+        with patch.object(source_module, "load_sales",
                           side_effect=AssertionError("must not fall back")):
-            partial = BaselineAgent().answer(
+            partial = self._answer_in_process(
                 self._question("Doanh thu ngày 01/01/2026"), self._context()
             )
         self.assertEqual(partial.type, "abstain")
@@ -158,7 +181,7 @@ class JoinedSalesAgentTests(unittest.TestCase):
 
         unsupported = self.data / "unsupported"
         self._write_csv(unsupported / "unknown.csv", ["a", "b"], [["1", "2"]])
-        result = BaselineAgent().answer(
+        result = self._agent().answer(
             self._question("Doanh thu ngày 01/01/2026", "unsupported"),
             self._context("unsupported"),
         )
@@ -185,9 +208,9 @@ class JoinedSalesAgentTests(unittest.TestCase):
                 self._write_joined(
                     business, orders=case.get("orders"), details=case["details"]
                 )
-                with patch.object(baseline_module, "load_sales",
+                with patch.object(source_module, "load_sales",
                                   side_effect=AssertionError("must not fall back")):
-                    result = BaselineAgent().answer(
+                    result = self._answer_in_process(
                         self._question("Doanh thu ngày 01/01/2026", business),
                         self._context(business),
                     )
@@ -200,11 +223,24 @@ class JoinedSalesAgentTests(unittest.TestCase):
             "| Mặt hàng | Phí phục vụ không phải mặt hàng, không xếp hạng. Vẫn tính vào doanh thu |\n",
             "",
         )
-        result = BaselineAgent().answer(
+        result = self._agent().answer(
             self._question("Doanh thu ngày 01/01/2026"), self._context(rulebook=changed)
         )
         self.assertEqual(result.type, "abstain")
         self.assertIn("RULE_CAPABILITY_MISSING", result.reason)
+
+    def test_worker_cache_reloads_when_the_split_rulebook_changes(self):
+        self._write_joined()
+        context = self._context()
+        changed = RULEBOOK.replace(
+            "| Mặt hàng | Phí phục vụ không phải mặt hàng, không xếp hạng. Vẫn tính vào doanh thu |\n",
+            "",
+        )
+        cache = {}
+        self.assertTrue(compute.prepare_sales(cache, context.catalog, RULEBOOK)["ok"])
+        missing = compute.prepare_sales(cache, context.catalog, changed)
+        self.assertFalse(missing["ok"])
+        self.assertIn("RULE_CAPABILITY_MISSING", missing["reason"])
 
     def test_failure_is_cached_per_context_and_does_not_stop_next_business(self):
         self._write_joined(
@@ -212,11 +248,11 @@ class JoinedSalesAgentTests(unittest.TestCase):
             details=[["20", "1", "2", "P1", "2", "MISSING", "0", "10", "ly"]],
         )
         self._write_joined("good")
-        agent = BaselineAgent()
+        agent = self._agent()
         bad_context = self._context("bad")
         good_context = self._context("good")
-        with patch.object(baseline_module, "load_joined_sales",
-                          wraps=baseline_module.load_joined_sales) as loader:
+        # The adapter runs in the worker process: count the parent's ingestion requests.
+        with patch.object(agent.worker, "run", wraps=agent.worker.run) as run:
             first = agent.answer(
                 self._question("Doanh thu ngày 01/01/2026", "bad", "bad-1"), bad_context
             )
@@ -227,22 +263,41 @@ class JoinedSalesAgentTests(unittest.TestCase):
                 self._question("Doanh thu ngày 01/01/2026", "good", "good-1"), good_context
             )
         self.assertEqual((first.type, second.type), ("abstain", "abstain"))
+        self.assertIn("ORPHAN_FK", second.reason)
         self.assertEqual((good.type, good.answer), ("number", 65))
-        self.assertEqual(loader.call_count, 2)
+        prepares = [call for call in run.call_args_list if call.args[0] is agent.prepare]
+        self.assertEqual(len(prepares), 2)
         self.assertIsNot(bad_context.cache["rules"], good_context.cache["rules"])
+
+        cache = {}
+        with patch.object(source_module, "load_joined_sales",
+                          wraps=source_module.load_joined_sales) as loader:
+            for _ in range(2):
+                self.assertFalse(
+                    compute.prepare_sales(cache, bad_context.catalog, RULEBOOK)["ok"])
+            self.assertTrue(compute.prepare_sales(cache, good_context.catalog, RULEBOOK)["ok"])
+        self.assertEqual(loader.call_count, 2)
 
     def test_success_is_read_once_per_business_context(self):
         self._write_joined()
         context = self._context()
-        agent = BaselineAgent()
-        with patch.object(baseline_module, "load_joined_sales",
-                          wraps=baseline_module.load_joined_sales) as loader:
-            agent.answer(self._question("Doanh thu ngày 01/01/2026", identifier="q1"), context)
-            agent.answer(self._question("Có bao nhiêu đơn ngày 01/01/2026", identifier="q2"), context)
-            agent.answer(
-                self._question("Mặt hàng bán chạy nhất ngày 01/01/2026", identifier="q3"),
-                context,
-            )
+        questions = [
+            self._question("Doanh thu ngày 01/01/2026", identifier="q1"),
+            self._question("Có bao nhiêu đơn ngày 01/01/2026", identifier="q2"),
+            self._question("Mặt hàng bán chạy nhất ngày 01/01/2026", identifier="q3"),
+        ]
+        agent = self._agent()
+        with patch.object(agent.worker, "run", wraps=agent.worker.run) as run:
+            answers = [agent.answer(question, context) for question in questions]
+        self.assertEqual([a.answer for a in answers], [65, 2, "Trà"])
+        prepares = [call for call in run.call_args_list if call.args[0] is agent.prepare]
+        self.assertEqual(len(prepares), 1)
+
+        cache = {}
+        with patch.object(source_module, "load_joined_sales",
+                          wraps=source_module.load_joined_sales) as loader:
+            in_process = [self._answer_in_process(q, context, cache) for q in questions]
+        self.assertEqual([a.answer for a in in_process], [65, 2, "Trà"])
         self.assertEqual(loader.call_count, 1)
 
     def test_pipeline_inference_never_reads_reference_answers(self):

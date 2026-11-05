@@ -14,9 +14,51 @@ _FILLERS = re.compile(
     r"\b(?:nhung mat hang nao|nhung san pham nao|mat hang nao|"
     r"cho toi biet|cho minh biet|cho minh hoi|cho hoi|xem giup|coi gium|check gium|"
     r"giup minh|tinh rieng|tong cong|cua hang|cua shop|la bao nhieu|bao nhieu|bao nhiu|"
-    r"bnhiu|nhiu|bn|tien|dong|trong|cua|shop|la|co|duoc|nao|nhung|gi|vay|a|nhi|ngay|"
+    r"bnhiu|nhieu|nhiu|bn|tien|dong|trong|cua|shop|la|co|duoc|nao|nhung|gi|vay|a|nhi|ngay|"
     r"e|z|ta|ha|nhe|do)\b"
 )
+_ORDER = r"(?:don|bill|order)(?: hang)?"
+_REVENUE = r"(?:doanh thu|dthu)"
+_ONE = r"(?:mot|moi|1)"
+# (intent, rule feature that must be enabled, pattern, fragments also removed). First match
+# wins, so specific intents come before the generic "doanh thu" / "số đơn" ones.
+_INTENTS = (
+    ("cancel_rate", "cancel_rate",
+     rf"t[iy] le (?:{_ORDER} )?(?:bi )?huy(?: {_ORDER})?"
+     rf"|(?:co )?{_AMOUNT} phan tram {_ORDER} (?:bi |da )?huy",
+     (rf"\b(?:{_AMOUNT} )?phan tram\b",)),
+    ("cancel_count", "cancelled_order",
+     rf"(?:dem )?so {_ORDER} (?:bi |da )?huy"
+     rf"|(?:co )?{_AMOUNT} {_ORDER} (?:bi huy|da huy|o trang thai huy)"
+     rf"|bi huy {_AMOUNT} {_ORDER}", ()),
+    ("average_order", "average_order",
+     rf"gia tri trung binh {_ONE} {_ORDER}"
+     rf"|{_REVENUE} (?:trung binh|binh quan) (?:tren )?{_ONE} {_ORDER}"
+     rf"|trung binh {_ONE} {_ORDER}(?P<mid>.*?) mang ve {_AMOUNT} {_REVENUE}", ()),
+    ("top_products", None,
+     r"(?:(\d+) )?(?:mat hang|san pham|hang|mon) (?:ban chay|ban duoc nhieu|ban nhieu|chay) nhat",
+     ()),
+    ("revenue", None, rf"(?:tong )?{_REVENUE}", ()),
+    ("order_count", None,
+     rf"(?:tong )?so (?:luong )?{_ORDER}|(?:ban duoc |ban |co )?(?:tong cong )?{_AMOUNT} {_ORDER}",
+     ()),
+)
+
+
+def _best_day(text: str) -> str | None:
+    """'Ngày nào doanh thu cao nhất' (also after 'bán được nhiều tiền' became 'doanh thu')."""
+    if not re.search(r"\bngay nao\b", text):
+        return None
+    reduced = re.sub(r"\bngay nao\b", " ", text, count=1)
+    revenue = re.search(rf"\b(?:xet theo )?{_REVENUE}\b", reduced)
+    if not revenue:
+        return None
+    reduced = reduced[:revenue.start()] + " " + reduced[revenue.end():]
+    # "thấp nhất" leaves "thap" behind, so the leftover check rejects it.
+    best = re.search(r"\bban dat nhat\b|\b(?:cao|nhieu) nhat\b|\bnhat\b", reduced)
+    if not best:
+        return None
+    return reduced[:best.start()] + " " + reduced[best.end():]
 
 
 def plan_question(question: Question, rules: Rules) -> Plan | None:
@@ -28,22 +70,27 @@ def plan_question(question: Question, rules: Rules) -> Plan | None:
     text = _rule_synonyms(text, rules, used)
     intent = ""
     top_k = 1
-    patterns = (
-        ("top_products", r"(?:(\d+) )?(?:mat hang|san pham|hang|mon) (?:ban chay|ban duoc nhieu|ban nhieu|chay) nhat"),
-        ("revenue", r"(?:tong )?(?:doanh thu|dthu)"),
-        ("order_count", r"(?:tong )?so (?:luong )?(?:don(?: hang)?|bill)"
-                        rf"|(?:ban duoc |ban |co )?(?:tong cong )?{_AMOUNT} (?:don(?: hang)?|bill)"),
-    )
-    for kind, pattern in patterns:
+    best_day = _best_day(text)
+    if best_day is not None:
+        intent, text = "best_day", best_day
+    for kind, feature, pattern, extras in () if intent else _INTENTS:
         match = re.search(pattern, text)
-        if match:
-            intent = kind
-            if kind == "top_products":
-                top_k = int(match.group(1) or 1)
-                if not rules.quantity_ranking or not 1 <= top_k <= 100:
-                    return None
-            text = text[:match.start()] + " " + text[match.end():]
-            break
+        if not match:
+            continue
+        if feature and not getattr(rules, feature):
+            return None
+        intent = kind
+        if kind == "top_products":
+            top_k = int(match.group(1) or 1)
+            if not rules.quantity_ranking or not 1 <= top_k <= 100:
+                return None
+        middle = match.groupdict().get("mid") or ""
+        text = text[:match.start()] + " " + middle + " " + text[match.end():]
+        for extra in extras:
+            text = re.sub(extra, " ", text)
+        if feature:
+            used.append(feature)
+        break
     if not intent:
         return None
     resolved = _period(text, question.as_of_date, rules, used)

@@ -16,6 +16,10 @@ from datamate.pipeline import Config, predict
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="datamate", description="Offline DataMate team starter")
     commands = result.add_subparsers(dest="command", required=True)
+    bench = commands.add_parser('benchmark', help='Offline EVAL-01 run and local-proxy report')
+    for name in ('checkout', 'data-dir', 'holdout', 'config', 'output-dir'):
+        bench.add_argument('--' + name, type=Path, required=True)
+    bench.add_argument('--compare-to', type=Path)
     demo = commands.add_parser("demo", help="Generate synthetic CSV/XLSX/SQLite smoke-test data")
     demo.add_argument("--output", type=Path, default=Path("data/demo"))
     smoke = commands.add_parser("smoke", help="Generate/reuse demo, predict, validate and check metrics")
@@ -56,7 +60,11 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.reconfigure(encoding="utf-8")
     args = parser().parse_args(argv)
     try:
-        if args.command == "demo":
+        if args.command == 'benchmark':
+            from datamate.evaluation.benchmark import benchmark
+            report = benchmark(args.checkout, args.data_dir, args.holdout, args.config,
+                               args.output_dir, args.compare_to)
+        elif args.command == "demo":
             report = create_demo(args.output)
         elif args.command == "smoke":
             report = run_smoke(args.data_dir, args.output_dir)
