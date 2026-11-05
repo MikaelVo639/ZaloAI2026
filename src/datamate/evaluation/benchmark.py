@@ -9,12 +9,13 @@ import random
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from datamate.evaluation.scorer import evaluate
+from datamate.evaluation.scorer import SCORER_VERSION, evaluate
 from datamate.evaluation.validation import validate_submission
 from datamate.ingestion.catalog import build_catalog
 from datamate.io import index_records, load_split, read_jsonl
@@ -25,6 +26,15 @@ from datamate.semantics.text import fold
 def digest(path):
     with Path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def scorer_identity():
+    # Include every source file involved in matching and validating answers.
+    root = Path(__file__).resolve().parents[1]
+    files = ("evaluation/scorer.py", "evaluation/validation.py", "semantics/text.py")
+    sources = {name: digest(root / name) for name in files}
+    return {"scorer_version": SCORER_VERSION,
+            "scorer_sha256": hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest()}
 
 
 def save(path, value):
@@ -195,7 +205,7 @@ def run_process(command, cwd, timeout, stdout, stderr):
 
 def source_metadata(checkout):
     def git(*args):
-        return subprocess.check_output(["git", "-C", str(checkout), *args], text=True).strip()
+        return subprocess.check_output(["git", "-C", str(checkout), *args], text=True, encoding="utf-8").strip()
 
     return {
         "revision": git("rev-parse", "HEAD"),
@@ -282,10 +292,12 @@ def csv_rows(path, rows, fields):
         writer.writerows(rows)
 
 
-def compare_runs(current, previous, identity):
+def compare_runs(current, previous, identity, allow_config_difference=False,
+                 current_config=None, validation_ids=None):
     old = json.loads((previous / "experiment.json").read_text(encoding="utf-8"))
-    if old.get("status") != "complete" or any(old.get(k) != identity[k] for k in identity):
-        raise ValueError("Comparison requires complete runs with identical inputs/holdout/config")
+    keys = set(identity) - ({"config_sha256"} if allow_config_difference else set())
+    if old.get("status") != "complete" or any(old.get(k) != identity[k] for k in keys):
+        raise ValueError("Comparison requires complete runs with identical inputs/labels/holdout/scorer/config")
     before = index_records(read_jsonl(previous / "outcomes.jsonl"))
     after = index_records(current)
     if before.keys() != after.keys():
@@ -302,8 +314,30 @@ def compare_runs(current, previous, identity):
                     "after": b,
                 }
             )
+    config_before = old.get("config", {})
+    config_after = current_config if current_config is not None else config_before
+    config_diff = {k: {"before": config_before.get(k), "after": config_after.get(k)}
+                   for k in sorted(set(config_before) | set(config_after))
+                   if config_before.get(k) != config_after.get(k)}
+    selected = set(validation_ids) if validation_ids is not None else set(after)
+    if not selected or selected - set(after):
+        raise ValueError("Invalid validation IDs for comparison")
+    new_wrong = [key for key in sorted(selected)
+                 if before[key]["outcome"] != "wrong" and after[key]["outcome"] == "wrong"]
+    def pa(index):
+        return sum({"correct": 1, "wrong": -1, "abstain": 0}[index[k]["outcome"]]
+                   for k in selected) / len(selected)
     return {
         "previous_revision": old["revision"],
+        "allow_config_difference": allow_config_difference,
+        "config_before": config_before, "config_after": config_after,
+        "config_diff": config_diff,
+        "config_sha256_before": old.get("config_sha256"),
+        "config_sha256_after": identity.get("config_sha256"),
+        "validation": {"n": len(selected), "pa_before": pa(before), "pa_after": pa(after),
+                       "new_wrong_ids": new_wrong,
+                       "quality_gate_passed": pa(after) > pa(before) and not new_wrong,
+                       "integration_approval_required": True},
         "changes": changes,
         "transitions": dict(Counter(c["transition"] for c in changes)),
         "identical_answers": not changes,
@@ -357,6 +391,7 @@ def analyze(output, data, manifest, split):
             "business_id": question.business_id,
             "question": question.question,
             "as_of_date": question.as_of_date.isoformat(),
+            "partition": "validation" if outcome["id"] in selected else "train",
             "reason": log.get("reason", ""),
             "group": group,
             "topic": topic(log),
@@ -369,7 +404,7 @@ def analyze(output, data, manifest, split):
         }
         rows.append(row)
         if outcome["outcome"] != "correct":
-            groups[(owner, group)].append(row)
+            groups[(owner, group, row["topic"] if group == "grammar_rules" else "all")].append(row)
     with (output / "outcomes.jsonl").open("w", encoding="utf-8") as stream:
         for row in rows:
             stream.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -397,14 +432,17 @@ def analyze(output, data, manifest, split):
     handoff = {}
     for owner in ("Data", "Semantics", "Agent"):
         ranked = sorted(
-            ((g, cases) for (o, g), cases in groups.items() if o == owner),
+            (((g, t), cases) for (o, g, t), cases in groups.items() if o == owner),
             key=lambda item: (-len(item[1]), item[0]),
         )[:3]
         handoff[owner] = [
             {
-                "group": g,
+                "group": g[0], "topic": g[1],
                 "affected_questions": len(cases),
-                "cases": sorted(cases, key=lambda r: r["id"])[:3],
+                "train_questions": sum(r["partition"] == "train" for r in cases),
+                "validation_questions": sum(r["partition"] == "validation" for r in cases),
+                "cases": sorted((r for r in cases if r["partition"] == "train"),
+                                key=lambda r: r["id"])[:3],
             }
             for g, cases in ranked
         ]
@@ -414,7 +452,10 @@ def analyze(output, data, manifest, split):
     return rows, metrics
 
 
-def benchmark(checkout, data_dir, holdout, config, output_dir, compare_to=None):
+def benchmark(checkout, data_dir, holdout, config, output_dir, compare_to=None,
+              allow_config_difference=False):
+    if allow_config_difference and compare_to is None:
+        raise ValueError("--allow-config-difference requires --compare-to")
     started = time.perf_counter()
     checkout, data, holdout, config, output = map(
         Path.resolve, map(Path, (checkout, data_dir, holdout, config, output_dir))
@@ -434,6 +475,7 @@ def benchmark(checkout, data_dir, holdout, config, output_dir, compare_to=None):
         "input_sha256": hashlib.sha256(json.dumps(tree).encode()).hexdigest(),
         "holdout_sha256": digest(holdout),
         "config_sha256": digest(config),
+        **scorer_identity(),
     }
     metadata = {
         **source_metadata(checkout),
@@ -441,7 +483,7 @@ def benchmark(checkout, data_dir, holdout, config, output_dir, compare_to=None):
         "status": "running",
         "config": vars(settings),
         "validation_fraction": 0.2,
-        "environment": environment_metadata(),
+        "environment": {**environment_metadata(), "runner_python": sys.version},
         "runner_source_sha256": digest(Path(__file__)),
         "data_exposure": "Full train inspected; not blind; local proxy, not official.",
     }
@@ -487,11 +529,12 @@ def benchmark(checkout, data_dir, holdout, config, output_dir, compare_to=None):
                 rows,
                 Path(compare_to).resolve(),
                 {**identity, "reference_sha256": metadata["reference_sha256"]},
+                allow_config_difference, vars(settings), manifest["validation_ids"],
             )
             save(output / "comparison.json", comparison)
         metadata["status"] = "complete"
         lines = [
-            "# EVAL-01 — local proxy (not official)",
+            "# EVAL-02 — local proxy (not official)",
             "",
             metadata["data_exposure"],
             "",
@@ -511,11 +554,27 @@ def benchmark(checkout, data_dir, holdout, config, output_dir, compare_to=None):
             f"Questions with execution errors: {metrics['execution_error_questions']}",
             f"Questions without worker metadata: {metrics['worker_metadata_missing_questions']}",
         ]
+        lines += ["", f"Scorer: {SCORER_VERSION}", f"Scorer SHA256: {identity['scorer_sha256']}"]
+        if compare_to:
+            gate = comparison["validation"]
+            lines += ["", f"Validation PA before/after: {gate['pa_before']:.6f} / {gate['pa_after']:.6f}",
+                      f"New wrong validation IDs: {gate['new_wrong_ids']}",
+                      f"Quality gate passed: {gate['quality_gate_passed']} (Integration approval still required)"]
         (output / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     except (ValueError, OSError, KeyError) as exc:
         metadata.update(status="incomplete", failure=str(exc))
     metadata["total_wall_seconds"] = time.perf_counter() - started
     save(output / "experiment.json", metadata)
+    package_artifacts(output)
+    if metadata["status"] != "complete":
+        raise ValueError(metadata["failure"])
+    return {"status": metadata["status"], "revision": metadata["revision"],
+            "metrics": {name: {k: metrics[name][k] for k in
+                        ("n", "correct", "wrong", "abstain", "pa", "coverage")}
+                        for name in ("train", "validation")}}
+
+
+def package_artifacts(output):
     archive = output / "artifact.zip"
     with ZipFile(archive, "w", ZIP_DEFLATED) as bundle:
         for path in sorted(output.rglob("*")):
@@ -524,13 +583,36 @@ def benchmark(checkout, data_dir, holdout, config, output_dir, compare_to=None):
     (output / "artifact.zip.sha256").write_text(
         digest(archive) + "  artifact.zip\n", encoding="ascii"
     )
-    if metadata["status"] != "complete":
-        raise ValueError(metadata["failure"])
-    return {
-        "status": metadata["status"],
-        "revision": metadata["revision"],
-        "metrics": {
-            name: {k: metrics[name][k] for k in ("n", "correct", "wrong", "abstain", "pa")}
-            for name in ("train", "validation")
-        },
-    }
+
+
+def rescore(run_dir, data_dir, holdout, output_dir):
+    """Re-score completed historical inference without modifying its artifacts."""
+    previous, data, holdout, output = map(Path.resolve, map(Path, (run_dir, data_dir, holdout, output_dir)))
+    if output.exists() or output.is_relative_to(data) or data.is_relative_to(output):
+        raise ValueError("Rescore requires a new output tree separate from inputs")
+    old = json.loads((previous / "experiment.json").read_text(encoding="utf-8"))
+    manifest = json.loads(holdout.read_text(encoding="utf-8"))
+    split = validate_holdout(data, manifest)
+    tree = input_tree(data)
+    identity = {"input_sha256": hashlib.sha256(json.dumps(tree).encode()).hexdigest(),
+                "holdout_sha256": digest(holdout), "reference_sha256": digest(data / "answers.jsonl")}
+    if old.get("status") != "complete" or any(old.get(k) != v for k, v in identity.items()):
+        raise ValueError("Historical run inputs/labels/holdout mismatch or incomplete run")
+    output.mkdir(parents=True)
+    for name in ("submission.jsonl", "run.json", "config.toml", "input_tree.json"):
+        shutil.copyfile(previous / name, output / name)
+    shutil.copyfile(holdout, output / "business_split.json")
+    shutil.copytree(previous / "logs", output / "logs")
+    metadata = {**old, **scorer_identity(), "status": "incomplete",
+                "rescore_environment": {**environment_metadata(), "runner_python": sys.version},
+                "rescored_from": previous.name, "runner_source_sha256": digest(Path(__file__))}
+    save(output / "experiment.json", metadata)
+    rows, metrics = analyze(output, data, manifest, split)
+    metadata.update(status="complete", rescored_questions=len(rows))
+    save(output / "experiment.json", metadata)
+    (output / "summary.md").write_text(
+        "# Rescored historical inference — local proxy, not official\n\n" +
+        json.dumps({k: {f: metrics[k][f] for f in ("n", "correct", "wrong", "abstain", "pa", "coverage")}
+                    for k in ("train", "validation")}, indent=2), encoding="utf-8")
+    package_artifacts(output)
+    return {"status": "complete", "scorer": SCORER_VERSION}

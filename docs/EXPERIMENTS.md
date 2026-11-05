@@ -105,3 +105,87 @@ uv run datamate evaluate outputs/runs/baseline-v1/train/submission.jsonl --refer
 che lỗi adapter ở bước sau, nên không suy ra một nguyên nhân duy nhất từ số
 abstain. Báo cáo toàn train và validation riêng; ghi rõ dữ liệu đã xem, không gọi
 lượt baseline đã phân tích toàn train là kiểm tra mù.
+
+## EVAL-02: scorer, A/B và các mốc bàn giao
+
+Dương (@baoduong2342007) sở hữu Evaluation; reviewer @MikaelVo639.
+Scorer v2 so `number` bằng giá trị Decimal chính xác, không tolerance hoặc làm tròn
+prediction; percent giữ quy tắc hai chữ số. Scalar/list/table thống nhất phép so số.
+Mọi điểm đều là **local proxy, không phải điểm BTC**. Holdout đã được xem, không mù.
+
+Giữ manifest EVAL-01 (seed 42, fraction 0.2), không tạo lại theo điểm.
+Benchmark mới ghi version/checksum scorer (gồm cả validation và chuẩn hóa text).
+Run cũ thiếu identity scorer không được so trực tiếp. Chấm lại từ inference đã hoàn
+thành vào thư mục mới; giữ nguyên artifact gốc:
+
+```sh
+uv run datamate rescore --run-dir outputs/eval01/main-5001a846 --data-dir data/raw/train --holdout outputs/eval01/business_split.json --output-dir outputs/eval02/baseline-v2
+uv run datamate benchmark --checkout . --data-dir data/raw/train --holdout outputs/eval01/business_split.json --config configs/baseline.toml --output-dir outputs/eval02/main-v2 --compare-to outputs/eval02/baseline-v2
+```
+
+Mỗi PR thuật toán: cùng input, nhãn, holdout, scorer và config. Ghi revision/dirty,
+lockfile, môi trường, runtime và checksum. Summary vào PR; artifacts/log/nhãn ở ngoài
+Git. Handoff chia grammar theo topic chẩn đoán, tối đa ba nhóm/module, ba ca/nhóm;
+cases chỉ từ 24 business train, số lượng train/validation ghi riêng. Topic không
+phải Plan và chỉ phản ánh bước đang chặn. Artifact thô vẫn có kết quả validation
+để audit; không lấy chúng làm ví dụ phát triển.
+
+Ngày 08/11, khi có B từ Agent, thêm `--allow-config-difference` vào benchmark B
+với `--compare-to` trỏ run A. Cờ này chỉ bỏ kiểm tra config hash: dữ liệu, nhãn,
+holdout và scorer vẫn phải giống. comparison.json ghi hai config/hash và diff,
+chuyển trạng thái theo ID, PA validation và mọi ID validation mới sai.
+Chỉ giữ B nếu PA validation tăng **và không có ID đúng/abstain chuyển sang sai**;
+Integration còn phải xác nhận image đúng thể lệ. Gate không tự phê duyệt image.
+
+Ngày 12/11 nếu giữ B: thu candidate với min_confidence=0 trên train, giữ lỗi và
+candidate không hợp lệ là abstain. Thử các confidence hữu hạn trong [0,1], thêm 0
+và 1; chọn ngưỡng PA cao nhất trên **24 business train**, hòa chọn ngưỡng cao hơn.
+Khóa config rồi đánh giá một lần trên 6 business validation; không chỉnh ngưỡng
+lại từ validation. Nếu gate không đạt, báo fail và giữ A.
+
+Ngày 15/11: dùng đúng image ứng viên do Integration cung cấp, ghi checksum image,
+chạy hai lần offline với /data read-only vào hai output mới. Dùng validate kiểm
+tra đủ/không trùng ID; đối chiếu đáp án theo ID và log từng câu (đáp án, thời gian,
+lỗi, evidence). Báo tỷ lệ abstain và thời gian gồm load model; xác nhận dưới 6 giờ
+trên máy tham chiếu trước khi ký bàn giao. Demo không thay thế benchmark thật.
+Evaluation không tự nộp portal; Integration phụ trách solution trước hạn.
+
+### Các lệnh hoàn tất Evaluation
+
+Thu candidate bằng config có `min_confidence=0`, rồi chọn ngưỡng. Config baseline
+`configs/eval-candidates.toml` dùng kiểm tra công cụ; đây không phải model B.
+
+```sh
+uv run datamate benchmark --checkout . --data-dir data/raw/train --holdout outputs/eval01/business_split.json --config configs/eval-candidates.toml --output-dir outputs/eval02/candidates
+uv run datamate calibrate --run-dir outputs/eval02/candidates --data-dir data/raw/train --holdout outputs/eval01/business_split.json --output-dir outputs/eval02/calibration
+```
+
+`calibration/config.toml` là cấu hình đã khóa. Lệnh kiểm tra checksum data/nhãn/
+holdout/scorer, chỉ xét confidence từ business train, hòa chọn ngưỡng cao hơn.
+Validation không tham gia chọn ngưỡng. Output là replay candidate, không phải một
+lượt inference độc lập. Chạy lại config đã khóa bằng benchmark và so với A qua
+`--allow-config-difference`; không suy ra chất lượng B từ baseline confidence=1.
+
+Kiểm tra hai lượt có sẵn mà không đọc nhãn:
+
+```sh
+uv run datamate verify-runs --data-dir data/raw/train --run-dir outputs/release/first --run-dir outputs/release/second --output-dir outputs/release/checks
+```
+
+Lệnh kiểm tra format, đầy đủ ID/log, đáp án/log, lỗi chỉ được abstain, checksum
+questions/rules/calendar, config, thời gian và đáp án theo ID qua hai lượt. Nó
+không chứng minh thời gian load model hoặc tính đúng của câu trả lời.
+
+Với image đã có trên Docker daemon:
+
+```sh
+uv run datamate verify-image --image datamate-candidate --data-dir data/raw/train --output-dir outputs/release/docker --gpus
+```
+
+Bỏ `--gpus` cho image CPU. Lệnh resolve image ID bất biến một lần, không pull;
+chạy hai lượt với `--network none`, input `/data` read-only và output riêng. Đo
+wall-clock toàn container (mỗi lượt tối đa 21600 giây), kiểm tra input tree không
+đổi, cleanup đúng container của lượt chạy khi timeout. Ghi image ID, thời gian,
+log và báo cáo vào output. CI dùng cùng lệnh với CPU demo. Kết quả này không tự
+xác nhận GPU tham chiếu, licence/weights hoặc chấp nhận bản nộp; Integration vẫn
+phải kiểm tra trên máy yêu cầu và giao đúng image cuối.
