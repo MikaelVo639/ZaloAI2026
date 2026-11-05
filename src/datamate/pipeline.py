@@ -96,23 +96,27 @@ def predict(data_dir: Path, output_dir: Path, config: Config,
                 stream.flush()
                 counts[record["type"]] += 1
                 elapsed = answered_at - question_started
-                code = ("src/datamate/agent/baseline.py::BaselineAgent.answer"
-                        if agent_called and isinstance(agent, BaselineAgent) else
-                        candidate.evidence.get("code") if agent_called else None)
-                inputs = ({"question": question.question,
-                           "as_of_date": question.as_of_date.isoformat(),
-                           "data_dir": str(split.root / "data" / business_id),
-                           "intent": candidate.evidence.get("intent"),
-                           "start": candidate.evidence.get("start"),
-                           "end": candidate.evidence.get("end")}
-                          if code and isinstance(agent, BaselineAgent) else None)
+                code = candidate.evidence.get("code") if agent_called else None
+                if code is None and agent_called and isinstance(agent, BaselineAgent):
+                    code = "src/datamate/agent/baseline.py::BaselineAgent.answer"
+                inputs = None
+                if code:
+                    inputs = {"question": question.question,
+                              "as_of_date": question.as_of_date.isoformat(),
+                              "data_dir": str(split.root / "data" / business_id),
+                              "intent": candidate.evidence.get("intent"),
+                              "start": candidate.evidence.get("start"),
+                              "end": candidate.evidence.get("end")}
+                    if isinstance(candidate.evidence.get("inputs"), dict):
+                        inputs.update(candidate.evidence["inputs"])
                 log = {"id": question.id, "business_id": question.business_id,
                        "question": question.question, "as_of_date": question.as_of_date.isoformat(),
                        "answer": record,
                        "elapsed_ms": max(0, int((answered_at - batch_started) * 1000)),
-                       "thinking": None,
+                       "thinking": candidate.evidence.get("thinking"),
                        "code": code, "inputs": inputs,
-                       "output": (candidate.answer if record["type"] != "unanswerable" else record)
+                       "output": (candidate.evidence.get("result", candidate.answer)
+                                  if record["type"] != "unanswerable" else record)
                        if code and record["type"] != "abstain" else None,
                        "final_answer": record, "elapsed_seconds": elapsed,
                        "business_ingestion_seconds": ingestion_seconds,

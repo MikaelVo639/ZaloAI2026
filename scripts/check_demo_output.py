@@ -36,6 +36,9 @@ def check(data_dir: Path, runs: list[Path]) -> None:
                 raise ValueError("Invalid elapsed time in log")
             if indexed[key]["type"] != "abstain" and (not log.get("code") or log.get("output") is None):
                 raise ValueError("Answered question lacks computation evidence")
+            if (indexed[key]["type"] not in ("abstain", "unanswerable")
+                    and log["output"] != indexed[key]["answer"]):
+                raise ValueError("Computation output does not match submission")
         manifest = json.loads((run / "run.json").read_text(encoding="utf-8"))
         for filename, field in (("questions.jsonl", "questions_sha256"),
                                 ("calendar.csv", "calendar_sha256")):
