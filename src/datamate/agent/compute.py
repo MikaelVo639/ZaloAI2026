@@ -16,6 +16,7 @@ from typing import Any, Callable
 from datamate.contracts import Candidate, Catalog, Plan
 from datamate.agent.sales_source import load_business_sales
 from datamate.ingestion.sales import Sale
+from datamate.semantics.text import fold
 
 
 def select_valid(sales: list[Sale], start: date, end: date) -> list[Sale]:
@@ -126,15 +127,77 @@ def prepare_sales(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -
             "data_last_day": max(days).isoformat() if days else None}
 
 
+def product_names(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -> list[str]:
+    """Product names and codes of the loaded business, for the planner's product filter."""
+    if not prepare_sales(cache, catalog, rulebook)["ok"]:
+        return []
+    sales, _ = cache["sales"]
+    return sorted({str(n) for s in sales for n in (s.product_name, s.product_id) if n})
+
+
 INTENTS = frozenset({"revenue", "order_count", "top_products", "average_order",
                      "cancel_count", "cancel_rate", "best_day"})
+# Plan filters this backend applies, and the intents each one may be combined with.
+FILTERABLE = {"product": frozenset({"revenue", "order_count"})}
+COVERAGE = re.compile(r"Khoảng dữ liệu:\s*(\d{4}-\d{2}-\d{2})\s+đến\s+(\d{4}-\d{2}-\d{2})")
+
+
+def unsupported(plan: Plan) -> str:
+    """Why this backend cannot answer the Plan exactly; "" when it can.
+
+    A Plan field this backend does not implement must abstain, never be ignored: an
+    ignored product filter would return the whole shop's revenue for one product.
+    """
+    if plan.intent not in INTENTS:
+        return f"Intent {plan.intent!r} not supported by baseline agent"
+    if plan.comparison or plan.compare_start or plan.compare_end:
+        if (plan.comparison != "change_percent" or plan.intent != "revenue" or plan.filters
+                or not (plan.compare_start and plan.compare_end)):
+            return f"Comparison {plan.comparison!r} for {plan.intent!r} not supported"
+    if len(plan.filters) > 1:
+        return "Several filters not supported"
+    for item in plan.filters:
+        if plan.intent not in FILTERABLE.get(item.field, ()):
+            return f"Filter {item.field!r} for {plan.intent!r} not supported"
+    return ""
+
+
+def outside_data(sales: list[Sale], start: date, end: date, readme: str) -> str:
+    """"" if the window overlaps the sales; "unanswerable" if README coverage excludes it."""
+    days = [s.day for s in sales]
+    if not (end < min(days) or start > max(days)):
+        return ""
+    # Absence of sales alone does not establish the business's coverage.
+    coverage = COVERAGE.search(readme)
+    if coverage:
+        first, last = map(date.fromisoformat, coverage.groups())
+        if end < first or start > last:
+            return "unanswerable"
+    return "unknown"
+
+
+def select_product(sales: list[Sale], value: str) -> list[Sale]:
+    """Rows whose product name or code equals the filter value (case/diacritics folded)."""
+    key = fold(value)
+    return [s for s in sales if key in (fold(s.product_name or ""), fold(s.product_id or ""))]
+
+
+def revenue_total(selected: list[Sale]) -> Decimal:
+    return sum((s.amount for s in selected), Decimal(0))
+
+
+def change_percent(current: Decimal, previous: Decimal) -> float | None:
+    if previous == 0:
+        return None
+    change = (current - previous) * 100 / previous
+    return float(change.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
 def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                 rulebook: str = "") -> Candidate:
-    if plan.intent not in INTENTS:
-        # A Plan intent this backend cannot compute must not fall through to a ranking.
-        return Candidate(reason=f"Intent {plan.intent!r} not supported by baseline agent")
+    reason = unsupported(plan)
+    if reason:
+        return Candidate(reason=reason)
     prepared = prepare_sales(cache, catalog, rulebook)
     if not prepared["ok"]:
         return Candidate(reason=prepared["reason"])
@@ -145,23 +208,57 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         "inputs": {"tables": source["tables"], "sales_rows": source["sales_rows"],
                    "data_first_day": prepared["data_first_day"],
                    "data_last_day": prepared["data_last_day"]}}
+    if plan.compare_start:
+        evidence.update(compare_start=plan.compare_start.isoformat(),
+                        compare_end=plan.compare_end.isoformat(), comparison=plan.comparison)
+    if plan.filters:
+        evidence["filters"] = [{"field": f.field, "value": f.value, "rule": f.rule}
+                               for f in plan.filters]
     if not sales or plan.start > plan.end:
         return Candidate(reason="Empty data or future-only period", evidence=evidence)
-    days = [s.day for s in sales]
-    if plan.end < min(days) or plan.start > max(days):
-        # Absence of sales alone does not establish the business's coverage.
-        coverage = re.search(r"Khoảng dữ liệu:\s*(\d{4}-\d{2}-\d{2})\s+đến\s+"
-                             r"(\d{4}-\d{2}-\d{2})", catalog.readme)
-        if coverage:
-            first, last = map(date.fromisoformat, coverage.groups())
-            if plan.end < first or plan.start > last:
-                evidence["coverage_source"] = coverage.group()
-                return Candidate(type="unanswerable", confidence=1.0,
-                                 reason="Kỳ hỏi nằm hoàn toàn ngoài khoảng dữ liệu ghi trong README",
-                                 evidence=evidence)
-        return Candidate(reason="No sales in period; business coverage is not established",
-                         evidence=evidence)
+    windows = [(plan.start, plan.end)]
+    if plan.compare_start:
+        windows.append((plan.compare_start, plan.compare_end))
+    for window_start, window_end in windows:
+        outside = outside_data(sales, window_start, window_end, catalog.readme)
+        if outside == "unanswerable":
+            coverage = COVERAGE.search(catalog.readme)
+            evidence["coverage_source"] = coverage.group() if coverage else ""
+            return Candidate(type="unanswerable", confidence=1.0,
+                             reason="Kỳ hỏi nằm hoàn toàn ngoài khoảng dữ liệu ghi trong README",
+                             evidence=evidence)
+        if outside:
+            return Candidate(reason="No sales in period; business coverage is not established",
+                             evidence=evidence)
+    product_call = ""
+    if plan.filters:
+        value = plan.filters[0].value
+        matched = select_product(sales, value)
+        codes = {s.product_id for s in matched}
+        evidence["inputs"].update(product_rows=len(matched), product_codes=sorted(map(str, codes)))
+        if len(codes) != 1:
+            return Candidate(reason="Product filter matches no product or several product codes",
+                             evidence=evidence)
+        sales = matched
+        product_call = f"select_product(sales, {value!r})"
+    source_expr = product_call or "sales"
     window = f"date.fromisoformat({plan.start.isoformat()!r}), date.fromisoformat({plan.end.isoformat()!r})"
+    if plan.comparison == "change_percent":
+        compare_window = (f"date.fromisoformat({plan.compare_start.isoformat()!r}), "
+                          f"date.fromisoformat({plan.compare_end.isoformat()!r})")
+        current = revenue_total(select_valid(sales, plan.start, plan.end))
+        previous = revenue_total(select_valid(sales, plan.compare_start, plan.compare_end))
+        value = change_percent(current, previous)
+        evidence.update(
+            calculation="100 * (revenue - compare revenue) / compare revenue; 2 decimals half up",
+            code=_code(f"change_percent(revenue_total(select_valid({source_expr}, {window})), "
+                       f"revenue_total(select_valid({source_expr}, {compare_window})))",
+                       select_valid, revenue_total, change_percent),
+            current_revenue=str(current), compare_revenue=str(previous), result=value)
+        if value is None:
+            return Candidate(reason="Comparison period has zero revenue; change undefined",
+                             evidence=evidence)
+        return Candidate("percent", value, 1.0, "", evidence)
     if plan.intent in ("cancel_count", "cancel_rate"):
         rows = select_period(sales, plan.start, plan.end)
         evidence["inputs"].update(period_rows=len(rows),
@@ -180,7 +277,7 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
             return Candidate(reason="No orders in period; rate undefined", evidence=evidence)
         return Candidate("percent", rate, 1.0, "", evidence)
     selected = select_valid(sales, plan.start, plan.end)
-    selection = f"select_valid(sales, {window})"
+    selection = f"select_valid({source_expr}, {window})"
     evidence["selected_rows"] = len(selected)
     evidence["inputs"].update(selected_rows=len(selected),
                               selected_orders=len({s.order_id for s in selected}))

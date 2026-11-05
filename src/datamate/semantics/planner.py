@@ -1,9 +1,10 @@
 """Semantics: question parsing and rules from the CURRENT split."""
 import calendar
 import re
+from collections.abc import Iterable
 from datetime import date, timedelta
 
-from datamate.contracts import Plan, Question
+from datamate.contracts import Filter, Plan, Question
 from datamate.semantics.rules import Rules
 from datamate.semantics.text import normalize_question
 
@@ -12,7 +13,8 @@ _DATE = r"(\d{1,2})/(\d{1,2})/(\d{4})"
 # Words that carry no condition. Anything else left after intent and period is unsupported.
 _FILLERS = re.compile(
     r"\b(?:nhung mat hang nao|nhung san pham nao|mat hang nao|"
-    r"cho toi biet|cho minh biet|cho minh hoi|cho hoi|xem giup|coi gium|check gium|"
+    r"cho toi biet|cho minh biet|cho minh hoi|cho hoi|cho minh|cho toi|liet ke|top|"
+    r"xem giup|coi gium|check gium|"
     r"giup minh|tinh rieng|tong cong|cua hang|cua shop|la bao nhieu|bao nhieu|bao nhiu|"
     r"bnhiu|nhieu|nhiu|bn|tien|dong|trong|cua|shop|la|co|duoc|nao|nhung|gi|vay|a|nhi|ngay|"
     r"e|z|ta|ha|nhe|do)\b"
@@ -61,13 +63,33 @@ def _best_day(text: str) -> str | None:
     return reduced[:best.start()] + " " + reduced[best.end():]
 
 
-def plan_question(question: Question, rules: Rules) -> Plan | None:
-    """Closed grammar: leftover filters/comparisons cause abstention."""
+def plan_question(question: Question, rules: Rules, names: Iterable[str] = ()) -> Plan | None:
+    """Closed grammar: leftover filters/comparisons cause abstention.
+
+    `names` are product names/codes of the business (from the Agent's data); a question
+    naming exactly one of them gets a product filter. Without names, it abstains as before.
+    """
     if not rules.revenue:
         return None
+    today = question.as_of_date
     text = normalize_question(question.question)
     used: list[str] = []
+    filters: list[Filter] = []
+    text, product = _product(text, names)
+    if product is _AMBIGUOUS:
+        return None
+    if product:
+        if not rules.product_names:
+            return None
+        filters.append(Filter("product", product, rules.row("product_names") or ""))
+        used.append("product_names")
     text = _rule_synonyms(text, rules, used)
+    comparison = _comparison(text)
+    if comparison is False:
+        return None
+    reference = None
+    if comparison:
+        text, reference = comparison
     intent = ""
     top_k = 1
     best_day = _best_day(text)
@@ -93,17 +115,117 @@ def plan_question(question: Question, rules: Rules) -> Plan | None:
         break
     if not intent:
         return None
-    resolved = _period(text, question.as_of_date, rules, used)
+    info: dict[str, object] = {}
+    resolved = _period(text, today, rules, used, info)
     if resolved is None:
         return None
     start, end, leftover = resolved
     # Do not silently ignore product names, payment methods, groups, shifts, etc.
     if _FILLERS.sub(" ", leftover).strip():
         return None
+    compare_start = compare_end = None
+    if reference:
+        if intent != "revenue" or filters or not rules.change_percent:
+            return None
+        window = _compare_window(reference, start, end, today, info, rules, used)
+        if window is None:
+            return None
+        compare_start, compare_end = window
+        used.append("change_percent")
     evidence = rules.source_rows + tuple(
         row for row in dict.fromkeys(rules.row(feature) for feature in used) if row)
     # Explicit periods are capped at the as-of date: future events have not happened.
-    return Plan(intent, start, min(end, question.as_of_date), top_k, evidence)
+    return Plan(intent, start, min(end, today), top_k, evidence, compare_start, compare_end,
+                "change_percent" if reference else "", tuple(filters))
+
+
+_AMBIGUOUS = object()
+_PRODUCT_MARKER = re.compile(r"(?:\b(?:mat hang|san pham|hang|mon|thuoc|cua)\s*)+$")
+
+
+def _product(text: str, names: Iterable[str]) -> tuple[str, object]:
+    """Remove the one product the question names; several different products are ambiguous."""
+    found = []
+    for name in set(names):
+        key = normalize_question(name)
+        # One-word names ("Trà") are too easy to confuse with grammar; codes carry digits.
+        if not key or (len(key.split()) < 2 and not any(c.isdigit() for c in key)):
+            continue
+        for match in re.finditer(rf"(?<!\S){re.escape(key)}(?!\S)", text):
+            found.append((match.start(), match.end(), name))
+    if not found:
+        return text, None
+    chosen: list[tuple[int, int, str]] = []
+    for item in sorted(found, key=lambda f: (f[0] - f[1], f[0], f[2])):  # longest first
+        if all(item[1] <= c[0] or item[0] >= c[1] for c in chosen):
+            chosen.append(item)
+    if len({normalize_question(c[2]) for c in chosen}) != 1:
+        return text, _AMBIGUOUS
+    for start, end, _ in sorted(chosen, reverse=True):
+        before = _PRODUCT_MARKER.sub(" ", text[:start])
+        text = before + " " + text[end:]
+    return text, chosen[0][2]
+
+
+_COMPARE_WORDS = re.compile(r"\b(?:so voi|so vs|cung ky|cung thang|tang hay giam|tang/giam|"
+                            r"tang giam|hon hay kem|thay doi|tang truong|chenh lech)\b")
+_CHANGE = re.compile(r"\b(?:tang hay giam|tang/giam|tang giam|hon hay kem|thay doi|tang truong)\b")
+_PERCENT = re.compile(rf"\b(?:{_AMOUNT} )?phan tram\b")
+_REFERENCES = (
+    ("month", re.compile(r"\bso (?:voi|vs) thang (\d{1,2})/(\d{4})\b")),
+    ("prev_year", re.compile(r"\b(?:so (?:voi |vs )?)?cung (?:ky|thang) nam (?:ngoai|truoc)\b")),
+    ("prev_month", re.compile(r"\b(?:so (?:voi |vs )?)?cung ky thang (?:truoc|roi)\b")),
+    ("prev_month", re.compile(r"\bso (?:voi|vs) thang (?:lien truoc|truoc do|truoc|roi)\b")),
+    ("prev_month", re.compile(r"\bthang (?:lien truoc|truoc do)\b")),
+    ("prev_month", re.compile(r"(?<=hon hay kem )thang (?:truoc|roi)\b")),
+)
+
+
+def _comparison(text: str) -> tuple[str, tuple] | None | bool:
+    """None: no comparison; False: comparison words not understood; else (text, reference)."""
+    if not _COMPARE_WORDS.search(text):
+        return None
+    for kind, pattern in _REFERENCES:
+        match = pattern.search(text)
+        if match:
+            break
+    else:
+        return False
+    reference = (kind, *map(int, match.groups()))
+    text = text[:match.start()] + " " + text[match.end():]
+    change, percent = _CHANGE.search(text), _PERCENT.search(text)
+    if not change or not percent:
+        return False  # "chênh lệch", "hơn bao nhiêu tiền"... not supported yet
+    text = _PERCENT.sub(" ", _CHANGE.sub(" ", text, count=1), count=1)
+    if _COMPARE_WORDS.search(text):
+        return False  # a second comparison
+    return text, reference
+
+
+def _compare_window(reference: tuple, start: date, end: date, today: date,
+                    info: dict[str, object], rules: Rules,
+                    used: list[str]) -> tuple[date, date] | None:
+    kind = reference[0]
+    month_to_date = info.get("kind") == "month_to_date"
+    full_month = info.get("kind") == "month" and end <= today  # a running month is ambiguous
+    if month_to_date and kind == "prev_month" and rules.same_days_last_month:
+        last_month_end = start - timedelta(days=1)
+        first = last_month_end.replace(day=1)
+        used.append("same_days_last_month")
+        return first, min(last_month_end, first.replace(day=1) + timedelta(days=today.day - 1))
+    if not full_month:
+        return None
+    if kind == "prev_month":
+        previous = start - timedelta(days=1)
+        return _month(previous.year, previous.month)
+    if kind == "prev_year":
+        return _month(start.year - 1, start.month)
+    month, year = reference[1], reference[2]
+    try:
+        window = _month(year, month)
+    except ValueError:
+        return None
+    return window if window[1] <= today and window != (start, end) else None
 
 
 def _rule_synonyms(text: str, rules: Rules, used: list[str]) -> str:
@@ -130,9 +252,10 @@ def _quarter(year: int, quarter: int) -> tuple[date, date]:
     return first, last
 
 
-def _period(text: str, today: date, rules: Rules,
-            used: list[str] | None = None) -> tuple[date, date, str] | None:
+def _period(text: str, today: date, rules: Rules, used: list[str] | None = None,
+            info: dict[str, object] | None = None) -> tuple[date, date, str] | None:
     used = [] if used is None else used
+    info = {} if info is None else info
     # (pattern, rule feature that must be enabled or None). Order matters: a date range
     # before a single date, explicit years before implicit ones.
     patterns = (
@@ -212,5 +335,9 @@ def _period(text: str, today: date, rules: Rules,
             used.append(feature)
             if index == 9:
                 used.append("calendar_quarter")
+        if index in (1, 8):
+            info["kind"] = "month"
+        elif index == 6 or (index == 7 and match.group() == "thang nay"):
+            info["kind"] = "month_to_date"
         return start, end, text[:match.start()] + " " + text[match.end():]
     return None
