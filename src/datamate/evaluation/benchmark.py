@@ -3,6 +3,7 @@
 import csv
 import hashlib
 import json
+import math
 import os
 import platform
 import random
@@ -11,15 +12,16 @@ import signal
 import subprocess
 import sys
 import time
+import tomllib
 from collections import Counter, defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from datamate.evaluation.scorer import SCORER_VERSION, evaluate
 from datamate.evaluation.validation import validate_submission
 from datamate.ingestion.catalog import build_catalog
 from datamate.io import index_records, load_split, read_jsonl
-from datamate.pipeline import Config
 from datamate.semantics.text import fold
 
 
@@ -39,6 +41,21 @@ def scorer_identity():
 
 def save(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def experiment_config(path):
+    """Validate shared budgets; target checkout owns its backend-specific config."""
+    values = {"backend": "baseline", "min_confidence": 1.0, "max_seconds": 21000}
+    values.update(tomllib.loads(Path(path).read_text(encoding="utf-8")))
+    if not isinstance(values["backend"], str) or not values["backend"].strip():
+        raise ValueError("backend must be a nonempty string")
+    for key in ("min_confidence", "max_seconds"):
+        value = values[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"{key} must be finite and numeric")
+    if not 0 <= values["min_confidence"] <= 1 or values["max_seconds"] <= 0:
+        raise ValueError("Invalid confidence or wall-clock budget")
+    return SimpleNamespace(**values)
 
 
 def validate_holdout(data, manifest):
@@ -466,7 +483,7 @@ def benchmark(checkout, data_dir, holdout, config, output_dir, compare_to=None,
         raise ValueError("Refusing a nonempty output directory")
     manifest = json.loads(holdout.read_text(encoding="utf-8"))
     split = validate_holdout(data, manifest)
-    settings = Config.load(config)
+    settings = experiment_config(config)
     python = checkout / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     if not python.is_file():
         raise ValueError("Prepare target checkout with uv sync --locked first")

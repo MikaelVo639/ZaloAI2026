@@ -134,6 +134,8 @@ Ngày 08/11, khi có B từ Agent, thêm `--allow-config-difference` vào benchm
 với `--compare-to` trỏ run A. Cờ này chỉ bỏ kiểm tra config hash: dữ liệu, nhãn,
 holdout và scorer vẫn phải giống. comparison.json ghi hai config/hash và diff,
 chuyển trạng thái theo ID, PA validation và mọi ID validation mới sai.
+Runner chỉ kiểm tra backend là tên hợp lệ, confidence và ngân sách chung; backend
+và các thiết lập model được giữ nguyên để checkout đích tự kiểm tra khi predict.
 Chỉ giữ B nếu PA validation tăng **và không có ID đúng/abstain chuyển sang sai**;
 Integration còn phải xác nhận image đúng thể lệ. Gate không tự phê duyệt image.
 

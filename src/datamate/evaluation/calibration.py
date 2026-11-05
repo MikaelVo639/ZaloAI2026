@@ -7,7 +7,7 @@ import re
 import tomllib
 from pathlib import Path
 
-from datamate.evaluation.benchmark import digest, input_tree, save, scorer_identity, validate_holdout
+from datamate.evaluation.benchmark import digest, experiment_config, input_tree, save, scorer_identity, validate_holdout
 from datamate.evaluation.release import read_run
 from datamate.evaluation.scorer import evaluate
 from datamate.io import index_records, read_jsonl, write_jsonl
@@ -28,7 +28,7 @@ def calibrate(run_dir, data_dir, holdout, output_dir):
         raise ValueError("Calibration requires complete run with matching inputs/labels/holdout/scorer/config")
     config_text = (run / "config.toml").read_text(encoding="utf-8")
     config = tomllib.loads(config_text)
-    if config.get("min_confidence", 1.0) != 0 or meta.get("config") != config:
+    if config.get("min_confidence", 1.0) != 0 or meta.get("config") != vars(experiment_config(run / "config.toml")):
         raise ValueError("Collect unsuppressed candidates using min_confidence=0 first")
     predictions, logs = read_run(run, {q.id for q in split.questions})
     confidences = {}

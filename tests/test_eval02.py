@@ -57,6 +57,19 @@ class Eval02Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires"):
             benchmark(".", ".", ".", ".", ".", allow_config_difference=True)
 
+    def test_foreign_backend_config_keeps_target_settings_and_validates_budget(self):
+        from datamate.evaluation.benchmark import experiment_config
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model.toml"
+            path.write_text('backend="local_model"\nmin_confidence=0\nmax_seconds=30\n[model]\npath="/models/local"\n', encoding="utf-8")
+            config = experiment_config(path)
+            self.assertEqual(config.backend, "local_model")
+            self.assertEqual(config.model, {"path": "/models/local"})
+            for value in ("true", "nan", "-1"):
+                path.write_text(f"max_seconds={value}\n", encoding="utf-8")
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    experiment_config(path)
+
     def test_git_metadata_accepts_vietnamese_dirty_diff(self):
         import subprocess
         from datamate.evaluation.benchmark import source_metadata
