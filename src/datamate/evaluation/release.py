@@ -105,11 +105,12 @@ def verify_image(image, data_dir, output_dir, max_seconds=21600, gpus=False):
             run.mkdir()
             cidfile = output / (name + ".cid")
             command = ["docker", "run", "--rm", "--pull", "never", "--network", "none",
+                       "--shm-size=16g", "--entrypoint", "bash",
                        "--cidfile", str(cidfile), "--mount", f"type=bind,source={data},target=/data,readonly",
                        "--mount", f"type=bind,source={run},target=/result"]
             if gpus:
                 command += ["--gpus", "all"]
-            command.append(image_id)
+            command += [image_id, "/code/predict.sh"]
             started = time.monotonic()
             try:
                 with (output / (name + ".stdout")).open("wb") as stdout, (output / (name + ".stderr")).open("wb") as stderr:
