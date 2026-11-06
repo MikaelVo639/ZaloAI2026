@@ -15,6 +15,7 @@ from typing import Any
 
 from datamate.contracts import Catalog, Table
 from datamate.ingestion.catalog import iter_rows
+from datamate.ingestion.source_names import filename_key
 from datamate.ingestion.readme_sales import (
     POS_PROFILES,
     ReadmeSalesError,
@@ -103,7 +104,7 @@ def _kind(field: str | None, samples: list[Any]) -> str:
 
 def _section_for(table: Table, sections: list[Section]) -> Section | None:
     for section in sections:
-        if section.file.split("/")[-1] == table.path.name and section.sheet in (None, table.name):
+        if filename_key(section.file) == filename_key(table.path.name) and section.sheet in (None, table.name):
             return section
     return None
 

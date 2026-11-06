@@ -32,6 +32,7 @@ from typing import Any, Iterable, Iterator
 from datamate.contracts import Catalog, Table
 from datamate.ingestion.catalog import iter_rows
 from datamate.ingestion.sales import Sale, parse_date
+from datamate.ingestion.source_names import filename_key
 from datamate.ingestion.status import StatusError, status_policy
 from datamate.semantics.text import fold
 
@@ -262,9 +263,9 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
     text = fold(catalog.readme)
     if not ("pos" in text.split() or "phan mem ban hang" in text):
         return []
-    covered = {s.file for s in documented}
+    covered = {filename_key(s.file) for s in documented}
     headers = [(table, _header_names(table)) for table in catalog.tables
-               if table.path.name not in covered]
+               if filename_key(table.path.name) not in covered]
     for version, lists in POS_PROFILES:
         sections = []
         for table, header in headers:
@@ -401,9 +402,13 @@ def parse_day(value: Any, sheet: str = "") -> date:
 # ---------------------------------------------------------------- tables
 
 def _matching_tables(catalog: Catalog, section: Section) -> list[Table]:
-    wanted = section.file.replace("\\", "/").split("/")[-1]
+    wanted = filename_key(section.file)
+    files = {t.path for t in catalog.tables if filename_key(t.path.name) == wanted}
+    if len(files) > 1:
+        raise ReadmeSalesError("AMBIGUOUS_SOURCE", "Several files match one README source",
+                               source=section.label)
     return [t for t in catalog.tables
-            if t.path.name == wanted and (section.sheet is None or t.name == section.sheet)]
+            if t.path in files and (section.sheet is None or t.name == section.sheet)]
 
 
 def _records(table: Table, columns: Iterable[str]) -> Iterator[tuple[int, dict[str, Any]]]:
