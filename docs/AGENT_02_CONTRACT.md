@@ -18,8 +18,9 @@ kiểu đầu ra phải tương ứng phép tính và nguồn dữ liệu đã x
 
 ## Boolean: doanh thu tăng liên tục
 
-Đề nghị thêm cấu trúc immutable `Period(start: date, end: date)` và trường cuối
-`Plan.periods: tuple[Period, ...] = ()`. Thêm giá trị intent `revenue_increasing`.
+SEM/DATA #22 đã thêm `Plan.periods: tuple[tuple[date, date], ...] = ()` cho chuỗi
+doanh thu/tháng tốt nhất. Tái dùng trường này, không thêm một cấu trúc `Period`
+cạnh tranh. Đề nghị thêm giá trị intent `revenue_increasing` sau khi chốt luật.
 Các callers tạo Plan cũ vẫn dùng được; mọi backend phải abstain nếu `periods` được
 đặt nhưng nó chưa thực thi trường đó. Không thay nghĩa của `comparison` từ #18.
 

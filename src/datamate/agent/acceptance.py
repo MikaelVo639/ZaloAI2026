@@ -118,7 +118,7 @@ def compare_acceptance(baseline: Path, model_first: Path, model_repeat: Path,
                        private_businesses: int | None = None) -> dict[str, Any]:
     runs = [baseline, model_first, model_repeat]
     experiments = [json.loads((path / "experiment.json").read_text(encoding="utf-8")) for path in runs]
-    identity = ("input_sha256", "holdout_sha256", "reference_sha256")
+    identity = ("input_sha256", "holdout_sha256", "reference_sha256", "scorer_version", "scorer_sha256")
     for experiment in experiments:
         if experiment.get("status") != "complete" or any(not experiment.get(key) for key in identity):
             raise ValueError("Acceptance requires complete runs with input/holdout/reference checksums")

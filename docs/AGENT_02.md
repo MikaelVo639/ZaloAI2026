@@ -1,8 +1,9 @@
 # AGENT-02 — prototype hướng B và bàn giao
 
 Phạm vi @tqhuy0602, reviewer @Kurosuz. Nhánh `codex/agent-local-plan-prototype`.
-Trạng thái ngày 05/11/2026: đã có code kiểm thử được bằng dữ liệu tổng hợp; chưa có
-weights, train, GPU hay số liệu holdout trong lượt triển khai này. Không coi test với
+Trạng thái ngày 06/11/2026: đã tích hợp EVAL-02 #19, INT-02 #21 và SEM/DATA #22,
+có regression tổng hợp và quy trình benchmark train cố định; chưa có weights/GPU.
+Không coi test với
 planner giả lập là kết quả của Qwen. Chưa đủ bằng chứng để chọn B thay A ngày 08/11.
 
 ## Đầu ra đã có
@@ -17,11 +18,13 @@ planner giả lập là kết quả của Qwen. Chưa đủ bằng chứng để
 | `boolean`/`table` | Có kiểm tra format theo scorer và regression; **chưa thêm intent** khi chưa thống nhất Plan mở rộng |
 | Holdout/threshold/GPU 6 giờ | Chờ môi trường/dữ liệu và quy trình Evaluation/Integration bên dưới |
 
-Đã tích hợp main `e045f3f` (SEM-01 #18): `Plan` có kỳ so sánh và `Filter` sản phẩm.
-Agent dùng chung đường lập Plan deterministic, gồm bước lấy tên sản phẩm, trước
-khi gọi model. Bộ kiểm tra nhận `percent` cho `revenue/change_percent`, cho phép
-giá trị âm hoặc trên 100%; chỉ tỷ lệ huỷ đơn bị giới hạn [0,100]. Không mở rộng
-thêm contract hay grammar so với SEM-01; model vẫn chỉ sinh tập Plan đơn kỳ không lọc.
+Đã tích hợp SEM-01 #18 và contract SEM/DATA #22: kỳ so sánh, bộ lọc sản phẩm/nhóm,
+chuỗi doanh thu nhiều tháng, tháng tốt nhất, top khách, số đếm theo ngưỡng và số
+lượng theo đơn vị. Agent dùng chung đường lập Plan deterministic, gồm tên hàng và
+vocabulary nhóm, trước khi gọi model. Validation kiểm đúng kiểu, độ dài chuỗi,
+tháng thuộc kỳ yêu cầu và giới hạn số đếm. Tỷ lệ huỷ đơn và tỷ lệ khách trong [0,100];
+biến động/tỉ trọng doanh thu có thể âm hoặc trên 100. Kỳ trùng/chồng lấn, ngưỡng số
+đơn lẻ và trường so sánh bị bỏ qua đều abstain. Model vẫn chỉ sinh Plan đơn kỳ không lọc.
 Thay đổi giao thoa:
 pipeline/CLI đăng ký backend và các timeout theo cấu hình; manifest ghi model thực
 sự đã nạp; CLI override dùng `dataclasses.replace` để giữ các trường mới. Pipeline
@@ -35,7 +38,9 @@ bổ sung split giả để tiếp tục chạy sau bản sửa cache.
 2. Câu còn lại chỉ đi tới model nếu rulebook của split bật được phép tính và parser
    thời gian hiện tại xác định đúng một kỳ dương lịch. Schema giữ cột, kiểu Python
    quan sát được và mẫu có sẵn; đơn vị được giữ trong README/cột gốc, không đoán.
-   Đây là view tạm từ Catalog, chưa thay đầu ra schema/units chính thức của DATA-03.
+   Mô tả schema/units dùng DATA-03 `describe_schema`, chạy một lần mỗi business
+   trong worker có deadline, bỏ business id khỏi payload. Luật có thêm cấu trúc
+   `parse_rulebook` của SEM-02 bên cạnh nguyên văn của split; không cắt ngầm schema/luật.
 3. Prompt gồm câu hỏi, `as_of_date`, schema, README, rulebook và calendar của split.
    Không đưa question id/business id vào prompt, không có few-shot lấy từ test/nhãn.
    Calendar được đọc/kiểm tra toàn bộ, giữ SHA256 và số dòng, nhưng prompt chỉ có
@@ -87,9 +92,10 @@ trong predict. Chuẩn bị runtime xong thì chạy lại với network tắt, 
 artifact/checksum weights giữ ngoài Git.
 
 Config thử nghiệm dùng input tối đa 24.576 token, output 1.024, tổng dưới context
-mặc định 32.768 của snapshot. Tokenizer thật đã xác nhận 5 prompt business train sau
+mặc định 32.768 của snapshot. Trước tích hợp DATA-03/SEM-02, tokenizer thật xác nhận 5 prompt business train sau
 khi scope calendar còn 9.250–18.852 token; trước sửa là 45.541–55.065. Đây chỉ là
-kiểm tra đầu vào bằng tokenizer, không phải model generation/benchmark GPU.
+kiểm tra đầu vào bằng tokenizer, không phải model generation/benchmark GPU. Prompt
+mới có schema/luật có cấu trúc cần đo lại trên runtime chuẩn bị sẵn; vượt budget thì abstain.
 Loader dùng `attn_implementation="sdpa"` để runtime có thể chọn attention kernel
 tiết kiệm bộ nhớ thay vì luôn tạo attention matrix eager; [Qwen2 hỗ trợ SDPA](https://huggingface.co/docs/transformers/v4.51.3/model_doc/qwen2).
 Hiệu năng/VRAM và tính lặp lại vẫn cần xác minh trên GPU thật.
@@ -127,9 +133,9 @@ uv run --no-sync datamate benchmark --checkout . --data-dir data/raw/train --hol
 ```
 
 Benchmark gọi trực tiếp Python môi trường đã chuẩn bị, không sync/download trong
-subprocess inference. A dùng `configs/baseline.toml`. Hai hướng có config khác nhau,
-nên không dùng `--compare-to` vốn yêu cầu config giống nhau; Evaluation đối chiếu
-outcomes theo ID cùng manifest và ghi rõ config/backend khác nhau.
+subprocess inference. A dùng `configs/baseline.toml`. Khi so hai config, EVAL-02 hỗ trợ
+`--compare-to <run-A> --allow-config-difference`; dữ liệu, holdout, nhãn và
+version/checksum scorer vẫn phải khớp. Acceptance kiểm cùng các identity này.
 
 Bàn giao thư mục run gồm `run.json`, `logs/`, metrics, outcomes, handoff và checksum.
 Log chứa model revision, manifest SHA256, runtime Torch/Transformers/CUDA/GPU, prompt

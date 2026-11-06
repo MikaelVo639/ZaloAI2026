@@ -7,6 +7,7 @@ quotes, so a reviewer can re-run the exact calculation from a log.
 
 import inspect
 import re
+from calendar import monthrange
 from collections import defaultdict
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
@@ -266,6 +267,8 @@ def unsupported(plan: Plan) -> str:
     if plan.intent not in INTENTS:
         return f"Intent {plan.intent!r} not supported by baseline agent"
     if plan.comparison == "share":
+        if plan.compare_start is not None or plan.compare_end is not None:
+            return "Share does not support comparison periods"
         group_share = (plan.intent == "revenue" and len(plan.filters) == 1
                        and plan.filters[0].field in GROUP_FIELDS)
         if not group_share and (plan.intent != "count_where" or plan.threshold is None):
@@ -278,6 +281,13 @@ def unsupported(plan: Plan) -> str:
         if SHAPES.get(plan.shape) != plan.intent or len(plan.periods) < 2 or plan.filters \
                 or plan.comparison:
             return f"Shape {plan.shape!r} for {plan.intent!r} not supported"
+        ordered = sorted(plan.periods)
+        if (plan.start != ordered[0][0] or plan.end != ordered[-1][1]
+                or any(start.day != 1 or end != date(start.year, start.month,
+                                                    monthrange(start.year, start.month)[1])
+                       for start, end in ordered)
+                or any(previous[1] >= current[0] for previous, current in zip(ordered, ordered[1:]))):
+            return "Monthly periods must be complete, disjoint and match the Plan span"
     if plan.threshold is not None:
         t = plan.threshold
         supported = {("customer", "order_count"), ("order", "revenue"), ("day", "revenue"),
@@ -286,6 +296,9 @@ def unsupported(plan: Plan) -> str:
             return "Threshold not supported"
         if plan.comparison == "share" and t.subject != "customer":
             return "Share of a threshold count is defined for customers only"
+        if (not isinstance(t.value, Decimal) or not t.value.is_finite()
+                or (t.measure == "order_count" and (t.value < 0 or t.value != t.value.to_integral()))):
+            return "Order thresholds must be finite nonnegative integers"
     elif plan.intent == "count_where":
         return "Customer count needs a threshold"
     if (plan.intent == "quantity") != bool(plan.unit):
@@ -544,8 +557,9 @@ def _answer_extended(plan: Plan, sales: list[Sale], full: list[Sale],
         if plan.filters and value == 0:
             return Candidate(reason="The product's base unit is not the unit asked",
                              evidence=evidence)
-        return Candidate("number", int(value) if value == value.to_integral() else float(value),
-                         1.0, "", evidence)
+        result = int(value) if value == value.to_integral() else float(value)
+        evidence.update(quantity_base_total=str(value), result=result)
+        return Candidate("number", result, 1.0, "", evidence)
     if plan.threshold is not None and plan.threshold.subject != "customer":
         subject, minimum = plan.threshold.subject, plan.threshold.value
         pool = selected

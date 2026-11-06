@@ -137,7 +137,9 @@ class ReleaseCalibrationTests(unittest.TestCase):
                 self.assertIn("none", command)
                 self.assertIn("never", command)
                 self.assertTrue(any("target=/data,readonly" in arg for arg in command))
-                self.assertEqual(command[-1], "sha256:fixture")
+                self.assertIn("--shm-size=16g", command)
+                self.assertEqual(command[command.index("--entrypoint") + 1], "bash")
+                self.assertEqual(command[-2:], ["sha256:fixture", "/code/predict.sh"])
                 destination = next(arg for arg in command if "target=/result" in arg).split("source=", 1)[1].split(",target=")[0]
                 shutil.copytree(self.run, destination, dirs_exist_ok=True)
             return subprocess.CompletedProcess(command, 0)

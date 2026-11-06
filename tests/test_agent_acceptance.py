@@ -37,6 +37,7 @@ def artifact(root, model=False, answered=False):
     save(root / "experiment.json", {"status": "complete", "input_sha256": "input",
                                     "holdout_sha256": "holdout", "reference_sha256": "ref",
                                     "config_sha256": "model" if model else "baseline",
+                                    "scorer_version": "synthetic-scorer", "scorer_sha256": "scorer",
                                     "predict_wall_seconds": 12})
     save(root / "business_split.json", {"seed": 42, "validation_ids": ["b"]})
     write_jsonl(root / "outcomes.jsonl", [
@@ -120,7 +121,8 @@ class AcceptanceTests(unittest.TestCase):
         path = self.repeat / "experiment.json"
         original = json.loads(path.read_text())
         for mutation in ({"input_sha256": "changed"}, {"config_sha256": "changed"},
-                         {"status": "incomplete"}, {"reference_sha256": None}):
+                         {"status": "incomplete"}, {"reference_sha256": None},
+                         {"scorer_version": "different"}, {"scorer_sha256": "different"}):
             save(path, {**original, **mutation})
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 self.report()

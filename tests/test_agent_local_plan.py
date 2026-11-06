@@ -151,16 +151,32 @@ class LocalAgentTests(unittest.TestCase):
         self.assertNotIn("id", payload)
         self.assertNotIn("business_id", payload)
         self.assertNotIn(str(self.root), messages[1]["content"])
-        self.assertIn("observed_types", payload["schema"][0]["columns"][0])
+        self.assertEqual(payload["schema"]["version"], "schema_description.v1")
+        self.assertNotIn("business_id", payload["schema"])
+        self.assertIn("type", payload["schema"]["tables"][0]["columns"][0])
+        self.assertEqual(payload["structured_rulebook"]["version"], "rulebook_structure.v1")
         other = replace(self.context, split=replace(self.split, rulebook="current split only"))
         self.assertEqual(json.loads(build_messages(self.question, other)[1]["content"])["rulebook"],
                          "current split only")
+        routed = replace(self.context, catalog=replace(self.context.catalog, business_id="other-routing"))
+        self.assertEqual(build_messages(replace(self.question, id="other", business_id="other"), routed),
+                         messages)
 
     def test_context_budget_never_silently_truncates_rules(self):
         context = replace(self.context, catalog=replace(
             self.context.catalog, readme="x" * MAX_PROMPT_CHARACTERS))
         with self.assertRaisesRegex(ValueError, "budget"):
             build_messages(self.question, context)
+
+    def test_schema_description_timeout_abstains_before_model_load(self):
+        agent = self.agent(ingestion_timeout=0.05)
+        with patch.object(agent, "_plan", return_value=None), patch(
+                "datamate.agent.local_plan.describe_prompt_schema", slow_generate), patch.object(
+                agent.planner_worker, "run") as model_worker:
+            candidate = agent.answer(self.question, self.context)
+        self.assertEqual(candidate.type, "abstain")
+        self.assertIn("Schema description timed out", candidate.reason)
+        model_worker.assert_not_called()
 
     def test_calendar_scope_reads_all_rows_and_exposes_only_requested_dates(self):
         path = self.split.calendar_path

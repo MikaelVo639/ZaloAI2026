@@ -5,11 +5,12 @@ from datetime import date
 
 from datamate.agent.compute import unsupported
 from datamate.contracts import Candidate, Plan
-from datamate.evaluation.validation import validate_record
+from datamate.evaluation.validation import is_number, validate_record
 
 ANSWER_TYPES = {
     "revenue": "number", "order_count": "number", "average_order": "number",
     "cancel_count": "number", "cancel_rate": "percent", "best_day": "date",
+    "quantity": "number", "count_where": "number",
 }
 
 
@@ -48,9 +49,13 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
         if "result" not in evidence or evidence["result"] != candidate.answer:
             raise ValueError("Answer differs from execution output")
         if plan is not None:
-            if plan.comparison == "change_percent":
+            if plan.shape == "series":
+                expected = "list"
+            elif plan.shape == "best_period":
+                expected = "date"
+            elif plan.comparison in {"change_percent", "share"}:
                 expected = "percent"
-            elif plan.intent == "top_products":
+            elif plan.intent in {"top_products", "top_customers"}:
                 expected = "string" if plan.top_k == 1 else "list"
             else:
                 expected = ANSWER_TYPES.get(plan.intent)
@@ -58,6 +63,15 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
                 raise ValueError("Answer type disagrees with Plan")
             if plan.intent == "cancel_rate" and not 0 <= candidate.answer <= 100:
                 raise ValueError("Cancellation percentage outside [0, 100]")
+            if plan.intent == "count_where":
+                bound = (evidence.get("customers_bought") if plan.threshold.subject == "customer"
+                         else evidence.get("inputs", {}).get("selected_rows"))
+                if candidate.type == "percent":
+                    if not 0 <= candidate.answer <= 100:
+                        raise ValueError("Customer percentage outside [0, 100]")
+                elif (type(candidate.answer) is not int or candidate.answer < 0
+                      or type(bound) is not int or candidate.answer > bound):
+                    raise ValueError("Threshold count outside executed input bounds")
             if plan.intent in {"order_count", "cancel_count"}:
                 count = candidate.answer
                 bound_key = "period_orders" if plan.intent == "cancel_count" else "selected_orders"
@@ -66,12 +80,19 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
                         or not isinstance(bound, int) or not 0 <= count <= bound):
                     raise ValueError("Order count outside executed input bounds")
             if candidate.type == "date":
-                if not plan.start <= date.fromisoformat(candidate.answer) <= plan.end:
+                if plan.shape == "best_period":
+                    if candidate.answer not in {start.strftime("%Y-%m") for start, _ in plan.periods}:
+                        raise ValueError("Month outside requested periods")
+                elif not plan.start <= date.fromisoformat(candidate.answer) <= plan.end:
                     raise ValueError("Date outside requested period")
             if candidate.type == "list":
-                if (not 1 <= len(candidate.answer) <= plan.top_k
-                        or not all(isinstance(x, str) and x for x in candidate.answer)):
-                    raise ValueError("Product list outside Plan limits")
+                if plan.shape == "series":
+                    if (len(candidate.answer) != len(plan.periods)
+                            or not all(is_number(x) for x in candidate.answer)):
+                        raise ValueError("Revenue series disagrees with requested periods")
+                elif (not 1 <= len(candidate.answer) <= plan.top_k
+                      or not all(isinstance(x, str) and x for x in candidate.answer)):
+                    raise ValueError("Ranking list outside Plan limits")
             if candidate.type == "string" and not candidate.answer:
                 raise ValueError("Empty product name")
         return candidate

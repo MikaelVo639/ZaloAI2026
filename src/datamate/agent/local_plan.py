@@ -19,9 +19,11 @@ from datamate.agent.compute import INTENTS
 from datamate.agent.model_runtime import generate_plan, prepare_model, sha256
 from datamate.agent.validation import check_executed
 from datamate.agent.worker import Worker
-from datamate.contracts import BusinessContext, Candidate, Plan, Question
+from datamate.contracts import BusinessContext, Candidate, Catalog, Plan, Question
 from datamate.ingestion.catalog import json_value
+from datamate.ingestion.schema_description import describe_schema
 from datamate.semantics.planner import _period
+from datamate.semantics.rulebook import parse_rulebook
 from datamate.semantics.rules import read_rules
 from datamate.semantics.text import normalize_question
 
@@ -114,20 +116,18 @@ def calendar_context(path: Path, dates: set[str]) -> dict[str, Any]:
             "rows": selected}
 
 
-def build_messages(question: Question, context: BusinessContext) -> list[dict[str, str]]:
-    """Provisional schema view; replace through DATA-03 without changing Plan.
+def describe_prompt_schema(cache: dict[str, Any], catalog: Catalog) -> dict[str, Any]:
+    """Worker task: DATA-03 descriptions without routing metadata or prompt truncation."""
+    description = describe_schema(catalog)
+    description.pop("business_id", None)
+    return description
 
-    Type names describe observed Python values, not an inferred business schema.
-    Units stay in the original column names/README and are never guessed.
-    """
-    schema = []
-    for table in context.catalog.tables:
-        schema.append({"source": table.path.name, "table": table.name,
-                       "columns": [{"name": column,
-                                    "observed_types": sorted({type(row.get(column)).__name__
-                                                              for row in table.sample})}
-                                   for column in table.columns],
-                       "samples": table.sample})
+
+def build_messages(question: Question, context: BusinessContext, *,
+                   schema: dict[str, Any] | None = None) -> list[dict[str, str]]:
+    """Use complete DATA-03 schema and split rules; reject an oversized prompt."""
+    if schema is None:
+        schema = describe_prompt_schema({}, context.catalog)
     period = resolved_period(question, context.split.rulebook)
     dates = {question.as_of_date.isoformat()}
     if period:
@@ -136,6 +136,7 @@ def build_messages(question: Question, context: BusinessContext) -> list[dict[st
     payload = {"question": question.question, "as_of_date": question.as_of_date.isoformat(),
                "schema": schema, "business_readme": context.catalog.readme,
                "rulebook": context.split.rulebook, "calendar": calendar,
+               "structured_rulebook": json.loads(parse_rulebook(context.split.rulebook).to_json()),
                "required_rules": _capabilities(context.split.rulebook),
                "resolved_period": [d.isoformat() for d in period] if period else None}
     text = json.dumps(payload, ensure_ascii=False, default=json_value, allow_nan=False)
@@ -238,8 +239,14 @@ class LocalPlanAgent(BaselineAgent):
             return Candidate(reason="Question has conditions outside the current Plan contract")
         if self._model_error is not None:
             return Candidate(reason=self._model_error.reason, evidence=dict(self._model_error.evidence))
+        if "model_schema" not in context.cache:
+            described = self.worker.run(describe_prompt_schema, self.ingestion_timeout,
+                                        catalog=context.catalog)
+            if not described.ok:
+                return _execution_failure("Schema description", described, {})
+            context.cache["model_schema"] = described.value
         try:
-            messages = build_messages(question, context)
+            messages = build_messages(question, context, schema=context.cache["model_schema"])
         except (ValueError, TypeError, OSError) as exc:
             return Candidate(reason=f"Local context rejected: {exc}")
         if self._model_generation != self.planner_worker.generation or not self.planner_worker.alive:
