@@ -1,6 +1,7 @@
 import argparse
 import json
 import sys
+import subprocess
 from pathlib import Path
 
 from datamate.data_tools import business_holdout, import_archive
@@ -16,10 +17,28 @@ from datamate.pipeline import Config, predict
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="datamate", description="Offline DataMate team starter")
     commands = result.add_subparsers(dest="command", required=True)
-    bench = commands.add_parser('benchmark', help='Offline EVAL-01 run and local-proxy report')
+    bench = commands.add_parser('benchmark', help='Offline EVAL-02 run and local-proxy report')
     for name in ('checkout', 'data-dir', 'holdout', 'config', 'output-dir'):
         bench.add_argument('--' + name, type=Path, required=True)
     bench.add_argument('--compare-to', type=Path)
+    bench.add_argument('--allow-config-difference', action='store_true')
+    rescore = commands.add_parser('rescore', help='Re-score completed historical inference')
+    for name in ('run-dir', 'data-dir', 'holdout', 'output-dir'):
+        rescore.add_argument('--' + name, type=Path, required=True)
+    calibration = commands.add_parser('calibrate', help='Select confidence using training businesses only')
+    for name in ('run-dir', 'data-dir', 'holdout', 'output-dir'):
+        calibration.add_argument('--' + name, type=Path, required=True)
+    verify = commands.add_parser('verify-runs', help='Label-free repeated submission and log checks')
+    verify.add_argument('--data-dir', type=Path, required=True)
+    verify.add_argument('--run-dir', type=Path, action='append', required=True)
+    verify.add_argument('--output-dir', type=Path, required=True)
+    verify.add_argument('--max-seconds', type=float, default=21600)
+    image = commands.add_parser('verify-image', help='Run one immutable Docker image twice offline')
+    image.add_argument('--image', required=True)
+    image.add_argument('--data-dir', type=Path, required=True)
+    image.add_argument('--output-dir', type=Path, required=True)
+    image.add_argument('--max-seconds', type=float, default=21600)
+    image.add_argument('--gpus', action='store_true')
     demo = commands.add_parser("demo", help="Generate synthetic CSV/XLSX/SQLite smoke-test data")
     demo.add_argument("--output", type=Path, default=Path("data/demo"))
     smoke = commands.add_parser("smoke", help="Generate/reuse demo, predict, validate and check metrics")
@@ -63,7 +82,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == 'benchmark':
             from datamate.evaluation.benchmark import benchmark
             report = benchmark(args.checkout, args.data_dir, args.holdout, args.config,
-                               args.output_dir, args.compare_to)
+                               args.output_dir, args.compare_to, args.allow_config_difference)
+        elif args.command == "rescore":
+            from datamate.evaluation.benchmark import rescore
+            report = rescore(args.run_dir, args.data_dir, args.holdout, args.output_dir)
+        elif args.command == "calibrate":
+            from datamate.evaluation.calibration import calibrate
+            report = calibrate(args.run_dir, args.data_dir, args.holdout, args.output_dir)
+        elif args.command == "verify-runs":
+            from datamate.evaluation.release import verify_runs
+            report = verify_runs(args.data_dir, args.run_dir, args.output_dir, args.max_seconds)
+        elif args.command == "verify-image":
+            from datamate.evaluation.release import verify_image
+            report = verify_image(args.image, args.data_dir, args.output_dir, args.max_seconds, args.gpus)
         elif args.command == "demo":
             report = create_demo(args.output)
         elif args.command == "smoke":
@@ -115,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
                       "validation_businesses": len(split["validation_businesses"])}
         print(json.dumps(report, ensure_ascii=False, indent=2, default=json_value))
         return 0
-    except (ValueError, OSError, ImportError) as exc:
+    except (ValueError, OSError, ImportError, subprocess.SubprocessError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

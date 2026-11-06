@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "training_performed": false,
+  "data_generation_performed": false,
+  "datasets": [],
+  "checkpoints": [],
+  "logs": []
+}

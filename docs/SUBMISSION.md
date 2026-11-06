@@ -25,11 +25,18 @@ train/holdout; không coi việc portal nhận file là bằng chứng mô hình
 ## Solution Docker
 
 Image đọc split tại `/data` và ghi `/result/submission.jsonl`, `/result/logs/` qua
-`predict.sh`. Trước khi đóng băng image:
+`bash /code/predict.sh` không tham số. Trước khi đóng băng image:
 
 - Chạy quy trình offline ở `docs/VALIDATION.md`, gồm data read-only và network tắt.
 - Khai báo model/revision/licence/parameter count và đóng đủ weights vào image.
-- Lưu code training/inference, config, checksum image và bằng chứng chạy lại.
+- Lưu code training/inference, config, dữ liệu và bằng chứng training (nếu có) trong
+  `/code/training_code/`, cùng manifest có kích thước và SHA-256. Nếu không train,
+  khai báo rõ việc đó trong README và manifest.
+- Kiểm tra mỗi log có `id`, `answer`, `elapsed_ms` và `thinking`; câu tính bằng
+  code có `code` và `output` phản ánh đúng phép tính đã chạy.
+- Chạy image hai lần trên cùng split và so submission; đo runtime gồm load model.
+- Export duy nhất image `linux/amd64`. Kiểm tra `.tar` chưa nén không quá 100 GB,
+  tính MD5 cho `.tar.gz`, rồi tải lại từ link chia sẻ để xác nhận checksum.
 - Đối chiếu base image, tài nguyên và hạn nộp theo guideline mới nhất của BTC.
 
 Phân công một người phụ trách đóng gói và một người kiểm tra độc lập. Cách gửi image

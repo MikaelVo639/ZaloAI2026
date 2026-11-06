@@ -1,7 +1,8 @@
-# Ghi nhận từ portal — 29/10/2026 (GMT+7)
+# Ghi nhận từ portal — kiểm tra lại 05/11/2026 (GMT+7)
 
 Nguồn: [DataMate portal, các mục Data / Evaluation / Rule / Submission Guidance](https://challenge.zalo.ai/portal/datamate).
-Mốc đối chiếu nội dung: 29/10/2026. Portal và guideline BTC là nguồn chuẩn khi có cập nhật.
+Docker: [DataMate Docker Submission Guide](https://dl-challenge.zalo.ai/2026/datamate_dkewxftdzo/zac2026_DataMate_docker_guideline_final.pdf).
+Mốc đối chiếu nội dung: 05/11/2026. Portal và guideline BTC là nguồn chuẩn khi có cập nhật.
 Cập nhật riêng mục Rule ngày 04/11/2026: hạn phát hành weights là trước 26/10/2026.
 
 - Input mỗi split: `data/<business_id>/`, README từng business, `questions.jsonl`,
@@ -21,7 +22,9 @@ Cập nhật riêng mục Rule ngày 04/11/2026: hạn phát hành weights là t
 - Không có người can thiệp, không hard-code logic theo question/business id; không lấy đáp
   án test hoặc dùng public/private test để training.
 - `/data` mount read-only; ghi `/result/submission.jsonl` và log theo câu ở `/result/logs/`.
-  Log ít nhất gồm question id, đáp án cuối và thời gian; nên có code/query và execution output.
+  Chạy `bash /code/predict.sh` không có tham số. Mỗi log cần `id`, `answer`,
+  `elapsed_ms` (số nguyên không âm, gồm thời gian đọc dữ liệu), `thinking`
+  (null nếu không sinh reasoning); câu tính bằng code cần thêm `code` và `output`.
 - Máy tham chiếu: 2 x RTX 5090, mỗi GPU 32 GB VRAM; RAM 512 GB; tối đa 6 giờ toàn bộ private
   test tính cả load model. Blackwell cần CUDA >=12.8 và build PyTorch/vLLM phù hợp.
   Base image GPU cuối theo Docker guideline của BTC, không coi Docker CPU starter là bản cuối.
@@ -29,7 +32,7 @@ Cập nhật riêng mục Rule ngày 04/11/2026: hạn phát hành weights là t
   log dùng để giải trình. Nếu dừng sớm, các đáp án đã ghi mới được tính.
 - Public: tối đa 5 submission/ngày. Hạn solution **23:59 ngày 16/11/2026 GMT+7**;
   mỗi team tối đa 2 lần nộp solution, BTC lấy lần cuối. Image lớn nộp qua link Drive công khai
-  kèm checksum theo form của BTC.
+  kèm MD5 của `.tar.gz` và kích thước `.tar` chưa nén. File `.tar` phải không quá 100 GB.
 - Private test mở **09:00 ngày 20/11/2026 GMT+7**; hạn kết quả **23:59 ngày 23/11/2026**.
 
 Các URL tải dữ liệu xuất hiện trong mục Data:
