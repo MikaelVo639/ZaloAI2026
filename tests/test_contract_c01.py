@@ -4,16 +4,23 @@ These tests lock the agreed interface before S01/D01/A01 implement it: the new i
 and the debt source types exist, the current backends refuse every new intent instead of
 answering it partially, and the examples in the contract document stay consistent with
 the code. A01 updates the "refuses" tests when it enables an intent with its regressions.
+
+The synthetic ledgers below are the contract's reference cases for customer keys (§6.5)
+and new debt (§7). ``reference_*`` restate the contract in a few lines so that the
+expected values stay consistent with it; A01 checks its executor against the same
+fixtures and expected values, it does not import these helpers.
 """
 import json
 import re
 import unittest
+from collections import Counter, defaultdict
 from dataclasses import FrozenInstanceError, fields
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
 from datamate.agent import compute
+from datamate.agent.compute import WALK_IN_NAMES
 from datamate.agent.local_plan import _capabilities
 from datamate.agent.validation import check_executed
 from datamate.contracts import (
@@ -30,6 +37,7 @@ from datamate.contracts import (
 )
 from datamate.demo import RULEBOOK
 from datamate.evaluation.validation import validate_record
+from datamate.semantics.text import fold
 
 DOC = Path(__file__).resolve().parents[1] / "docs" / "AGENT_02_CONTRACT.md"
 NEW_INTENTS = ("revenue_increasing", "top_debt_customers", "debt_total",
@@ -78,13 +86,153 @@ class SharedInterfaceTest(unittest.TestCase):
         order = DebtOrder("D1", X, "hoan thanh", Decimal("150000.5"), "Ghi nợ", True,
                           customer_id="KH01", customer_name="Khách mẫu A")
         payment = DebtPayment("D1", X, Decimal("50000"))
-        ledger = DebtLedger((order,), (payment,), X, X)
+        ledger = DebtLedger((order,), (payment,), X, X, uses_customer_codes=True)
         self.assertEqual(order.excluded, "")
         self.assertEqual(ledger.lineage, {})
         self.assertIsInstance(order.total, Decimal)
         with self.assertRaises(FrozenInstanceError):
             order.total = Decimal(0)
         self.assertNotIn("line_amount", {f.name for f in fields(DebtOrder)})
+
+
+    def test_ledger_requires_explicit_customer_code_mode(self):
+        with self.assertRaises(TypeError):
+            DebtLedger((), (), X, X)  # uses_customer_codes has no default on purpose
+
+
+def order(order_id: str, total: int, *, code: str | None = None, name: str | None = None,
+          day: date = date(2026, 4, 1), state: str = "hoan thanh", on_credit: bool = True,
+          excluded: str = "") -> DebtOrder:
+    return DebtOrder(order_id, day, state, Decimal(total), "Ghi nợ" if on_credit else "Tiền mặt",
+                     on_credit, excluded, code, name)
+
+
+def pay(order_id: str, amount: int, day: date = date(2026, 4, 1)) -> DebtPayment:
+    return DebtPayment(order_id, day, Decimal(amount))
+
+
+# Shop without customer codes: customers by the name on the order (§6.5).
+NO_CODES = DebtLedger((
+    order("D1", 300000, name="Chị Lan"),
+    order("D2", 200000, name="chị  lan"),           # same customer, other spelling
+    order("D3", 150000, name="Anh Minh"),
+    order("D4", 90000, name="Khách lẻ"),           # walk-in: total only
+    order("D5", 60000, name="kl"),                 # walk-in: total only
+    order("D6", 80000),                            # no name: walk-in
+), (pay("D1", 100000),), date(2026, 4, 1), X, uses_customer_codes=False)
+NO_CODES_EXPECTED = {"rows": {"chị lan": Decimal(400000), "anh minh": Decimal(150000)},
+                     "total": Decimal(780000), "customers": 2}
+
+# Shop that uses codes, but every order of this extract lacks a code: all walk-in.
+CODES_ALL_MISSING = DebtLedger((
+    order("D1", 300000, name="Chị Lan"),
+    order("D2", 120000, name="Anh Minh"),
+), (), date(2026, 4, 1), X, uses_customer_codes=True)
+CODES_ALL_MISSING_EXPECTED = {"rows": {}, "total": Decimal(420000), "customers": 0}
+
+# Two codes, same name: two customers, two rows; ties go by code.
+SAME_NAME_TWO_CODES = DebtLedger((
+    order("D1", 50000, code="KH02", name="Nguyễn Văn An"),
+    order("D2", 50000, code="KH01", name="Nguyễn Văn An"),
+    order("D3", 70000, name="Nguyễn Văn An"),      # no code in a shop with codes: walk-in
+), (), date(2026, 4, 1), X, uses_customer_codes=True)
+SAME_NAME_TWO_CODES_EXPECTED = {"rows": {"KH01": Decimal(50000), "KH02": Decimal(50000)},
+                                "total": Decimal(170000), "customers": 2}
+
+# debt_flow: an order paid above its total on the order day adds no debt (never negative).
+OVERPAID = DebtLedger((
+    order("D1", 100000, code="KH01", name="Khách mẫu A"),
+    order("D2", 200000, code="KH01", name="Khách mẫu A"),
+), (pay("D1", 120000), pay("D2", 50000), pay("D2", 30000, date(2026, 4, 5))),
+    date(2026, 4, 1), X, uses_customer_codes=True)
+OVERPAID_FLOW_EXPECTED = [Decimal(150000), Decimal(30000)]  # [nợ thêm, trả được]
+
+
+def customer_key(debt_order: DebtOrder, ledger: DebtLedger) -> str | None:
+    """Contract §6.5, restated: the code in a shop with codes, else the normalized name."""
+    if ledger.uses_customer_codes:
+        return debt_order.customer_id
+    name = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", (debt_order.customer_name or "").lower()))
+    name = name.strip()
+    # Only case, spacing and punctuation are folded; diacritics stay (contract §6.5).
+    return None if not name or fold(name) in WALK_IN_NAMES else name
+
+
+def reference_debts(ledger: DebtLedger, x: date) -> dict:
+    """Contract §5 steps 1-3 and §7 debt_total / debt_customer_count, restated."""
+    paid = defaultdict(Decimal)
+    for payment in ledger.payments:
+        if payment.day <= x:
+            paid[payment.order_id] += payment.amount
+    rows, total = defaultdict(Decimal), Decimal(0)
+    for debt_order in ledger.orders:
+        if debt_order.day > x or debt_order.state == "huy" or debt_order.excluded:
+            continue
+        rest = debt_order.total - paid[debt_order.order_id]
+        if rest <= 0:
+            continue
+        total += rest
+        key = customer_key(debt_order, ledger)
+        if key is not None:
+            rows[key] += rest
+    return {"rows": dict(rows), "total": total, "customers": len(rows)}
+
+
+def reference_flow(ledger: DebtLedger, start: date, end: date, key: str) -> list[Decimal]:
+    """Contract §7 debt_flow, restated: [nợ thêm, trả được] of one customer."""
+    payments = defaultdict(list)
+    for payment in ledger.payments:
+        payments[payment.order_id].append(payment)
+    new = repaid = Decimal(0)
+    for debt_order in ledger.orders:
+        if (not debt_order.on_credit or debt_order.state == "huy"
+                or customer_key(debt_order, ledger) != key):
+            continue
+        own = payments[debt_order.order_id]
+        if start <= debt_order.day <= end:
+            same_day = sum((p.amount for p in own if p.day == debt_order.day), Decimal(0))
+            new += max(debt_order.total - same_day, Decimal(0))
+        repaid += sum((p.amount for p in own if p.day > debt_order.day and start <= p.day <= end),
+                      Decimal(0))
+    return [new, repaid]
+
+
+def ledger_problems(ledger: DebtLedger) -> list[str]:
+    """Contract §6.4 check 7, restated."""
+    if not ledger.uses_customer_codes and any(o.customer_id for o in ledger.orders):
+        return ["customer_mode"]
+    return []
+
+
+class CustomerKeyAndFlowReferenceTest(unittest.TestCase):
+    """Reference cases from review C01-1 and C01-2; A01 reuses fixtures and expectations."""
+
+    def test_shop_without_customer_codes_groups_by_name(self):
+        self.assertEqual(reference_debts(NO_CODES, X), NO_CODES_EXPECTED)
+
+    def test_shop_with_codes_but_no_code_on_any_order_has_no_rows(self):
+        self.assertEqual(reference_debts(CODES_ALL_MISSING, X), CODES_ALL_MISSING_EXPECTED)
+
+    def test_two_codes_with_the_same_name_are_two_customers(self):
+        result = reference_debts(SAME_NAME_TWO_CODES, X)
+        self.assertEqual(result, SAME_NAME_TWO_CODES_EXPECTED)
+        ranked = sorted(result["rows"].items(), key=lambda kv: (-kv[1], kv[0]))
+        self.assertEqual([key for key, _ in ranked], ["KH01", "KH02"])
+        names = Counter(o.customer_name for o in SAME_NAME_TWO_CODES.orders if o.customer_id)
+        self.assertEqual(names, {"Nguyễn Văn An": 2})
+
+    def test_codes_on_orders_of_a_shop_without_codes_are_a_data_error(self):
+        broken = DebtLedger((order("D1", 1000, code="KH01", name="A"),), (), X, X,
+                            uses_customer_codes=False)
+        self.assertEqual(ledger_problems(broken), ["customer_mode"])
+        for ledger in (NO_CODES, CODES_ALL_MISSING, SAME_NAME_TWO_CODES, OVERPAID):
+            self.assertEqual(ledger_problems(ledger), [])
+
+    def test_new_debt_is_never_negative(self):
+        flow = reference_flow(OVERPAID, date(2026, 4, 1), date(2026, 4, 30), "KH01")
+        self.assertEqual(flow, OVERPAID_FLOW_EXPECTED)
+        self.assertEqual(reference_flow(OVERPAID, date(2026, 4, 1), date(2026, 4, 1), "KH01"),
+                         [Decimal(150000), Decimal(0)])
 
 
 class CurrentBackendsRefuseNewIntentsTest(unittest.TestCase):

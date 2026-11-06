@@ -1,7 +1,8 @@
 # Contract C01 — boolean, table và nguồn công nợ
 
-Trạng thái: **bản chốt đề xuất của C01**, chờ Data (@longlth2297) và Agent
-(@tqhuy0602) xác nhận trên PR C01 và issue #15. Thay bản đề xuất AGENT-02 trước đó.
+Trạng thái: **đề xuất đã hoàn tất, chờ xác nhận bản cuối của Data (@longlth2297) và
+Agent (@tqhuy0602)** trên PR #23 và issue #15. Đã sửa theo review Agent lần 1 (khoá khách
+theo loại shop, nợ thêm không âm). Thay bản đề xuất AGENT-02 trước đó.
 Liên quan SEM-02 #15, AGENT-02 #16, DATA-03 #14. Giữ nguyên SEM-01 #18 và SEM/DATA #22.
 
 C01 chỉ chốt giao diện. Grammar thuộc S01, adapter công nợ thuộc D01, executor và
@@ -19,6 +20,8 @@ không phải đánh giá mù.
 | "Đến hết ngày X" | `start == end == X`; intent nằm trong `SNAPSHOT_INTENTS`; tính mọi phát sinh từ đầu dữ liệu đến hết X |
 | "Tăng liên tục" | mọi tháng sau **lớn hơn hẳn** tháng ngay trước; bằng nhau là `false`; so tổng Decimal chưa làm tròn |
 | Nguồn công nợ | kiểu dữ liệu riêng `DebtOrder` / `DebtPayment` / `DebtLedger` trong `contracts.py`; **không** mở rộng `Sale` |
+| Shop dùng mã hay không | `DebtLedger.uses_customer_codes` bắt buộc, do D01 xác định từ README / schema; quyết định khoá khách và khách lẻ (§6.5) |
+| Nợ thêm của một đơn | `max(total − paid_on_order_day, 0)`, không âm (§7) |
 | Tên cột bảng nợ | `DEBT_TABLE_COLUMNS = ("khach_hang", "so_tien_no")`, đúng ví dụ trong rulebook |
 | Backend chưa làm intent / trường nào | abstain qua `compute.unsupported()`; model chỉ sinh các intent đã bật cho nó |
 
@@ -155,8 +158,8 @@ string / list, ngoài C01 → abstain.
    Đơn trả hàng **vẫn tính** nếu còn nợ.
 2. Đã trả của đơn = tổng `DebtPayment.amount` có `day <= X`. Còn nợ của đơn = `total − đã trả`;
    chỉ giữ đơn còn nợ `> 0`.
-3. Cộng theo khách: khoá là `customer_id`; shop không có mã khách thì khoá là tên đã
-   chuẩn hoá theo §3. Đơn khách lẻ (không có khoá) **không có dòng** trong bảng.
+3. Cộng theo **khoá khách** (§6.5, theo `ledger.uses_customer_codes`). Đơn khách lẻ
+   (không có khoá) **không có dòng** trong bảng nhưng vẫn vào tổng nợ trong evidence.
 4. Xếp số nợ giảm dần, bằng nhau theo mã tăng dần (không có mã thì theo tên), lấy `top_k`.
 5. Ô tiền làm tròn một lần về đồng (quy ước 6). Ít hơn `top_k` khách còn nợ thì trả số
    dòng có được; **không khách nào còn nợ → abstain** (chưa có nhãn train cho bảng rỗng).
@@ -187,7 +190,9 @@ Output đúng định dạng rulebook:
 ### Kiểm chứng trên train
 
 Dựng ledger thủ công cho 3 business train có file đơn + file thu tiền rõ ràng, áp đúng
-các bước trên: **8 / 8** câu table của các business đó khớp nhãn (so tên qua mã khách).
+các bước trên: **7 / 7** câu table của các business đó khớp nhãn (so tên qua mã khách).
+5 câu table khác của business train nằm ở một shop có file đơn dạng báo cáo (dòng tiêu đề
+phía trên header), chưa dựng ledger thủ công; D01 sẽ kiểm qua adapter thật.
 Đối chiếu với cột "Còn nợ" ở ngày cuối dữ liệu: **khớp từng đơn**, mọi khác biệt chỉ nằm
 ở đơn COD. Cột này tính cả COD, còn luật nợ thì bỏ COD.
 
@@ -197,8 +202,9 @@ các bước trên: **8 / 8** câu table của các business đó khớp nhãn (
 
 `DebtOrder(order_id, day, state, total, payment_method, on_credit, excluded,
 customer_id, customer_name, source)`, `DebtPayment(order_id, day, amount, source)`,
-`DebtLedger(orders, payments, first_day, last_day, lineage)`. Nghĩa từng trường ghi
-ngay trong code. Đề nghị hàm của D01:
+`DebtLedger(orders, payments, first_day, last_day, uses_customer_codes, lineage)`.
+Nghĩa từng trường ghi ngay trong code. `uses_customer_codes` **bắt buộc**, không có giá
+trị mặc định, để D01 phải quyết định tường minh (§6.5). Đề nghị hàm của D01:
 
 ```python
 # src/datamate/ingestion/debt.py
@@ -225,7 +231,9 @@ README train ghi công nợ theo một mẫu (có shop ghi tên cột kiểu `b�
 | `DebtOrder.total` | cột B | **không** lấy doanh thu dòng, tiền hàng trước giảm hay tổng dòng chi tiết |
 | `DebtOrder.state` | `ingestion.status.order_state` | cùng bảng đồng nghĩa với adapter bán hàng; nhãn lạ → lỗi |
 | `DebtOrder.payment_method`, `on_credit`, `excluded` | cột hình thức thanh toán; cột kênh / nguồn đơn | bảng nhãn đóng, xem 6.3 |
-| `customer_id`, `customer_name` | mã khách trên đơn; tên từ danh sách khách hoặc trên đơn | khách lẻ: `WALK_IN_NAMES` hoặc trống mã → `None` |
+| `uses_customer_codes` | README / schema của shop (§6.5) | **không** suy ra từ việc có mã xuất hiện trên đơn |
+| `customer_id` | mã khách trên đơn, chỉ khi `uses_customer_codes` | đơn trống mã → `None` (khách lẻ), kể cả khi đơn có tên |
+| `customer_name` | tên từ danh sách khách hoặc trên đơn, giữ nguyên cách viết | shop không dùng mã: đây là căn cứ xác định khách |
 | `first_day`, `last_day` | ngày đặt sớm nhất; "Dữ liệu có đến hết dd/mm/yyyy" của README (nếu không có: ngày ghi cuối cùng) | |
 
 ### 6.3 Nhãn đóng
@@ -254,7 +262,45 @@ README train ghi công nợ theo một mẫu (có shop ghi tên cột kiểu `b�
    Chỉ mã lỗi này cho phép Agent trả `unanswerable` (kèm dòng §7 rulebook "shop không ghi
    loại thông tin câu hỏi cần"). Trên train có shop chỉ ghi **hạn nợ** mà không ghi
    khoản trả: đó là `absent`.
-7. `lineage` ghi file::bảng, cột đã dùng cho từng trường, dòng README, kết quả kiểm tra 1–4.
+7. `uses_customer_codes=False` thì **mọi** `customer_id` là `None`; có đơn mang mã →
+   `DebtSourceError("customer_mode")`. Không xác định được shop có dùng mã hay không →
+   cùng mã lỗi, abstain.
+8. `lineage` ghi file::bảng, cột đã dùng cho từng trường, dòng README, căn cứ của
+   `uses_customer_codes`, kết quả kiểm tra 1–4 và 7.
+
+### 6.5 Khoá khách: shop dùng mã và shop không dùng mã
+
+Luật §3 "Xác định khách" xử lý hai loại shop khác nhau, nên ledger ghi rõ loại shop thay vì
+để `customer_id=None` mang hai nghĩa.
+
+**D01 xác định `uses_customer_codes` từ README / schema**, không từ dữ liệu:
+
+- `True` khi README (hoặc profile POS đã duyệt) mô tả một cột **mã khách** của đơn, ví dụ
+  "Mã khách mua: mã khách (trống nếu khách lẻ)", hoặc danh sách khách có cột mã nối với đơn.
+- `False` khi README mô tả khách chỉ bằng tên trên đơn và không có cột mã khách nào.
+- README không cho biết → `DebtSourceError("customer_mode")` → abstain.
+- Shop dùng mã nhưng trong dữ liệu mọi đơn đều trống mã vẫn là `True`: mọi đơn là khách
+  lẻ, không ai có dòng trong bảng nợ.
+
+**A01 tính khoá khách của một đơn như sau:**
+
+| `uses_customer_codes` | Khoá khách | Khách lẻ (không có khoá) |
+|---|---|---|
+| `True` | `customer_id` | `customer_id is None`, **kể cả khi đơn có tên** |
+| `False` | tên trên đơn đã gộp hoa thường, khoảng trắng và dấu câu (cùng cách gộp với `top_customers` của SEM-02) | tên trống hoặc tên thuộc `WALK_IN_NAMES` ("khách lẻ", "kl", "lẻ", "vãng lai"…) |
+
+- Shop dùng mã: hai mã khác nhau trùng tên là **hai khách**, hai dòng trong bảng. Xếp
+  bằng nhau theo mã.
+- Shop không dùng mã: "Chị Lan" và "chị  lan" là một khách; hai tên khác chữ là hai khách.
+  Xếp bằng nhau theo tên. Tên hiển thị là cách viết gặp nhiều nhất.
+- Đơn khách lẻ vẫn vào `debt_total` và tổng nợ trong evidence, nhưng không vào bảng nợ,
+  `debt_customer_count` hay `debt_flow`.
+- Gộp tên chỉ bỏ khác biệt hoa thường / khoảng trắng / dấu câu. Tên khác dấu tiếng Việt
+  ("Le An Duc" và "Lê An Đức") ở shop không dùng mã **chưa chốt**: Data xác nhận; trước
+  khi chốt, coi là hai khách như SEM-02 đang làm.
+
+Ghi chú cho SEM-02: `compute.customer_keys` hiện suy ra "shop có mã" từ việc có mã xuất
+hiện trong dữ liệu. Nên chuyển sang cùng cờ do Data cung cấp; việc này ngoài C01.
 
 ## 7. Bốn intent công nợ dùng chung ledger (làm sau §4–§5)
 
@@ -264,8 +310,17 @@ README train ghi công nợ theo một mẫu (có shop ghi tên cột kiểu `b�
 | `debt_total` + `Threshold("order", "age_days", ">", N)` | như trên | number | chỉ đơn có tuổi `X − day > N` ("quá / hơn / trên N ngày"); "từ N ngày trở lên" là `">="` | + §4 "Tuổi nợ", §2 "Quá N…" |
 | `debt_customer_count` | `start == end == X` | number | số khoá khách (không tính khách lẻ) có nợ > 0 | + §3 "Xác định khách", §4 "Nợ theo khách" |
 | `debt_collected` | kỳ `start..end` | number | tổng khoản trả có `start <= day <= end`, `day > ngày đặt`, của đơn `on_credit`, không huỷ (kể cả đơn kỳ trước, đơn trả hàng) | §4 "Nợ thêm, trả nợ, thu nợ trong kỳ" |
-| `debt_flow` + `Filter("customer", tên)` | kỳ `start..end` | list `[nợ thêm, trả được]` | nợ thêm = `total − khoản trả cùng ngày đặt` của đơn `on_credit`, không huỷ, đặt trong kỳ; trả được như `debt_collected`; chỉ đơn của khách đó | + §3 "Xác định khách" |
+| `debt_flow` + `Filter("customer", tên)` | kỳ `start..end` | list `[nợ thêm, trả được]` | nợ thêm = tổng theo đơn của `max(total − paid_on_order_day, 0)`, với các đơn `on_credit`, không huỷ, đặt trong kỳ; trả được như `debt_collected`; chỉ đơn của khách đó (khoá §6.5) | + §3 "Xác định khách" |
 
+- Nợ thêm của **một đơn** không bao giờ âm:
+
+  ```python
+  new_debt = max(order.total - paid_on_order_day, Decimal(0))
+  # paid_on_order_day = tổng DebtPayment.amount của đơn đó có day == order.day
+  ```
+
+  Ví dụ: tổng đơn 100.000 VND, trả ngay trong ngày đặt 120.000 VND → nợ thêm **0**, không
+  phải −20.000. Phần trả dư không được trừ vào nợ thêm của đơn khác.
 - `Filter("customer").value` là tên như trong dữ liệu. Semantics lấy danh sách tên
   khách qua `vocabulary` (thêm khoá `"customer"`) giống tên nhóm. Tên khớp nhiều mã khách
   → abstain.
@@ -320,7 +375,11 @@ README train ghi công nợ theo một mẫu (có shop ghi tên cột kiểu `b�
 **Table** (D01 + A01):
 
 - thiếu / trùng mã đơn; khoản trả mồ côi;
-- hai khách trùng tên khác mã → hai dòng; shop không có mã khách → theo tên §3;
+- khoá khách theo §6.5 (fixture có sẵn trong `tests/test_contract_c01.py`, A01 dùng lại):
+  - shop **không dùng mã**: tên khác hoa thường / khoảng trắng là một khách, "kl" / "Khách lẻ" là khách lẻ;
+  - shop **dùng mã nhưng mọi đơn trống mã**: không ai có dòng, tổng nợ vẫn đủ, bảng → abstain;
+  - **hai mã khác nhau trùng tên** → hai dòng;
+  - `uses_customer_codes=False` mà có đơn mang mã → lỗi `customer_mode`, abstain;
 - khách lẻ chỉ vào tổng nợ, không có dòng;
 - đơn huỷ bỏ; đơn trả hàng còn nợ vẫn tính; COD / sàn bỏ;
 - khoản trả trước / đúng / sau mốc X; nhiều khoản trả một đơn không nhân dòng;
@@ -329,17 +388,38 @@ README train ghi công nợ theo một mẫu (có shop ghi tên cột kiểu `b�
 - ô số là int, tên cột đúng `DEBT_TABLE_COLUMNS`;
 - đối chiếu "Còn nợ" lệch → abstain.
 
+**`debt_flow`** (A01): tổng đơn 100.000, trả trong ngày đặt 120.000 → nợ thêm 0 (fixture
+trong `tests/test_contract_c01.py`); khoản trả sau ngày đặt chỉ vào "trả được".
+
 **Cả hai:** thiếu nguồn / luật, worker lỗi / timeout → abstain; evidence `code` / `result`
 khớp đáp án; backend cũ từ chối intent mới (`test_contract_c01.py`); regression SEM-02
 hiện có vẫn qua.
 
-## 11. Xác nhận
+## 11. Tái lập các kết quả kiểm chứng
+
+Các con số 22 / 22, 7 / 7, 46 / 46 ở §4, §5, §7 chạy bằng một script **ngoài Git**, vì
+script đọc nhãn train và dựng ledger thủ công cho từng business (ánh xạ cột viết tay):
+
+```sh
+# từ gốc repo, dữ liệu train đã giải nén, manifest holdout của nhóm
+uv run python <thư mục C01>/verify/verify_c01_train.py --data-dir data/raw/train --holdout outputs/business_split.json
+```
+
+- Script `C01/verify/verify_c01_train.py` và log lần chạy 06/11
+  `C01/verify/logs/verify_c01_train_20261106.txt` nằm trong thư mục bàn giao C01 (ngoài
+  repo), không commit. Log ghi: boolean 22 / 22 (bỏ 1 câu của business validation),
+  table 7 / 7, number / list 46 / 46, đối chiếu "Còn nợ" lệch 0 đơn ở cả 2 shop có cột này.
+- Script chỉ dùng business train của manifest và từ chối chạy nếu business nằm trong
+  validation.
+- Không dùng trong inference; chỉ để reviewer kiểm lại luật của contract.
+
+## 12. Xác nhận
 
 | Role | Người | Xác nhận | Trạng thái |
 |---|---|---|---|
 | Semantics | @Kurosuz | tên intent, Plan, luật bắt buộc, nghĩa "tăng liên tục", phạm vi abstain | đề xuất trong PR C01 |
-| Data | @longlth2297 | nguồn / cột / nhãn §6, kiểm tra 6.4, mã lỗi `absent` | chờ |
-| Agent | @tqhuy0602 | executor / evidence / validation §4–§5, tương thích backend, regression §10 | chờ |
+| Data | @longlth2297 | nguồn / cột / nhãn §6, kiểm tra 6.4, cách xác định `uses_customer_codes` §6.5, mã lỗi `absent` / `customer_mode` | chờ bản cuối |
+| Agent | @tqhuy0602 | executor / evidence / validation §4–§5, khoá khách §6.5, nợ thêm §7, tương thích backend, regression §10 | review lần 1 xong (2 điểm đã sửa), chờ kiểm lại |
 
 Chỉ coi C01 xong khi cả ba xác nhận trên PR và issue #15. Phần kiểm tra format
 boolean / table hiện có **không** được coi là đã trả lời được các câu này.

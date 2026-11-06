@@ -103,7 +103,9 @@ class DebtOrder:
     payment_method: str  # label as written on the order
     on_credit: bool  # the order's payment method is "ghi nợ" (needed by debt_collected/debt_flow)
     excluded: str = ""  # "cod" | "marketplace": không phải khách nợ (rulebook §4); "" otherwise
-    customer_id: str | None = None  # None for khách lẻ and for shops without customer codes
+    # Shop with customer codes (DebtLedger.uses_customer_codes): the code; None = khách lẻ,
+    # even when the order carries a name. Shop without codes: always None.
+    customer_id: str | None = None
     customer_name: str | None = None  # display name (customer list first, else the order)
     source: str = ""  # lineage: "file::table#row"
 
@@ -126,6 +128,11 @@ class DebtLedger:
     payments: tuple[DebtPayment, ...]
     first_day: date  # first order day
     last_day: date  # "Dữ liệu có đến hết …" when the README states it, else the last record day
+    # How the shop identifies customers (rulebook §3 "Xác định khách"), decided by Data from
+    # the README/schema, never from whether codes happen to appear on the orders:
+    # True  = one customer per code; an order without a code is khách lẻ;
+    # False = the shop has no customer codes; customers are told apart by the name on the order.
+    uses_customer_codes: bool
     lineage: dict[str, Any] = field(default_factory=dict)  # tables, columns, README lines, checks
 
 
