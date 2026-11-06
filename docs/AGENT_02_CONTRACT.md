@@ -1,6 +1,7 @@
 # Đề xuất contract boolean/table — chờ Semantics và Data xác nhận
 
-Trạng thái: đề xuất, **chưa triển khai vào `contracts.py` hay grammar**.
+Trạng thái: hai intent boolean/table dưới đây vẫn là đề xuất, **chưa triển khai
+vào `contracts.py` hay grammar**; trường `periods` dùng lại phần đã có trong #22.
 Liên quan SEM-02 #15, AGENT-02 #16, DATA-03 #14. Giữ nguyên SEM-01 #18.
 
 ## Phạm vi cần chốt

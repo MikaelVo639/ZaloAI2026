@@ -304,3 +304,80 @@ wall-clock toàn container (mỗi lượt tối đa 21600 giây), kiểm tra inp
 log và báo cáo vào output. CI dùng cùng lệnh với CPU demo. Kết quả này không tự
 xác nhận GPU tham chiếu, licence/weights hoặc chấp nhận bản nộp; Integration vẫn
 phải kiểm tra trên máy yêu cầu và giao đúng image cuối.
+
+## Review tích hợp AGENT-02 — 06/11/2026
+
+Đã review EVAL-02 #19, INT-02 #21, SEM/DATA #22 và AGENT-02 #20. Đối chiếu
+contract của #22 với Agent phát hiện validation cũ từ chối chuỗi doanh thu, tháng
+tốt nhất, top khách, số đếm theo ngưỡng, tỉ trọng và số lượng theo đơn vị. Đã sửa
+kiểu/phạm vi/độ dài chuỗi và evidence Decimal/JSON number, thêm regression từ
+executor qua validation; từ chối kỳ chồng lấn, ngưỡng số đơn lẻ và trường so sánh
+không được thực thi. Hai backend cùng dùng vocabulary nhóm khi lập Plan.
+
+Planner local nhận schema DATA-03 trong worker có deadline và luật có cấu trúc
+SEM-02 cùng nguyên văn rulebook của split. Acceptance kiểm thêm version/checksum
+scorer, tránh so hai lượt chấm bằng quy tắc khác nhau. Verifier Docker giữ network
+tắt, `/data` read-only, `/code/predict.sh` và shm 16 GB.
+
+Lượt đầu ở `9a49851` đạt 1.677 đúng / 0 sai / 1.323 abstain; validation 384 đúng /
+0 sai / 246 abstain. Log cho thấy ba business train bị `SOURCE_MISSING` vì tên file
+ZIP UTF-8 không có cờ tương ứng bị giải mã CP437. Bản sửa trong #22 chỉ dùng lookup
+Unicode NFC và phép giải mã đảo được; giữ nguyên file/tên nguồn trong lineage, từ
+chối nếu nhiều file khớp một tên README. Không đổi dữ liệu gốc hoặc holdout.
+
+### Kết quả cuối cùng trên cùng holdout
+
+Inference revision `154256b3caac2a85071d5ef32fe708ed7bcce88b`,
+`configs/baseline.toml`, seed 42 / validation fraction 0.2. Đây là **baseline CPU,
+local proxy trên train đã xem**, không phải điểm chính thức, đánh giá mù hoặc kết
+quả Qwen/GPU. Baseline cũ `43cf869` được chấm lại bằng scorer v2 trước khi so sánh.
+
+| Phân vùng | Baseline cũ: đúng / sai / abstain | Tích hợp: đúng / sai / abstain | PA local trước → sau |
+|---|---:|---:|---:|
+| Toàn train, 3.000 câu | 151 / 0 / 2.849 | **1.930 / 0 / 1.070** | 0.050333 → **0.643333** |
+| 6 business validation, 630 câu | 78 / 0 / 552 | **384 / 0 / 246** | 0.123810 → **0.609524** |
+
+Có **1.779 abstain → correct**, không có câu mới sai. Validation quality gate của
+Evaluation đạt. Inference subprocess **463,03 giây**, tổng benchmark **498,23 giây**;
+0 câu có lỗi thực thi. Diagnostic thiếu worker metadata ở 1.011 câu không được coi
+là bằng chứng lỗi hoặc unanswerable. Metadata ghi `dirty=true` vì file local chưa
+tracked; diff tracked tại lúc bắt đầu rỗng (SHA256 `e3b0c442…b855`).
+
+Identity và artifact (giữ trong ignored run artifacts):
+
+| Thành phần | SHA256 |
+|---|---|
+| Input tree | `ab2cfe298b3f3a93a825f973a1e5f479ab5067eadc44bbb1d64fb08ef2fef54d` |
+| Holdout | `7e356421711fd5ffe4a7ed29e49b67e03c809fa70e1d8aa0cf3c0a787fea2164` |
+| Reference | `0b5fe9d13edf5fae306bda9cafaf699c06b639846c8e1d9e41c39a86d1160b3d` |
+| Scorer v2 | `49094297b726fedf05393ba60a1e77e7a1858226dc9438a55a5dfa8b53bb6b07` |
+| Submission | `a64e4f71ddd8d5722b330371889c3e93269f192703d31c0dc0d47b566854ba60` |
+| Final artifact ZIP | `cea64c67f91e1e42852bd350f8686fe2387bfc707adff6a2bc8066846a46a47c` |
+
+Các thư mục local của lượt review:
+`outputs/runs/agent02-review-20261106-baseline-v2`,
+`outputs/runs/agent02-review-20261106-integrated` và
+`outputs/runs/agent02-review-20261106-final`. Smoke/test/preflight/token counts ở
+`outputs/reviews/agent02-pr-integration-20261106`; dữ liệu, labels, prompts, logs và
+weights không được commit. Sau khi chuẩn bị train và manifest cố định như phần
+trước, tái hiện vào các thư mục mới:
+
+```sh
+uv sync --locked
+uv run datamate smoke
+uv run python -m unittest discover -s tests -v
+uv run datamate benchmark --checkout . --data-dir data/raw/train --holdout outputs/business_split.json --config configs/baseline.toml --output-dir outputs/runs/agent02-review-reproduction
+```
+
+Bộ tích hợp có **240 test: 239 pass, 1 skip Windows-specific**. PR #21 sau xử lý
+xung đột có 139 test; PR #22 sau sửa tên file có 195 test, mỗi bộ 1 skip tương tự.
+CI Ubuntu/Windows/Docker qua trên các head đã review. Docker daemon local không
+khả dụng; bằng chứng chạy container của bản ghép nằm ở CI remote.
+
+Tokenizer local đúng revision Qwen đã khai báo kiểm lại cùng 5 business train của
+probe trước: **19.626–22.296 input token**, dưới 24.576. Đây chỉ là tokenizer CPU,
+không phải generation hay benchmark model. Preflight xác nhận chưa có CUDA GPU,
+optional runtime hoặc model snapshot/manifest, nên **chưa hoàn tất A/B model,
+threshold B hoặc đo private dưới 6 giờ**. Boolean/table mới có format validation;
+hai intent và nguồn công nợ trong `AGENT_02_CONTRACT.md` vẫn chờ thống nhất. Giữ
+#16 mở cho các điều kiện này, không suy ra hoàn tất role chỉ từ PR đã merge.

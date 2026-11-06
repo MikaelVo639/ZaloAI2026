@@ -16,7 +16,7 @@ planner giả lập là kết quả của Qwen. Chưa đủ bằng chứng để
 | Deadline | Worker riêng cho model load/generate và worker riêng cho ingestion/compute; bao gồm startup/send/recv |
 | Kiểm tra kết quả | `agent/validation.py`; lỗi, timeout, output sai kiểu/phạm vi/evidence → abstain |
 | `boolean`/`table` | Có kiểm tra format theo scorer và regression; **chưa thêm intent** khi chưa thống nhất Plan mở rộng |
-| Holdout/threshold/GPU 6 giờ | Chờ môi trường/dữ liệu và quy trình Evaluation/Integration bên dưới |
+| Holdout/threshold/GPU 6 giờ | Baseline có benchmark train; model vẫn chờ GPU/weights và quy trình Evaluation/Integration bên dưới |
 
 Đã tích hợp SEM-01 #18 và contract SEM/DATA #22: kỳ so sánh, bộ lọc sản phẩm/nhóm,
 chuỗi doanh thu nhiều tháng, tháng tốt nhất, top khách, số đếm theo ngưỡng và số
@@ -36,8 +36,8 @@ bổ sung split giả để tiếp tục chạy sau bản sửa cache.
 1. Grammar hiện tại (kể cả so sánh kỳ và thử lại với tên sản phẩm từ worker) lập được
    Plan thì chạy baseline và giữ confidence của baseline, không gọi model.
 2. Câu còn lại chỉ đi tới model nếu rulebook của split bật được phép tính và parser
-   thời gian hiện tại xác định đúng một kỳ dương lịch. Schema giữ cột, kiểu Python
-   quan sát được và mẫu có sẵn; đơn vị được giữ trong README/cột gốc, không đoán.
+   thời gian hiện tại xác định đúng một kỳ dương lịch. Schema giữ tên cột và mẫu
+   nguồn, mô tả kiểu/ý nghĩa/đơn vị theo adapter README; không đoán đơn vị.
    Mô tả schema/units dùng DATA-03 `describe_schema`, chạy một lần mỗi business
    trong worker có deadline, bỏ business id khỏi payload. Luật có thêm cấu trúc
    `parse_rulebook` của SEM-02 bên cạnh nguyên văn của split; không cắt ngầm schema/luật.
@@ -95,7 +95,9 @@ Config thử nghiệm dùng input tối đa 24.576 token, output 1.024, tổng d
 mặc định 32.768 của snapshot. Trước tích hợp DATA-03/SEM-02, tokenizer thật xác nhận 5 prompt business train sau
 khi scope calendar còn 9.250–18.852 token; trước sửa là 45.541–55.065. Đây chỉ là
 kiểm tra đầu vào bằng tokenizer, không phải model generation/benchmark GPU. Prompt
-mới có schema/luật có cấu trúc cần đo lại trên runtime chuẩn bị sẵn; vượt budget thì abstain.
+mới có schema/luật có cấu trúc đã kiểm lại trên CPU với đúng 5 business train đó:
+**19.626–22.296 input token**, đều dưới 24.576. Đây vẫn là tokenizer-only, không phải
+generation/GPU. Vượt budget thì abstain, không cắt ngầm luật hoặc schema.
 Loader dùng `attn_implementation="sdpa"` để runtime có thể chọn attention kernel
 tiết kiệm bộ nhớ thay vì luôn tạo attention matrix eager; [Qwen2 hỗ trợ SDPA](https://huggingface.co/docs/transformers/v4.51.3/model_doc/qwen2).
 Hiệu năng/VRAM và tính lặp lại vẫn cần xác minh trên GPU thật.
