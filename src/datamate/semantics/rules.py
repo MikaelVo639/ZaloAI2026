@@ -23,6 +23,20 @@ class Rules:
     change_percent: bool = False        # % thay đổi so với kỳ trước, giảm ra số âm
     same_days_last_month: bool = False  # tháng này so với tháng trước: cùng số ngày
     product_names: bool = False         # tên gọi cùng chỉ một thứ là một; file có mã thì theo mã
+    hot_is_best_seller: bool = False    # "hot nhất" cùng nghĩa với "bán chạy nhất"
+    # SEM-02
+    list_in_question_order: bool = False  # câu nhiều số: list theo đúng thứ tự câu hỏi nêu
+    month_date: bool = False            # câu hỏi theo tháng: date "YYYY-MM"
+    ties_by_code: bool = False          # bằng nhau: theo mã tăng dần, không có mã thì theo tên
+    threshold_inclusive: bool = False   # "từ N trở lên" gồm N; "quá / trên / dưới N" không gồm N
+    customer_identity: bool = False     # khách = mã khách (không có mã: tên); khách lẻ không tính
+    customers_bought: bool = False      # "khách đã mua": có ít nhất một đơn hợp lệ trong kỳ
+    customer_by_revenue: bool = False   # khách mua nhiều tiền nhất: theo doanh thu
+    unit_quantity: bool = False         # "bán được bao nhiêu <đơn vị>": mặt hàng có ĐVCB đó
+    product_group: bool = False         # nhóm hàng: theo cột nhóm hàng, đúng tên câu hỏi nêu
+    product_group_share: bool = False   # mẫu số tỉ trọng nhóm hàng: cả shop, gồm phí phục vụ
+    customer_group: bool = False        # nhóm khách: theo cột; đơn vãng lai không thuộc nhóm nào
+    customer_group_share: bool = False  # tỉ trọng nhóm khách: chia doanh thu cả shop cùng kỳ
     rule_rows: tuple[tuple[str, str], ...] = ()  # (feature, original rulebook line) used as evidence
 
     def row(self, feature: str) -> str | None:
@@ -62,6 +76,18 @@ def read_rules(rulebook: str) -> Rules:
         features[feature] = originals[key]
         return True
 
+    lines = [(fold(line), line.strip()) for line in rulebook.splitlines()
+             if line.strip() and not line.lstrip().startswith("|")]
+
+    def enable_text(feature: str, *tokens: str) -> bool:
+        """For rules written as a sentence (answer-format section), not a table row."""
+        line = next((original for folded, original in lines
+                     if all(token in folded for token in tokens)), None)
+        if line is None:
+            return False
+        features[feature] = line
+        return True
+
     money = _find(rows, "ban duoc bao nhieu tien", "thu ve bao nhieu tien")
     return Rules(
         revenue=all(token in validity for token in ("khong huy", "khong tra", "ca don"))
@@ -96,5 +122,31 @@ def read_rules(rulebook: str) -> Rules:
                                     "so voi thang truoc", "cung so ngay"),
         product_names=enable("product_names", _find(rows, "ten goi"),
                              "cung chi mot thu", "theo ma"),
+        hot_is_best_seller=enable("hot_is_best_seller", _find(rows, "ban chay"),
+                                  "hot nhat", "cung nghia voi ban chay nhat"),
+        list_in_question_order=enable_text("list_in_question_order", "nhieu so",
+                                           "list theo dung thu tu cau hoi neu"),
+        month_date=enable("month_date", "date" if "date" in rows else None,
+                          "cau hoi theo thang", "yyyy mm"),
+        ties_by_code=enable_text("ties_by_code", "bang nhau", "theo ma tang dan",
+                                 "khong co ma thi theo ten"),
+        threshold_inclusive=enable("threshold_inclusive", _find(rows, "tren n", "duoi n"),
+                                   "khong gom n", "tu n tro len thi gom n"),
+        customer_identity=enable("customer_identity", _find(rows, "xac dinh khach"),
+                                 "ma khach", "khach le", "ten ghi tren don", "chi khac cach viet"),
+        customers_bought=enable("customers_bought", _find(rows, "so don"), "khach da mua",
+                                "it nhat mot don"),
+        customer_by_revenue=enable("customer_by_revenue", _find(rows, "xac dinh khach"),
+                                   "nhieu tien nhat xep theo doanh thu"),
+        product_group=enable("product_group", _find(rows, "nhom hang"), "theo cot nhom hang",
+                             "dung ten nhom"),
+        product_group_share=enable("product_group_share", _find(rows, "mat hang"),
+                                   "mau so ti trong nhom hang"),
+        customer_group=enable("customer_group", _find(rows, "doanh thu theo nhom khach"),
+                              "theo cot nhom khach", "khong thuoc nhom nao"),
+        customer_group_share=enable("customer_group_share", _find(rows, "doanh thu theo nhom khach"),
+                                    "chia cho doanh thu ca shop"),
+        unit_quantity=enable("unit_quantity", _find(rows, "ban duoc bao nhieu don vi"),
+                             "don vi co ban la", "mat hang co don vi co ban khac khong tinh"),
         rule_rows=tuple(features.items()),
     )

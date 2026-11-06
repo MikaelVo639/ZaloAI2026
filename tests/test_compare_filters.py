@@ -121,10 +121,29 @@ class ProductFilterGrammarTests(unittest.TestCase):
     def test_top_k_wording(self):
         for text, k in (("Cho mình 3 mặt hàng bán chạy nhất trong tháng 5/2026.", 3),
                         ("Giúp mình liệt kê 5 mặt hàng bán chạy nhất tháng 5/2026.", 5),
-                        ("Top 3 sản phẩm bán nhiều nhất tháng 5 năm 2026 là những gì?", 3)):
+                        ("Top 3 sản phẩm bán nhiều nhất tháng 5 năm 2026 là những gì?", 3),
+                        ("Hàng nào bán chạy nhất tháng 5/2026?", 1),
+                        ("tuan roi hang nao chay nhat", 1),
+                        ("tháng 5/2026 top 5 hàng bán chạy nhất là j", 5),
+                        ("coi gium top 5 san pham ban nhiu nhat thang 5 nam 2026 la nhung gi", 5)):
             with self.subTest(text=text):
                 plan = self.plan(text, names=())
+                self.assertIsNotNone(plan, text)
                 self.assertEqual((plan.intent, plan.top_k), ("top_products", k))
+
+    def test_hot_needs_the_ranking_row_to_name_it(self):
+        text = "tháng 5/2026 top 5 hàng hot nhất là gì"
+        hot = "**Bán nhiều nhất**, **hot nhất** cùng nghĩa với **bán chạy nhất**"
+        book = rulebook().replace("| Bán chạy | Theo số lượng quy về đơn vị cơ bản |",
+                                  f"| Bán chạy | Theo số lượng quy về đơn vị cơ bản. {hot} |")
+        self.assertIsNone(self.plan(text, names=()))  # the demo ranking row has no synonyms
+        self.assertEqual(self.plan(text, names=(), book=book).top_k, 5)
+        plan = self.plan("mat hang hot nhat thang 5 nam 2026 la mat hang nao", names=(), book=book)
+        self.assertEqual((plan.intent, plan.top_k), ("top_products", 1))
+
+    def test_best_day_with_telex_day_word(self):
+        plan = self.plan("ngayf nào trong tháng 5/2026 dthu cao nhaats", names=())
+        self.assertEqual((plan.intent, plan.start), ("best_day", date(2026, 5, 1)))
 
 
 def sale(order, day, status, amount, product="P1", name="Nước khoáng LaVie 19L", month=5):
@@ -166,7 +185,8 @@ class ComparisonAndFilterAgentTests(unittest.TestCase):
         revenue = self.answer(Plan("revenue", date(2026, 5, 1), date(2026, 5, 31), filters=product))
         orders = self.answer(Plan("order_count", date(2026, 5, 1), date(2026, 5, 31), filters=product))
         self.assertEqual((revenue.answer, orders.answer), (100000, 1))
-        self.assertIn("select_product(", revenue.evidence["code"]["call"])
+        # The name finds one code; every row of that code counts (rulebook "Tên gọi").
+        self.assertIn("select_product_code(sales, 'P1')", revenue.evidence["code"]["call"])
         unknown = (Filter("product", "Bia Tiger"),)
         self.assertEqual(self.answer(Plan("revenue", date(2026, 5, 1), date(2026, 5, 31),
                                           filters=unknown)).type, "abstain")

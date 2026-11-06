@@ -27,6 +27,7 @@ class BaselineAgent:
     prepare = staticmethod(tasks.prepare_sales)
     compute = staticmethod(tasks.answer_plan)
     names = staticmethod(tasks.product_names)
+    vocabulary = staticmethod(tasks.vocabulary)
 
     def __init__(self, question_timeout: float = QUESTION_TIMEOUT_SECONDS,
                  ingestion_timeout: float = INGESTION_TIMEOUT_SECONDS) -> None:
@@ -49,7 +50,8 @@ class BaselineAgent:
             # Retry with this business's product names/codes ("doanh thu <mặt hàng> …").
             names = self._product_names(context)
             if names:
-                plan = plan_question(question, context.cache["rules"], names)
+                plan = plan_question(question, context.cache["rules"], names,
+                                     self._vocabulary(context))
         if plan is None:
             return Candidate(reason="Question or split rules outside baseline grammar")
         planned = {"intent": plan.intent, "start": plan.start.isoformat(),
@@ -79,6 +81,19 @@ class BaselineAgent:
                     names = result.value
             context.cache["product_names"] = names
         return context.cache["product_names"]
+
+    def _vocabulary(self, context: BusinessContext) -> dict[str, list[str]]:
+        """Group names (product groups, customer groups) read once per business."""
+        if "vocabulary" not in context.cache:
+            vocabulary: dict[str, list[str]] = {}
+            if self._prepare(context) is None:
+                result = self.worker.run(self.vocabulary, self.question_timeout,
+                                         catalog=context.catalog,
+                                         rulebook=context.split.rulebook)
+                if result.ok:
+                    vocabulary = result.value
+            context.cache["vocabulary"] = vocabulary
+        return context.cache["vocabulary"]
 
     def _prepare(self, context: BusinessContext) -> Candidate | None:
         """Load the business in the worker once; never retry a failed business."""

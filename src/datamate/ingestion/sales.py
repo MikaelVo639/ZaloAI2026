@@ -39,6 +39,13 @@ class Sale:
     product_id: str | None
     product_name: str | None
     quantity_base: Decimal | None
+    # Optional context, None when the source does not record it (DATA-03 / SEM-02).
+    base_unit: str | None = None
+    product_group: str | None = None
+    customer_id: str | None = None
+    customer_name: str | None = None
+    customer_group: str | None = None
+    channel: str | None = None
 
 
 def parse_number(value: Any) -> Decimal:

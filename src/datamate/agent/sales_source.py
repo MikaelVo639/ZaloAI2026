@@ -1,14 +1,24 @@
 """Choose and run the sales adapter for one business (worker side).
 
-A business whose tables carry the verified order/detail/product column signatures is
-read with the joined adapter; joined capabilities must be stated by the rulebook of the
-split being answered. Every other business uses the flat sales adapter.
+Adapters are tried from the most to the least specific; the first schema that matches
+is used and a schema that matches but fails its checks raises (no silent fallback past a
+detected joined schema):
+
+1. verified order/detail/product CSV signature -> joined adapter;
+2. verified XLSX order/detail/product export with README evidence (DATA-02 mapping)
+   -> joined adapter;
+3. flat sales table whose headers match the known aliases -> flat adapter;
+4. lists described column by column in the business README -> README adapter.
+
+Joined and README capabilities must be stated by the rulebook of the split being answered.
 """
 
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 
 from datamate.contracts import Catalog
+from datamate.ingestion.catalog import iter_rows
 from datamate.ingestion.joined_sales import (
     JoinedSalesError,
     MappingSpec,
@@ -16,8 +26,11 @@ from datamate.ingestion.joined_sales import (
     RuleCapabilities,
     SourceMapping,
     load_joined_sales,
+    mapping_for_xlsx_order_detail_product,
 )
+from datamate.ingestion.readme_sales import ReadmeSalesError, load_readme_sales
 from datamate.ingestion.sales import Sale, load_sales
+from datamate.ingestion.status import StatusError, status_policy
 from datamate.semantics.text import fold
 
 
@@ -168,21 +181,49 @@ def _compact_joined_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in evidence.items() if key != "lineage"}
 
 
-def load_business_sales(
-    catalog: Catalog, rulebook: str,
-) -> tuple[list[Sale], dict[str, Any], frozenset[int] | None]:
-    """Load one business with the adapter its schema calls for.
+_XLSX_NOT_THIS_SCHEMA = {"SCHEMA_MISMATCH", "MAPPING_AMBIGUOUS", "MAPPING_EVIDENCE_MISSING"}
 
-    Returns ``(sales, source_evidence, ranking_eligible)``. ``ranking_eligible`` is the
-    set of sale indices that may enter a product ranking, or ``None`` when every row
-    may (flat schema). A partial or ambiguous joined schema raises instead of falling
-    back to the flat adapter.
+
+def _xlsx_mapping(catalog: Catalog) -> MappingSpec | None:
+    """DATA-02 XLSX order/detail/product mapping, or None when the business is not that export.
+
+    The mapping needs the three verified tables *and* README lines documenting them; a
+    business without that evidence is left to the README adapter.
     """
-    mapping = _joined_mapping(catalog)
-    if mapping is None:
-        sales, evidence = load_sales(catalog)
-        return sales, {**evidence, "adapter": "flat_sales"}, None
+    try:
+        return mapping_for_xlsx_order_detail_product(catalog)
+    except JoinedSalesError as exc:
+        if exc.code in _XLSX_NOT_THIS_SCHEMA:
+            return None
+        raise
+
+
+def _xlsx_rules(rulebook: str, catalog: Catalog, mapping: MappingSpec) -> RuleCapabilities:
+    """Joined capabilities with the status labels of this export read through the split's
+    four order states; an unknown label raises instead of being guessed."""
     rules = _joined_rules(rulebook)
+    try:
+        policy = status_policy(rulebook)
+    except StatusError as exc:
+        raise JoinedSalesError("RULE_CAPABILITY_MISSING", str(exc)) from exc
+    table = next(t for t in catalog.tables
+                 if f"{t.path.name}::{t.name}" == mapping.orders.source)
+    column = mapping.orders.fields["status"]
+    labels = {str(row[column]) for row in iter_rows(table) if row.get(column) not in (None, "")}
+    mapping_by_label = {}
+    for label in sorted(labels):
+        try:
+            mapping_by_label[label] = policy.resolve(label)
+        except StatusError as exc:
+            raise JoinedSalesError("UNKNOWN_STATUS", str(exc)) from exc
+    return replace(
+        rules, version="joined_rules.current_split.xlsx.v1",
+        status_mapping=mapping_by_label, evidence=(*rules.evidence, *policy.evidence),
+    )
+
+
+def _joined_result(catalog: Catalog, mapping: MappingSpec, rules: RuleCapabilities
+                   ) -> tuple[list[Sale], dict[str, Any], frozenset[int]]:
     sales, evidence = load_joined_sales(
         catalog, mapping=mapping, rule_capabilities=rules,
     )
@@ -196,3 +237,33 @@ def load_business_sales(
         "sales_rows": evidence["counts"]["sales_rows"],
     }
     return sales, source, frozenset(ranking_eligible)
+
+
+def load_business_sales(
+    catalog: Catalog, rulebook: str,
+) -> tuple[list[Sale], dict[str, Any], frozenset[int] | None]:
+    """Load one business with the adapter its schema calls for.
+
+    Returns ``(sales, source_evidence, ranking_eligible)``. ``ranking_eligible`` is the
+    set of sale indices that may enter a product ranking, or ``None`` when every row
+    may (flat schema). A partial or ambiguous joined schema raises instead of falling
+    back to another adapter.
+    """
+    mapping = _joined_mapping(catalog)
+    if mapping is not None:
+        return _joined_result(catalog, mapping, _joined_rules(rulebook))
+    mapping = _xlsx_mapping(catalog)
+    if mapping is not None:
+        sales, source, eligible = _joined_result(
+            catalog, mapping, _xlsx_rules(rulebook, catalog, mapping))
+        return sales, {**source, "adapter": "joined_sales_xlsx"}, eligible
+    try:
+        sales, evidence = load_sales(catalog)
+        return sales, {**evidence, "adapter": "flat_sales"}, None
+    except ValueError as flat_error:
+        try:
+            sales, evidence, eligible = load_readme_sales(catalog, rulebook)
+        except ReadmeSalesError as readme_error:
+            raise ValueError(f"{flat_error}; README adapter: {readme_error}") from readme_error
+        return sales, {**evidence, "adapter": "readme_sales",
+                       "flat_adapter_error": str(flat_error)}, eligible

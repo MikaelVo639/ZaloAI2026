@@ -83,6 +83,95 @@ def product_ranking(selected: list[Sale]) -> list[tuple[str, str, Decimal]]:
     return [(key, names[key], quantities[key]) for key in ranked]
 
 
+def period_revenues(sales: list[Sale], periods: list[tuple[date, date]]) -> list[int]:
+    """Revenue of each period, in the order given (rulebook: list in question order)."""
+    return [revenue(select_valid(sales, start, end)) for start, end in periods]
+
+
+# How shops write "khách lẻ" (walk-in) in the customer-name column; folded, closed list.
+WALK_IN_NAMES = frozenset({"khach le", "kl", "le", "khach vang lai", "vang lai"})
+
+
+def customer_keys(sales: list[Sale]) -> dict[int, str | None]:
+    """Customer of each sale by the rulebook's "Xác định khách": the customer code when the
+    shop records codes, otherwise the name written on the order (spacing/case folded);
+    walk-in orders (no code / no name / "Khách lẻ") belong to no customer."""
+    has_codes = any(s.customer_id for s in sales)
+    keys: dict[int, str | None] = {}
+    for index, sale in enumerate(sales):
+        if has_codes:
+            keys[index] = sale.customer_id or None
+            continue
+        name = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", (sale.customer_name or "").lower()))
+        name = name.strip()
+        keys[index] = None if not name or fold(name) in WALK_IN_NAMES else name
+    return keys
+
+
+def customer_totals(sales: list[Sale]) -> dict[str, dict[str, Any]]:
+    """Revenue, valid orders and a display name per customer (input: valid rows only)."""
+    totals: dict[str, dict[str, Any]] = {}
+    for index, key in customer_keys(sales).items():
+        if key is None:
+            continue
+        sale = sales[index]
+        entry = totals.setdefault(key, {"revenue": Decimal(0), "orders": set(),
+                                        "name": sale.customer_name or key,
+                                        "code": sale.customer_id})
+        entry["revenue"] += sale.amount
+        entry["orders"].add(sale.order_id)
+    return totals
+
+
+def customer_ranking(selected: list[Sale], by: str) -> list[tuple[str, str, Decimal]]:
+    """(key, display name, measure) descending; ties by code ascending (no code: name)."""
+    totals = customer_totals(selected)
+    measure = (lambda e: e["revenue"]) if by == "revenue" else (lambda e: Decimal(len(e["orders"])))
+    rows = [(key, entry["code"] or entry["name"], entry["name"], measure(entry))
+            for key, entry in totals.items()]
+    rows.sort(key=lambda row: (-row[3], fold(row[1])))
+    return [(key, name, value) for key, _tie, name, value in rows]
+
+
+def customers_meeting(selected: list[Sale], minimum_orders: int) -> tuple[int, int]:
+    """(customers with at least ``minimum_orders`` valid orders, customers who bought)."""
+    totals = customer_totals(selected)
+    return sum(len(e["orders"]) >= minimum_orders for e in totals.values()), len(totals)
+
+
+def count_at_least(selected: list[Sale], subject: str, minimum: Decimal) -> int:
+    """Orders / days with revenue >= minimum, or products in >= minimum distinct orders
+    (valid rows only; rulebook: "từ N trở lên" includes N)."""
+    if subject == "order":
+        totals: dict[str, Decimal] = defaultdict(Decimal)
+        for sale in selected:
+            totals[sale.order_id] += sale.amount
+        return sum(_vnd(v) >= minimum for v in totals.values())
+    if subject == "day":
+        return sum(_vnd(v) >= minimum for _, v in daily_revenue(selected))
+    orders: dict[str, set[str]] = defaultdict(set)
+    for sale in selected:
+        if sale.product_id:
+            orders[sale.product_id].add(sale.order_id)
+    return sum(len(v) >= minimum for v in orders.values())
+
+
+def _vnd(value: Decimal) -> Decimal:
+    return value.quantize(Decimal(1), rounding=ROUND_HALF_UP)
+
+
+def quantity_in_unit(selected: list[Sale], unit: str) -> Decimal | None:
+    """Base quantity of the products whose base unit is ``unit``; None if a base unit is
+    unknown (the rulebook counts only products whose base unit is the one asked)."""
+    total = Decimal(0)
+    for sale in selected:
+        if sale.base_unit is None or sale.quantity_base is None:
+            return None
+        if fold(sale.base_unit) == fold(unit):
+            total += sale.quantity_base
+    return total
+
+
 @lru_cache(maxsize=None)
 def _source(function: Callable[..., Any]) -> str:
     try:
@@ -135,10 +224,36 @@ def product_names(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -
     return sorted({str(n) for s in sales for n in (s.product_name, s.product_id) if n})
 
 
+def vocabulary(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -> dict[str, list[str]]:
+    """Group names of the loaded business, for the planner's group filters (SEM-02)."""
+    if not prepare_sales(cache, catalog, rulebook)["ok"]:
+        return {}
+    sales, _ = cache["sales"]
+    return {field: sorted({getattr(s, field) for s in sales if getattr(s, field)})
+            for field in ("product_group", "customer_group")}
+
+
+def select_group(sales: list[Sale], field: str, value: str) -> list[Sale]:
+    """Rows whose product group / customer group is exactly the named one (folded)."""
+    key = fold(value)
+    return [s for s in sales if fold(getattr(s, field) or "") == key]
+
+
+def share_percent(part: Decimal, whole: Decimal) -> float | None:
+    if whole == 0:
+        return None
+    return float((part * 100 / whole).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
 INTENTS = frozenset({"revenue", "order_count", "top_products", "average_order",
-                     "cancel_count", "cancel_rate", "best_day"})
+                     "cancel_count", "cancel_rate", "best_day",
+                     "top_customers", "count_where", "quantity"})
 # Plan filters this backend applies, and the intents each one may be combined with.
-FILTERABLE = {"product": frozenset({"revenue", "order_count"})}
+FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity"}),
+              "product_group": frozenset({"revenue"}),
+              "customer_group": frozenset({"revenue"})}
+GROUP_FIELDS = ("product_group", "customer_group")
+SHAPES = {"series": "revenue", "best_period": "revenue"}  # shape -> the one intent it supports
 COVERAGE = re.compile(r"Khoảng dữ liệu:\s*(\d{4}-\d{2}-\d{2})\s+đến\s+(\d{4}-\d{2}-\d{2})")
 
 
@@ -150,10 +265,36 @@ def unsupported(plan: Plan) -> str:
     """
     if plan.intent not in INTENTS:
         return f"Intent {plan.intent!r} not supported by baseline agent"
-    if plan.comparison or plan.compare_start or plan.compare_end:
+    if plan.comparison == "share":
+        group_share = (plan.intent == "revenue" and len(plan.filters) == 1
+                       and plan.filters[0].field in GROUP_FIELDS)
+        if not group_share and (plan.intent != "count_where" or plan.threshold is None):
+            return f"Comparison 'share' for {plan.intent!r} not supported"
+    elif plan.comparison or plan.compare_start or plan.compare_end:
         if (plan.comparison != "change_percent" or plan.intent != "revenue" or plan.filters
                 or not (plan.compare_start and plan.compare_end)):
             return f"Comparison {plan.comparison!r} for {plan.intent!r} not supported"
+    if plan.periods or plan.shape:
+        if SHAPES.get(plan.shape) != plan.intent or len(plan.periods) < 2 or plan.filters \
+                or plan.comparison:
+            return f"Shape {plan.shape!r} for {plan.intent!r} not supported"
+    if plan.threshold is not None:
+        t = plan.threshold
+        supported = {("customer", "order_count"), ("order", "revenue"), ("day", "revenue"),
+                     ("product", "order_count")}
+        if plan.intent != "count_where" or (t.subject, t.measure) not in supported or t.op != ">=":
+            return "Threshold not supported"
+        if plan.comparison == "share" and t.subject != "customer":
+            return "Share of a threshold count is defined for customers only"
+    elif plan.intent == "count_where":
+        return "Customer count needs a threshold"
+    if (plan.intent == "quantity") != bool(plan.unit):
+        return "Quantity needs the unit asked for"
+    if plan.rank_by and (plan.intent != "top_customers"
+                         or plan.rank_by not in ("revenue", "order_count")):
+        return f"Ranking by {plan.rank_by!r} not supported"
+    if plan.intent == "top_customers" and not plan.rank_by:
+        return "Customer ranking needs its measure"
     if len(plan.filters) > 1:
         return "Several filters not supported"
     for item in plan.filters:
@@ -180,6 +321,11 @@ def select_product(sales: list[Sale], value: str) -> list[Sale]:
     """Rows whose product name or code equals the filter value (case/diacritics folded)."""
     key = fold(value)
     return [s for s in sales if key in (fold(s.product_name or ""), fold(s.product_id or ""))]
+
+
+def select_product_code(sales: list[Sale], code: str) -> list[Sale]:
+    """Every row of one product code, whatever spelling of the name the row carries."""
+    return [s for s in sales if s.product_id == code]
 
 
 def revenue_total(selected: list[Sale]) -> Decimal:
@@ -216,7 +362,7 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                                for f in plan.filters]
     if not sales or plan.start > plan.end:
         return Candidate(reason="Empty data or future-only period", evidence=evidence)
-    windows = [(plan.start, plan.end)]
+    windows = list(plan.periods) or [(plan.start, plan.end)]
     if plan.compare_start:
         windows.append((plan.compare_start, plan.compare_end))
     for window_start, window_end in windows:
@@ -231,6 +377,8 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
             return Candidate(reason="No sales in period; business coverage is not established",
                              evidence=evidence)
     product_call = ""
+    if plan.filters and plan.filters[0].field in GROUP_FIELDS:
+        return _answer_group(plan, sales, evidence)
     if plan.filters:
         value = plan.filters[0].value
         matched = select_product(sales, value)
@@ -239,10 +387,21 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         if len(codes) != 1:
             return Candidate(reason="Product filter matches no product or several product codes",
                              evidence=evidence)
+        code = next(iter(codes))
+        if code is not None:
+            # Rulebook "Tên gọi": a file with codes identifies the product by its code, so
+            # every spelling of that product's name counts ("30ml" and "30 ml").
+            matched = select_product_code(sales, code)
+            evidence["inputs"]["product_rows"] = len(matched)
         sales = matched
-        product_call = f"select_product(sales, {value!r})"
+        product_call = (f"select_product_code(sales, {code!r})" if code is not None
+                        else f"select_product(sales, {value!r})")
     source_expr = product_call or "sales"
     window = f"date.fromisoformat({plan.start.isoformat()!r}), date.fromisoformat({plan.end.isoformat()!r})"
+    if plan.shape or plan.intent in ("top_customers", "count_where", "quantity"):
+        full = cache["sales"][0]
+        return _answer_extended(plan, sales, full, cache.get("ranking_eligible"), evidence,
+                                window, source_expr)
     if plan.comparison == "change_percent":
         compare_window = (f"date.fromisoformat({plan.compare_start.isoformat()!r}), "
                           f"date.fromisoformat({plan.compare_end.isoformat()!r})")
@@ -340,3 +499,125 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                  for key, name, quantity in ranking[:plan.top_k + 1]],
         result=result)
     return Candidate("string" if plan.top_k == 1 else "list", result, 1.0, "", evidence)
+
+
+def _answer_extended(plan: Plan, sales: list[Sale], full: list[Sale],
+                     eligible: frozenset[int] | None, evidence: dict[str, Any], window: str,
+                     source_expr: str) -> Candidate:
+    """SEM-02 Plans: series / best period, customers, quantity in a base unit."""
+    if plan.shape:
+        values = period_revenues(sales, list(plan.periods))
+        periods = [(start.isoformat(), end.isoformat()) for start, end in plan.periods]
+        evidence.update(periods=periods, period_revenues=values,
+                        code=_code(f"period_revenues(sales, {periods!r})",
+                                   period_revenues, select_valid, revenue))
+        if plan.shape == "series":
+            evidence.update(calculation="revenue of each period, in question order",
+                            result=values)
+            return Candidate("list", values, 1.0, "", evidence)
+        best = max(values)
+        if values.count(best) > 1:
+            return Candidate(reason="Tie for the best period; months have no code to break it",
+                             evidence=evidence)
+        result = plan.periods[values.index(best)][0].strftime("%Y-%m")
+        evidence.update(calculation="period with the highest revenue", result=result)
+        return Candidate("date", result, 1.0, "", evidence)
+    selected = select_valid(sales, plan.start, plan.end)
+    selection = f"select_valid({source_expr}, {window})"
+    evidence["inputs"].update(selected_rows=len(selected))
+    if plan.intent == "quantity":
+        if eligible is None:
+            pool = selected
+        else:
+            # ``eligible`` indexes the full sales list: drop service-fee rows before filtering.
+            keep = {id(full[i]) for i in eligible}
+            pool = [s for s in selected if id(s) in keep]
+        if not any(s.base_unit and fold(s.base_unit) == fold(plan.unit) for s in full):
+            return Candidate(reason=f"No product of this shop has base unit {plan.unit!r}",
+                             evidence=evidence)
+        value = quantity_in_unit(pool, plan.unit)
+        evidence.update(calculation="sum(quantity_base) of products whose base unit is the unit",
+                        unit=plan.unit, code=_code(f"quantity_in_unit({selection}, {plan.unit!r})",
+                                                   select_valid, quantity_in_unit), result=value)
+        if value is None:
+            return Candidate(reason="A product's base unit is unknown", evidence=evidence)
+        if plan.filters and value == 0:
+            return Candidate(reason="The product's base unit is not the unit asked",
+                             evidence=evidence)
+        return Candidate("number", int(value) if value == value.to_integral() else float(value),
+                         1.0, "", evidence)
+    if plan.threshold is not None and plan.threshold.subject != "customer":
+        subject, minimum = plan.threshold.subject, plan.threshold.value
+        pool = selected
+        if subject == "product" and eligible is not None:
+            keep = {id(full[i]) for i in eligible}  # service fees are not products
+            pool = [s for s in selected if id(s) in keep]
+        value = count_at_least(pool, subject, minimum)
+        evidence.update(calculation=f"count {subject}s with {plan.threshold.measure} >= {minimum}",
+                        code=_code(f"count_at_least({selection}, {subject!r}, Decimal({str(minimum)!r}))",
+                                   select_valid, count_at_least, daily_revenue),
+                        result=value)
+        return Candidate("number", value, 1.0, "", evidence)
+    if not any(s.customer_id or s.customer_name for s in selected):
+        return Candidate(reason="No customer recorded on the orders", evidence=evidence)
+    if plan.intent == "top_customers":
+        ranking = customer_ranking(selected, plan.rank_by)
+        evidence.update(calculation=f"customers by {plan.rank_by}, descending; ties by code",
+                        code=_code(f"customer_ranking({selection}, {plan.rank_by!r})",
+                                   select_valid, customer_ranking, customer_totals,
+                                   customer_keys),
+                        ranking=[{"customer": name, "value": str(value)}
+                                 for _, name, value in ranking[:plan.top_k + 1]])
+        if len(ranking) < plan.top_k:
+            return Candidate(reason="Fewer customers than asked", evidence=evidence)
+        answer = [name for _, name, _ in ranking[:plan.top_k]]
+        result = answer[0] if plan.top_k == 1 else answer
+        evidence["result"] = result
+        return Candidate("string" if plan.top_k == 1 else "list", result, 1.0, "", evidence)
+    minimum = int(plan.threshold.value)
+    meeting, bought = customers_meeting(selected, minimum)
+    evidence.update(calculation=f"customers with >= {minimum} valid orders"
+                    + (" / customers who bought x 100" if plan.comparison == "share" else ""),
+                    code=_code(f"customers_meeting({selection}, {minimum})", select_valid,
+                               customers_meeting, customer_totals, customer_keys),
+                    customers_meeting=meeting, customers_bought=bought)
+    if plan.comparison != "share":
+        evidence["result"] = meeting
+        return Candidate("number", meeting, 1.0, "", evidence)
+    if bought == 0:
+        return Candidate(reason="No customer bought in the period", evidence=evidence)
+    value = float((Decimal(meeting) * 100 / bought).quantize(Decimal("0.01"),
+                                                             rounding=ROUND_HALF_UP))
+    evidence["result"] = value
+    return Candidate("percent", value, 1.0, "", evidence)
+
+
+def _answer_group(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Candidate:
+    """Revenue of one product group / customer group, or its share of the whole shop."""
+    item = plan.filters[0]
+    valid = select_valid(sales, plan.start, plan.end)
+    if not any(getattr(s, item.field) for s in sales):
+        return Candidate(reason=f"No {item.field} recorded in this shop", evidence=evidence)
+    part_rows = select_group(valid, item.field, item.value)
+    evidence["inputs"].update(selected_rows=len(valid), group_rows=len(part_rows))
+    part = revenue_total(part_rows)
+    window = (f"date.fromisoformat({plan.start.isoformat()!r}), "
+              f"date.fromisoformat({plan.end.isoformat()!r})")
+    group_call = f"select_group(select_valid(sales, {window}), {item.field!r}, {item.value!r})"
+    if plan.comparison != "share":
+        value = revenue(part_rows)
+        evidence.update(calculation=f"revenue of the {item.field} on valid whole orders",
+                        code=_code(f"revenue({group_call})", select_valid, select_group, revenue),
+                        result=value)
+        return Candidate("number", value, 1.0, "", evidence)
+    whole = revenue_total(valid)
+    value = share_percent(part, whole)
+    evidence.update(calculation=f"100 * revenue of the {item.field} / revenue of the whole shop "
+                    "(walk-in orders and service fees included); 2 decimals half up",
+                    code=_code(f"share_percent(revenue_total({group_call}), "
+                               f"revenue_total(select_valid(sales, {window})))",
+                               select_valid, select_group, revenue_total, share_percent),
+                    part_revenue=str(part), whole_revenue=str(whole), result=value)
+    if value is None:
+        return Candidate(reason="No revenue in the period; share undefined", evidence=evidence)
+    return Candidate("percent", value, 1.0, "", evidence)
