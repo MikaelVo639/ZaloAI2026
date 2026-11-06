@@ -13,6 +13,7 @@ def fold(value: object) -> str:
 # merely look like Telex ("max", "gas", "plus") are never altered.
 GRAMMAR_WORDS = frozenset("""
     a bao ban bi bill binh biet bn bnhiu bua cao chay cho co cong cua cuoi da dat dau dem den do
+    hot ngay
     don dong duoc gan gi gia gium giup ha hang het hien hoi hom huy khach la le luong mang
     mat may minh moi mon mot nam nao nay nhat nhieu nhiu nhung pham phan quan qua quy roi
     san so tai tam thai thang theo thu ti tien toi tong tram trang tren trong truoc trung
