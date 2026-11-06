@@ -156,8 +156,10 @@ Threshold chỉ được chọn bằng business train rồi kiểm lại validat
 
 ## Phần Plan còn cần Semantics + Data thống nhất
 
-Đề xuất cụ thể cho boolean tăng doanh thu liên tục và table công nợ nằm ở
-[AGENT_02_CONTRACT.md](AGENT_02_CONTRACT.md), chưa sửa grammar hay shared contract.
+Contract C01 cho boolean tăng doanh thu liên tục, table công nợ và nguồn công nợ
+nằm ở [AGENT_02_CONTRACT.md](AGENT_02_CONTRACT.md). `contracts.py` đã có kiểu dữ liệu
+công nợ và hằng số dùng chung; grammar (S01), adapter (D01) và executor (A01) chưa làm,
+nên các câu đó vẫn abstain.
 
 SEM-01 #18 đã thêm `Filter` và các trường kỳ so sánh; dùng lại contract đó. Các khả
 năng tiếp theo bên dưới vẫn là đề xuất, chưa viết intent mới trong AGENT-02:
