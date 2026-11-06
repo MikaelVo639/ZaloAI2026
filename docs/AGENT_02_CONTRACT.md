@@ -1,8 +1,9 @@
 # Contract C01 — boolean, table và nguồn công nợ
 
-Trạng thái: **đề xuất đã hoàn tất, chờ xác nhận bản cuối của Data (@longlth2297) và
-Agent (@tqhuy0602)** trên PR #23 và issue #15. Đã sửa theo review Agent lần 1 (khoá khách
-theo loại shop, nợ thêm không âm). Thay bản đề xuất AGENT-02 trước đó.
+Trạng thái: **đề xuất đã hoàn tất; Data (@longlth2297) đã xác nhận ở `9c4e726`, chờ
+Agent (@tqhuy0602) kiểm lại** trên PR #23 và issue #15. Đã sửa theo review Agent lần 1
+(khoá khách theo loại shop, nợ thêm không âm) và ghi các lưu ý triển khai của Data vào §6.
+Thay bản đề xuất AGENT-02 trước đó.
 Liên quan SEM-02 #15, AGENT-02 #16, DATA-03 #14. Giữ nguyên SEM-01 #18 và SEM/DATA #22.
 
 C01 chỉ chốt giao diện. Grammar thuộc S01, adapter công nợ thuộc D01, executor và
@@ -210,7 +211,8 @@ trị mặc định, để D01 phải quyết định tường minh (§6.5). Đ�
 # src/datamate/ingestion/debt.py
 def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger: ...
 class DebtSourceError(ValueError):
-    code: str  # "absent" | "rules_missing" | "column_missing" | "key" | "orphan" | "label" | "reconcile" | ...
+    code: str  # "absent" | "partial" | "rules_missing" | "column_missing" | "key" | "orphan"
+               # | "label" | "amount" | "reconcile" | "customer_mode"
 ```
 
 A01 gọi nó một lần mỗi business trong worker (`compute.prepare_debt`, giống `prepare_sales`).
@@ -234,7 +236,7 @@ README train ghi công nợ theo một mẫu (có shop ghi tên cột kiểu `b�
 | `uses_customer_codes` | README / schema của shop (§6.5) | **không** suy ra từ việc có mã xuất hiện trên đơn |
 | `customer_id` | mã khách trên đơn, chỉ khi `uses_customer_codes` | đơn trống mã → `None` (khách lẻ), kể cả khi đơn có tên |
 | `customer_name` | tên từ danh sách khách hoặc trên đơn, giữ nguyên cách viết | shop không dùng mã: đây là căn cứ xác định khách |
-| `first_day`, `last_day` | ngày đặt sớm nhất; "Dữ liệu có đến hết dd/mm/yyyy" của README (nếu không có: ngày ghi cuối cùng) | |
+| `first_day`, `last_day` | ngày đặt sớm nhất; "Dữ liệu có đến hết dd/mm/yyyy" của README | README không ghi: `last_day` = ngày lớn nhất của đơn và khoản trả đã đọc, `lineage["coverage"] = "observed"` (có ghi: `"readme"`). Quy ước phòng thủ, chưa gặp trên train |
 
 ### 6.3 Nhãn đóng
 
@@ -243,30 +245,57 @@ README train ghi công nợ theo một mẫu (có shop ghi tên cột kiểu `b�
 - **Sàn TMĐT** (`excluded="marketplace"`): kênh "shopee", "lazada", "tiki", "tiktok shop", "sàn …".
 - Nhãn hình thức khác đã gặp trên train: "tiền mặt" / "cash", "chuyển khoản" / "transfer",
   "ví điện tử" / "ewallet". Kênh: "store", "phone", "zalo_oa".
+- So nhãn sau khi chuẩn hoá: bỏ khoảng trắng đầu / cuối, gộp khoảng trắng, chữ thường,
+  bỏ dấu (`fold`), bỏ ngoặc; rồi so **trùng khớp cả nhãn** với danh sách, không so chuỗi
+  con. Ví dụ "Thu hộ (COD)" → "thu ho cod".
 - Nhãn nằm ngoài các danh sách trên → `DebtSourceError("label")` → abstain. Không đoán.
   Thêm nhãn mới phải qua review như bảng trạng thái.
+- `lineage` ghi tập nhãn thực gặp của từng cột (trạng thái, thanh toán, kênh) kèm số dòng,
+  để reviewer thấy toàn bộ giá trị mà không phải mở dữ liệu.
 
 ### 6.4 Kiểm tra bắt buộc
 
-1. Mã đơn không trùng trong bảng đơn. Mọi khoản trả trỏ tới một đơn có thật (không mồ côi).
+0. **Đủ nguồn.** Phải xác định được cả: mã đơn, ngày đặt, tổng phải thu (cột B) trên
+   bảng đơn; và bảng khoản trả có mã đơn, số tiền (cột A), ngày trả. Thiếu một phần →
+   `DebtSourceError("partial")` (hoặc `"column_missing"` khi README có nêu cột nhưng file
+   không có). Chỉ có cột "Còn nợ" hay "Khách đã trả" **không đủ**: các cột này là trạng
+   thái ở ngày cuối dữ liệu, không tính được nợ tại X sớm hơn; chúng chỉ dùng để đối chiếu.
+1. Mã đơn đầy đủ và không trùng; mọi khoản trả trỏ tới **đúng một** đơn (không mồ côi).
+   Các kiểm tra 1, 2, 4 làm **sau khi gộp mọi sheet / file cùng vai trò** (sheet theo
+   tháng, file `_1`, `_2`…), không kiểm riêng từng sheet.
 2. Một đơn nhiều khoản trả thì cộng, không nhân dòng đơn. Không join khoản trả với dòng
    chi tiết hàng.
-3. Số tiền, ngày đọc được hết; ô lỗi → lỗi, không bỏ qua dòng.
+3. Số tiền, ngày đọc được hết; ô lỗi → lỗi, không bỏ qua dòng. `total < 0` hoặc khoản trả
+   âm → `DebtSourceError("amount")`. Rulebook ghi "Hoàn tiền trả hàng không trừ", nên
+   không coi khoản âm là hoàn tiền. Khoản trả bằng 0 giữ lại, không ảnh hưởng kết quả;
+   số dòng như vậy ghi vào `lineage`. Đây là kiểm tra phòng thủ, chưa thấy trên train.
 4. **Đối chiếu** khi README có cột "còn nợ cuối dữ liệu": với mọi đơn không huỷ và không
    `excluded`, nợ tính được tại `last_day` phải **bằng đúng** cột đó. Lệch một đơn →
    `DebtSourceError("reconcile")`.
 5. Rulebook của split phải có các dòng §4 "Đơn được tính vào nợ", "Nợ một đơn tại ngày X",
    "Đơn COD, đơn bán qua sàn TMĐT"; thiếu → `DebtSourceError("rules_missing")`.
-6. `DebtSourceError("absent")` chỉ khi README mô tả đủ các file của shop và **không** có
-   dòng "Công nợ" nào, không có bảng / cột nào mang nghĩa khoản trả hoặc số còn nợ.
+6. `DebtSourceError("absent")` chỉ khi **cả ba** điều sau đúng:
+   - README mô tả đủ mọi file của shop;
+   - không có dòng "Công nợ" nào;
+   - không có bảng / cột nào mang nghĩa **số tiền** của nợ: khoản trả, đã trả, còn nợ,
+     tổng phải thu kèm khoản trả.
+
    Chỉ mã lỗi này cho phép Agent trả `unanswerable` (kèm dòng §7 rulebook "shop không ghi
-   loại thông tin câu hỏi cần"). Trên train có shop chỉ ghi **hạn nợ** mà không ghi
-   khoản trả: đó là `absent`.
+   loại thông tin câu hỏi cần").
+   - Cột chỉ về **thời hạn** (hạn nợ, hạn thanh toán, số ngày được nợ) không phải số tiền
+     của nợ. Shop chỉ có các cột này vẫn là `absent`. Trên train, 4 câu công nợ ở các shop
+     không có số tiền nợ (một trong số đó chỉ ghi hạn nợ) đều có nhãn `unanswerable`.
+   - Có dấu hiệu nguồn một phần (chỉ "Còn nợ", thiếu cột, join mơ hồ, đối chiếu lệch) thì
+     dùng mã khác (`partial`, `column_missing`, `orphan`, `reconcile`…) → abstain.
+   - Lỗi worker, timeout, thiếu luật **không bao giờ** thành `unanswerable`.
 7. `uses_customer_codes=False` thì **mọi** `customer_id` là `None`; có đơn mang mã →
    `DebtSourceError("customer_mode")`. Không xác định được shop có dùng mã hay không →
    cùng mã lỗi, abstain.
-8. `lineage` ghi file::bảng, cột đã dùng cho từng trường, dòng README, căn cứ của
-   `uses_customer_codes`, kết quả kiểm tra 1–4 và 7.
+8. `lineage` ghi:
+   - file::bảng / sheet đã gộp cho từng vai trò, cột đã dùng cho từng trường, dòng README;
+   - căn cứ của `uses_customer_codes`, nguồn coverage (`readme` / `observed`), dòng luật của split;
+   - tập nhãn thực gặp (6.3);
+   - kết quả kiểm tra 0–4 và 7: số đơn, số khoản trả, số trùng / mồ côi, số đơn đã đối chiếu và số lệch.
 
 ### 6.5 Khoá khách: shop dùng mã và shop không dùng mã
 
@@ -409,6 +438,10 @@ uv run python <thư mục C01>/verify/verify_c01_train.py --data-dir data/raw/tr
   `C01/verify/logs/verify_c01_train_20261106.txt` nằm trong thư mục bàn giao C01 (ngoài
   repo), không commit. Log ghi: boolean 22 / 22 (bỏ 1 câu của business validation),
   table 7 / 7, number / list 46 / 46, đối chiếu "Còn nợ" lệch 0 đơn ở cả 2 shop có cột này.
+- Đầu log ghi revision của checkout và SHA256 của `questions.jsonl`, `answers.jsonl`,
+  `rulebook.md`, manifest holdout. `C01/verify/MANIFEST.json` ghi SHA256 của script, log
+  và từng file dữ liệu của các business đã dùng, để reviewer kiểm đúng input trước khi
+  chạy lại.
 - Script chỉ dùng business train của manifest và từ chối chạy nếu business nằm trong
   validation.
 - Không dùng trong inference; chỉ để reviewer kiểm lại luật của contract.
@@ -418,7 +451,7 @@ uv run python <thư mục C01>/verify/verify_c01_train.py --data-dir data/raw/tr
 | Role | Người | Xác nhận | Trạng thái |
 |---|---|---|---|
 | Semantics | @Kurosuz | tên intent, Plan, luật bắt buộc, nghĩa "tăng liên tục", phạm vi abstain | đề xuất trong PR C01 |
-| Data | @longlth2297 | nguồn / cột / nhãn §6, kiểm tra 6.4, cách xác định `uses_customer_codes` §6.5, mã lỗi `absent` / `customer_mode` | chờ bản cuối |
+| Data | @longlth2297 | nguồn / cột / nhãn §6, kiểm tra 6.4, cách xác định `uses_customer_codes` §6.5, mã lỗi `absent` / `customer_mode` | **đã xác nhận** ở `9c4e726`; các lưu ý triển khai của Data đã ghi vào §6.2–6.4 (không đổi interface) |
 | Agent | @tqhuy0602 | executor / evidence / validation §4–§5, khoá khách §6.5, nợ thêm §7, tương thích backend, regression §10 | review lần 1 xong (2 điểm đã sửa), chờ kiểm lại |
 
 Chỉ coi C01 xong khi cả ba xác nhận trên PR và issue #15. Phần kiểm tra format
