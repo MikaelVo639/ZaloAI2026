@@ -24,7 +24,8 @@ def main():
 
     agent = BaselineAgent()
     agent.worker.generation = 1
-    context = SimpleNamespace(cache={"worker_sales": {"ok": True, "generation": 1}}, catalog=None)
+    context = SimpleNamespace(cache={"worker_sales": {"ok": True, "generation": 1}}, catalog=None,
+                              split=SimpleNamespace(rulebook=""))
     agent.worker.stop()
     calls = []
 

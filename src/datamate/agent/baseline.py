@@ -2,8 +2,9 @@ import math
 from typing import Any
 
 from datamate.agent import compute as tasks
+from datamate.agent.validation import check_executed
 from datamate.agent.worker import Worker, WorkerResult
-from datamate.contracts import BusinessContext, Candidate, Question
+from datamate.contracts import BusinessContext, Candidate, Plan, Question
 from datamate.semantics.planner import plan_question
 from datamate.semantics.rules import read_rules
 
@@ -43,6 +44,13 @@ class BaselineAgent:
         self.worker.close()
 
     def answer(self, question: Question, context: BusinessContext) -> Candidate:
+        plan = self._plan(question, context)
+        if plan is None:
+            return Candidate(reason="Question or split rules outside baseline grammar")
+        return self._answer_plan(plan, context)
+
+    def _plan(self, question: Question, context: BusinessContext) -> Plan | None:
+        """Shared deterministic planning, including SEM-01's product-name retry."""
         if "rules" not in context.cache:
             context.cache["rules"] = read_rules(context.split.rulebook)
         plan = plan_question(question, context.cache["rules"])
@@ -52,8 +60,9 @@ class BaselineAgent:
             if names:
                 plan = plan_question(question, context.cache["rules"], names,
                                      self._vocabulary(context))
-        if plan is None:
-            return Candidate(reason="Question or split rules outside baseline grammar")
+        return plan
+
+    def _answer_plan(self, plan: Plan, context: BusinessContext) -> Candidate:
         planned = {"intent": plan.intent, "start": plan.start.isoformat(),
                    "end": plan.end.isoformat(), "rules": plan.evidence}
         failure = self._prepare(context)
@@ -65,7 +74,7 @@ class BaselineAgent:
                                  rulebook=context.split.rulebook)
         if not result.ok:
             return _execution_failure("Calculation", result, planned)
-        candidate: Candidate = result.value
+        candidate = check_executed(result.value, plan)
         candidate.evidence["execution"] = result.execution()
         return candidate
 
@@ -100,7 +109,8 @@ class BaselineAgent:
         state = context.cache.get("worker_sales")
         if state is not None and not state["ok"]:
             return Candidate(reason=state["reason"], evidence=dict(state["evidence"]))
-        if state is not None and state["generation"] == self.worker.generation:
+        if (state is not None and self.worker.alive
+                and state["generation"] == self.worker.generation):
             return None
         # First question of the business, or the worker was replaced after a timeout.
         result = self.worker.run(self.prepare, self.ingestion_timeout,

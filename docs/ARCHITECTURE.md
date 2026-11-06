@@ -3,7 +3,7 @@
 ```text
 Split + Question
   -> Catalog (file/sheet/table, cột gốc, sample, README)
-  -> Plan (intent, start/end, top_k, dòng luật làm căn cứ)
+  -> Plan (intent, start/end, top_k, kỳ so sánh, filters, dòng luật làm căn cứ)
   -> Candidate (type, answer, confidence, reason, evidence)
   -> finalize/validate
   -> submission.jsonl + log + run manifest
@@ -44,8 +44,11 @@ hiểu là nghìn. Team cần thêm quy tắc theo nguồn khi định dạng n�
 - Hôm nay/hôm qua, ngày cụ thể, tháng M/YYYY, tháng này/tháng trước, tuần này/tuần
   trước, N ngày gần nhất. Tháng này dừng tại `as_of_date`; tuần bắt đầu thứ Hai.
 - Top sản phẩm cần mã, tên và cột số lượng cơ bản; không tự đoán hệ số quy đổi.
+- SEM-01 #18 thêm phần trăm thay đổi doanh thu giữa hai kỳ và bộ lọc một sản phẩm
+  cho doanh thu/số đơn, lấy tên/mã từ dữ liệu và cần luật của split. Agent giữ nguyên
+  đường này trước khi thử model; phần trăm thay đổi được âm hoặc trên 100%.
 - Grammar đóng: phần điều kiện không hiểu khiến câu bị bỏ qua. Chưa hỗ trợ lọc
-  sản phẩm/nhóm/thanh toán, so sánh kỳ, công nợ, giá vốn, tồn kho, Tết hoặc SQL/model.
+  nhóm/thanh toán, so sánh số đơn, công nợ, giá vốn, tồn kho, Tết hoặc SQL sinh tự động.
 - Chỉ nhận một số dòng luật có cấu trúc đã biết trong rulebook hiện tại. Luật chưa
   hiểu => abstain. Calendar luôn được xác nhận/checksum; baseline chưa có bài toán lịch âm.
 
@@ -64,6 +67,9 @@ Catalog xuất bằng `catalog_dict(catalog, relative_to=split.root)` có `sourc
 ghi `source: questions.jsonl` và checksum questions/rulebook thay cho đường dẫn máy.
 Khi chuyển từ metadata có đường dẫn tuyệt đối, tạo lại catalog/holdout bằng CLI.
 
-Log cần giữ được truy vấn/code, giá trị trung gian và nguồn file/cột sau khi mở rộng.
-Ngân sách toàn lượt hiện chỉ được kiểm tra giữa các bước, không cưỡng bức dừng một
-lần gọi model hoặc ingestion đang chạy. Tiến trình tương lai phải có deadline riêng.
+Log giữ code/call, input, result và nguồn file/cột của bộ tính. Prototype `local_plan`
+của AGENT-02 thêm JSON Plan từ model local và metadata weights/runtime; xem
+[AGENT_02.md](AGENT_02.md). Baseline vẫn là backend mặc định.
+Ngân sách toàn lượt chỉ được kiểm tra giữa các bước. Ingestion/compute và model
+load/generate có deadline riêng trong worker, gồm spawn và IPC; đây chưa phải hard
+deadline của toàn pipeline.
