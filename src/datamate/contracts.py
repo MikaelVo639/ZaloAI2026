@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -51,6 +52,17 @@ class Filter:
 
 
 @dataclass(frozen=True)
+class Threshold:
+    """Count only the subjects whose measure passes ``op value`` (SEM-02)."""
+
+    subject: str  # "customer" | "order" | "day"
+    measure: str  # "order_count" | "revenue"
+    op: str  # ">=" | ">" | "<=" | "<"
+    value: Decimal
+    rule: str = ""  # rulebook row about the boundary ("từ N trở lên thì gồm N")
+
+
+@dataclass(frozen=True)
 class Plan:
     intent: str
     start: date
@@ -60,8 +72,16 @@ class Plan:
     # Optional; a backend that does not implement a field that is set must abstain.
     compare_start: date | None = None  # comparison period, already resolved from the rulebook
     compare_end: date | None = None
-    comparison: str = ""  # "" | "change_percent" | "difference"
+    comparison: str = ""  # "" | "change_percent" | "difference" | "share"
     filters: tuple[Filter, ...] = ()
+    # SEM-02. ``periods`` lists several periods in the order the question names them;
+    # ``shape`` says what to return over them: "series" (one value per period) or
+    # "best_period" (the period with the highest value). ``start``/``end`` then span them.
+    periods: tuple[tuple[date, date], ...] = ()
+    shape: str = ""
+    threshold: Threshold | None = None
+    unit: str = ""  # "bán được bao nhiêu <đơn vị>": the base unit asked for (intent quantity)
+    rank_by: str = ""  # top_customers: "revenue" (nhiều tiền) | "order_count" (nhiều đơn)
 
 
 @dataclass
