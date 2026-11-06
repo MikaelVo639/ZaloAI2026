@@ -132,6 +132,31 @@ class ParsingTests(unittest.TestCase):
 
 
 class FlatReadmeTests(_Shop):
+    def test_zip_filename_encoding_preserves_sources_and_schema_meanings(self):
+        from datamate.ingestion.schema_description import describe_schema
+
+        documented = "Bảng bán hàng.csv"
+        extracted = documented.encode("utf-8").decode("cp437")
+        catalog = self.shop(FLAT_README.replace("ban_hang.csv", documented),
+                            {extracted: self.rows()})
+        sales, evidence, _ = load_readme_sales(catalog, RULEBOOK)
+        self.assertEqual(sum(s.amount for s in sales if s.status == "valid"), Decimal(100000))
+        self.assertTrue(catalog.tables[0].path.exists())
+        self.assertEqual(catalog.tables[0].path.name, extracted)
+        self.assertIn(extracted, evidence["tables"][0])
+        description = describe_schema(catalog)
+        self.assertEqual(description["tables"][0]["documented_by"], "readme")
+        self.assertEqual(description["tables"][0]["columns"][0]["field"], "order_id")
+
+    def test_equivalent_filenames_do_not_silently_union_sources(self):
+        documented = "Bảng bán hàng.csv"
+        extracted = documented.encode("utf-8").decode("cp437")
+        catalog = self.shop(FLAT_README.replace("ban_hang.csv", documented),
+                            {documented: self.rows(), extracted: self.rows()})
+        with self.assertRaises(ReadmeSalesError) as caught:
+            load_readme_sales(catalog, RULEBOOK)
+        self.assertEqual(caught.exception.code, "AMBIGUOUS_SOURCE")
+
     def rows(self, *extra):
         return [FLAT_HEADER,
                 ["HD1", "05/01/2026", "Xong", "Cà phê", "2 ly", "ly", "50,000", "2", "An"],
