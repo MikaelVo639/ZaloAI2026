@@ -95,6 +95,10 @@ class BenchmarkTests(unittest.TestCase):
         changed[0]["prediction"] = {"id": changed[0]["id"], "type": "abstain"}
         changed[0]["outcome"] = "abstain"
         self.assertEqual(len(compare_runs(changed, out, {"input_sha256": "x"})["changes"]), 1)
+        log_path.write_text(json.dumps({**log, "final_answer": {"id": log["id"], "type": "abstain"}}), encoding="utf-8")
+        if log["final_answer"]["type"] != "abstain":
+            with self.assertRaisesRegex(ValueError, "mismatch"):
+                analyze(out, self.data, self.manifest, split)
         next((out / "logs").glob("*.json")).unlink()
         with self.assertRaisesRegex(ValueError, "Missing"):
             analyze(out, self.data, self.manifest, split)
@@ -214,6 +218,22 @@ class BenchmarkTests(unittest.TestCase):
             report = benchmark(checkout, self.data, self.root / "holdout.json", config, output)
         self.assertEqual(report["status"], "complete")
         self.assertTrue((output / "artifact.zip.sha256").is_file())
+        from datamate.evaluation.benchmark import rescore, scorer_identity
+        metadata = json.loads((output / "experiment.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["scorer_sha256"], scorer_identity()["scorer_sha256"])
+        rescored = self.root / "rescored"
+        self.assertEqual(rescore(output, self.data, self.root / "holdout.json", rescored)["status"], "complete")
+        self.assertEqual((output / "submission.jsonl").read_bytes(), (rescored / "submission.jsonl").read_bytes())
+        handoff = json.loads((rescored / "handoff.json").read_text(encoding="utf-8"))
+        for groups in handoff.values():
+            for group in groups:
+                self.assertIn("topic", group)
+                self.assertTrue(all(case["id"] in self.manifest["train_ids"] for case in group["cases"]))
+        metadata["reference_sha256"] = "wrong"
+        (output / "experiment.json").write_text(json.dumps(metadata), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "mismatch"):
+            rescore(output, self.data, self.root / "holdout.json", self.root / "bad rescore")
+
         with self.assertRaisesRegex(ValueError, "nonempty"):
             benchmark(checkout, self.data, self.root / "holdout.json", config, output)
         failed = self.root / "failed run"

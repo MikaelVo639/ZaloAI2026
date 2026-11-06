@@ -34,7 +34,5 @@ jobs:
       - run: python -m pip install --no-deps -e .
       - run: python -m datamate demo --output data/demo
       - run: docker build -t datamate-starter .
-      - run: mkdir -p outputs/docker/first outputs/docker/second
-      - run: docker run --rm --network none -v "$PWD/data/demo:/data:ro" -v "$PWD/outputs/docker/first:/result" datamate-starter
-      - run: docker run --rm --network none -v "$PWD/data/demo:/data:ro" -v "$PWD/outputs/docker/second:/result" datamate-starter
+      - run: python -m datamate verify-image --image datamate-starter --data-dir data/demo --output-dir outputs/docker
       - run: python scripts/check_demo_output.py --data-dir data/demo outputs/docker/first outputs/docker/second

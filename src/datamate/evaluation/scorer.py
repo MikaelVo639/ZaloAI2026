@@ -1,6 +1,5 @@
 """Local proxy based on published rules. This is NOT the organizer's scorer."""
 
-import math
 from collections import Counter
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
@@ -10,12 +9,12 @@ from datamate.io import index_records
 from datamate.semantics.text import normalize_answer
 
 
+SCORER_VERSION = "local_proxy_v2_exact_numbers_not_official"
+
 def _number_matches(actual: Any, expected: Any) -> bool:
     if not is_number(actual) or not is_number(expected):
         return False
-    if isinstance(actual, int) and isinstance(expected, int):
-        return actual == expected
-    return math.isclose(actual, expected, rel_tol=0, abs_tol=1e-9)
+    return Decimal(str(actual)) == Decimal(str(expected))
 
 
 def _scalar_matches(actual: Any, expected: Any, aliases: Any = None) -> bool:
@@ -99,7 +98,7 @@ def evaluate(predictions: list[dict[str, Any]], references: list[dict[str, Any]]
     n = len(refs)
     answered = counts["correct"] + counts["wrong"]
     return {
-        "scorer": "local_proxy_v1_not_official", "n": n,
+        "scorer": SCORER_VERSION, "n": n,
         **{key: counts[key] for key in ("correct", "wrong", "abstain")},
         "pa": (counts["correct"] - counts["wrong"]) / n if n else 0.0,
         "coverage": answered / n if n else 0.0,

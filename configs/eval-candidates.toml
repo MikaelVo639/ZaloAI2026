@@ -1,0 +1,5 @@
+# Collect unsuppressed candidates for training-only confidence calibration.
+# Baseline exercises the tooling; a model backend must supply its own config.
+backend = "baseline"
+min_confidence = 0.0
+max_seconds = 21000
