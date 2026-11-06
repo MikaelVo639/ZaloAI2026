@@ -44,3 +44,25 @@ class PackagingTests(unittest.TestCase):
                 stream.write("\n")
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
                 checker.check(data, [run])
+
+    def test_required_docker_log_fields_and_computation_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data, run = root / "data", root / "run"
+            run_smoke(data, run)
+            checker.check(data, [run])
+            for log_path in (run / "logs").glob("*.json"):
+                log = json.loads(log_path.read_text(encoding="utf-8"))
+                if log["answer"]["type"] == "number":
+                    break
+            else:
+                self.fail("Demo has no numeric answer")
+            log["elapsed_ms"] = -1
+            log_path.write_text(json.dumps(log), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Invalid elapsed time"):
+                checker.check(data, [run])
+            log["elapsed_ms"] = 0
+            log["code"] = None
+            log_path.write_text(json.dumps(log), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "computation evidence"):
+                checker.check(data, [run])

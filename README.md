@@ -106,5 +106,8 @@ network tắt, mount split read-only tại `/data`, output tại `/result`.
 Có lệnh cho PowerShell và Linux/macOS trong [docs/VALIDATION.md](docs/VALIDATION.md).
 CI có job Python trên Windows/Linux và job Docker chạy offline.
 
-Dockerfile là bản CPU cho starter. Khi thêm GPU model, dùng base image theo guideline
-BTC và đóng weights vào image trước inference; khai báo model trong `models/README.md`.
+Dockerfile là bản CPU cho starter, chạy từ `/code/predict.sh` theo guideline BTC.
+Baseline không train hay sinh dữ liệu training; xem `training_code/README.md` và
+`training_code/data_manifest.json`. Khi thêm GPU model, dùng base image theo
+guideline BTC và đóng weights vào image trước inference; khai báo model trong
+`models/README.md`.

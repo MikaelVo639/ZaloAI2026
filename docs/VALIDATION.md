@@ -46,21 +46,21 @@ liệu không tự tạo ra một đánh giá mù.
 Tạo demo trước bằng smoke command, sau đó build:
 
 ```sh
-docker build -t datamate-starter .
+docker build --platform linux/amd64 -t datamate-starter .
 ```
 
 Linux/macOS:
 
 ```sh
 mkdir -p outputs/docker
-docker run --rm --network none -v "$PWD/data/demo:/data:ro" -v "$PWD/outputs/docker:/result" datamate-starter
+docker run --rm --network none --shm-size=16g --entrypoint bash -v "$PWD/data/demo:/data:ro" -v "$PWD/outputs/docker:/result" datamate-starter /code/predict.sh
 ```
 
 PowerShell:
 
 ```powershell
 New-Item -ItemType Directory -Force outputs/docker
-docker run --rm --network none --mount "type=bind,source=$((Get-Location).Path)/data/demo,target=/data,readonly" --mount "type=bind,source=$((Get-Location).Path)/outputs/docker,target=/result" datamate-starter
+docker run --rm --network none --shm-size=16g --entrypoint bash --mount "type=bind,source=$((Get-Location).Path)/data/demo,target=/data,readonly" --mount "type=bind,source=$((Get-Location).Path)/outputs/docker,target=/result" datamate-starter /code/predict.sh
 ```
 
 Kiểm tra kết quả:
@@ -71,7 +71,10 @@ uv run datamate evaluate outputs/docker/submission.jsonl --reference data/demo/a
 ```
 
 Đối chiếu submission giữa hai lượt chạy cùng image/input, kiểm tra logs và thời gian.
-Job Docker trong CI dùng input read-only và `--network none`. Trạng thái build/run
+Job Docker trong CI dùng input read-only, `--network none` và đúng lệnh
+`bash /code/predict.sh` của guideline. Với image GPU cuối, chạy thêm hai GPU
+(`--gpus '"device=0,1"'`) trên máy có driver tương thích RTX 5090.
+Trạng thái build/run
 của một image phải lấy từ log CI hoặc báo cáo run, không suy ra từ việc có Dockerfile.
 
 CI chạy image hai lần vào hai thư mục output mới và xác nhận bằng:

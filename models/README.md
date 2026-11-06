@@ -7,7 +7,7 @@ Chưa có weights trong repo, chưa fine-tune và chưa có kết quả model tr
 Trước khi thêm model, cập nhật README chính và ghi cho mỗi thành phần:
 
 - tên/revision và URL nguồn;
-- ngày phát hành weights (phải trước 26/10/2026);
+- ngày phát hành weights (phải trước 26/10/2026 theo Rule 2 của DataMate);
 - licence và số tham số đầy đủ;
 - định dạng/quantization, checksum weights;
 - cách tải trong giai đoạn chuẩn bị image, đường dẫn offline khi inference;
