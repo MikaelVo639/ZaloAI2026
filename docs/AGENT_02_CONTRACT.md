@@ -1,10 +1,11 @@
 # Contract C01 — boolean, table và nguồn công nợ
 
-Trạng thái: **đề xuất đã hoàn tất; Data (@longlth2297) xác nhận ở `9c4e726`; Agent
-(@tqhuy0602) không chặn merge PR #27 ở `6dc6d7c`.** PR #23 đã merge; PR #27 mang phần sửa
-sau merge. Đã sửa theo các review Agent (khoá khách theo loại shop, nợ thêm không âm, bỏ COD
-/ sàn khỏi thu nợ, schema `lineage`, định nghĩa "mô tả đủ", đơn vị tiền, đối chiếu "đã trả")
-và ghi các lưu ý triển khai của Data vào §6.
+Trạng thái: **Semantics (@Kurosuz) xác nhận trên `main` `25eb61d`; Data (@longlth2297)
+xác nhận ở `9c4e726`; Agent (@tqhuy0602) không chặn merge PR #27 ở `6dc6d7c`.** PR #23 và
+#27 đã merge. S01 (#29) và A01 (#30) hiện thực §4–§5 trên `main` `25eb61d`. Đã sửa theo
+các review Agent (khoá khách theo loại shop, nợ thêm không âm, bỏ COD / sàn khỏi thu nợ,
+schema `lineage`, định nghĩa "mô tả đủ", đơn vị tiền, đối chiếu "đã trả") và ghi các lưu ý
+triển khai của Data vào §6.
 Thay bản đề xuất AGENT-02 trước đó.
 Liên quan SEM-02 #15, AGENT-02 #16, DATA-03 #14. Giữ nguyên SEM-01 #18 và SEM/DATA #22.
 
@@ -93,7 +94,7 @@ Cách hỏi trên train:
 
 | Trường | Quy định |
 |---|---|
-| `periods` | ≥ 2 và ≤ 12 tháng dương lịch **trọn tháng**, theo thứ tự thời gian tăng dần, không trùng, không chồng lấn. "Từ tháng A đến tháng C" mở ra mọi tháng ở giữa. Câu nêu tháng không theo thứ tự thời gian → abstain |
+| `periods` | ≥ 2 và ≤ 12 tháng dương lịch **trọn tháng**, **liền nhau**, theo thứ tự thời gian tăng dần. "Từ tháng A đến tháng C" mở ra mọi tháng ở giữa. Câu nêu tháng không theo thứ tự thời gian, trùng tháng, hoặc **bỏ cách tháng** ("tháng 1, 3, 5"; "tháng 1 đến tháng 3" thiếu chữ "từ" bị đọc thành hai tháng 1 và 3) → abstain. Ràng buộc "liền nhau" thêm ở `66f0cbb` (S01) và `compute.unsupported` (A01) |
 | `start`, `end` | `periods[0][0]` và `periods[-1][1]` |
 | `end` | phải ≤ `as_of_date`; tháng đang chạy dở → abstain |
 | Trường khác | mặc định; có `filters`, `comparison`, `shape`, `threshold` → abstain |
@@ -103,6 +104,12 @@ và dòng format `boolean` (§9, `true` / `false`). Rulebook train **không có*
 nghĩa "tăng liên tục"; nghĩa "lớn hơn hẳn" lấy từ chính câu hỏi ("tháng sau luôn cao
 hơn tháng trước"). Nếu rulebook của split có dòng nào nói về "tăng liên tục" / "xu
 hướng" mà nội dung khác nghĩa này → S01 tắt intent (abstain).
+
+Từ `66f0cbb`, các dòng luật C01 được đọc **nguyên văn** sau khi bỏ dấu (`rules.exact`),
+dòng trùng khoá mà khác nội dung cũng tắt intent. Rulebook split khác cách viết → hai
+intent abstain (mất recall, không sai). Một câu văn xuôi trong rulebook có "doanh thu" kèm
+"tăng dần" / "giảm dần" (ví dụ quy ước xếp hạng) cũng được coi là định nghĩa xu hướng và tắt
+`revenue_increasing`; giữ vậy cho an toàn, xem lại nếu rulebook private có câu như thế.
 
 Ngoài phạm vi, abstain: "giảm liên tục", "tăng ít nhất x%", doanh thu một mặt hàng /
 nhóm tăng liên tục, kỳ theo tuần / quý, số đơn tăng liên tục.
@@ -438,6 +445,7 @@ hiện trong dữ liệu. Nên chuyển sang cùng cờ do Data cung cấp; vi�
 | "Giảm liên tục", tăng theo tuần / quý, tăng của một mặt hàng | ngoài phạm vi C01 | contract riêng |
 | Câu "khách nào nợ nhiều nhất" không hỏi số tiền | đáp án string / list, không phải table | thêm sau khi table chạy ổn |
 | Bảng rỗng | chưa có nhãn train | quyết định lại khi có ví dụ |
+| Xếp hoà theo mã khi mã dài ngắn khác nhau (`KH9` / `KH10`) | A01 so chuỗi (`KH10` trước `KH9`); mã cùng độ dài (`KH01` / `KH02`) đã có regression; train chưa có ca hoà giữa mã khác độ dài | chốt khi có nhãn; trước đó giữ so chuỗi |
 
 ## 9. Tương thích và trách nhiệm
 
@@ -535,9 +543,9 @@ uv run python <thư mục C01>/verify/verify_c01_train.py --data-dir data/raw/tr
 
 | Role | Người | Xác nhận | Trạng thái |
 |---|---|---|---|
-| Semantics | @Kurosuz | tên intent, Plan, luật bắt buộc, nghĩa "tăng liên tục", phạm vi abstain | đề xuất trong PR C01 |
+| Semantics | @Kurosuz | tên intent, Plan, luật bắt buộc, nghĩa "tăng liên tục", phạm vi abstain | **đã xác nhận** trên `main` `25eb61d`: Plan của S01 (#29, kể cả `66f0cbb`) và executor A01 (#30) khớp §4–§5; §4 cập nhật "liền nhau" và cách đọc luật nguyên văn theo `66f0cbb` |
 | Data | @longlth2297 | nguồn / cột / nhãn §6, kiểm tra 6.4, cách xác định `uses_customer_codes` §6.5, mã lỗi `absent` / `customer_mode` | **đã xác nhận** ở `9c4e726`; các lưu ý triển khai của Data đã ghi vào §6.2–6.4 (không đổi interface) |
 | Agent | @tqhuy0602 | executor / evidence / validation §4–§5, khoá khách §6.5, nợ thêm §7, tương thích backend, regression §10 | **không chặn merge** PR #27 ở `6dc6d7c`; 4 điểm P2 (schema `lineage["coverage"]`, định nghĩa "mô tả đủ", đơn vị tiền, đối chiếu "đã trả") đã ghi vào §6 |
 
-Chỉ coi C01 xong khi cả ba xác nhận trên PR và issue #15. Phần kiểm tra format
-boolean / table hiện có **không** được coi là đã trả lời được các câu này.
+Chỉ coi C01 xong khi cả ba xác nhận trên PR và issue #15. Ngày 07/11: Semantics và Data
+đã xác nhận; Agent cần comment xác nhận trên #15 (A01 #30 đã hiện thực theo contract).

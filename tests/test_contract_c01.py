@@ -18,6 +18,9 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+from test_ingestion_debt import RULEBOOK as D01_RULEBOOK
+from test_ingestion_debt import _Shop
+
 from datamate.agent import compute
 from datamate.agent.compute import WALK_IN_NAMES
 from datamate.agent.local_plan import _capabilities
@@ -36,6 +39,7 @@ from datamate.contracts import (
 )
 from datamate.demo import RULEBOOK
 from datamate.evaluation.validation import validate_record
+from datamate.ingestion.debt import load_debt_ledger
 from datamate.semantics.text import fold
 
 DOC = Path(__file__).resolve().parents[1] / "docs" / "AGENT_02_CONTRACT.md"
@@ -256,6 +260,45 @@ class CustomerKeyAndFlowReferenceTest(unittest.TestCase):
         self.assertEqual(flow, OVERPAID_FLOW_EXPECTED)
         self.assertEqual(reference_flow(OVERPAID, date(2026, 4, 1), date(2026, 4, 1), "KH01"),
                          [Decimal(150000), Decimal(0)])
+
+
+class RealAdapterLedgerTest(_Shop):
+    """The same rules on a ledger built by D01 from files: store credit, marketplace credit
+    and COD in one shop (follow-up of the PR #27 review, after D01 merged)."""
+
+    ORDERS = [
+        ["Mã", "Ngày", "Trạng thái", "Tổng thu", "Thanh toán", "Kênh", "Mã khách", "Tên khách",
+         "Còn nợ"],
+        ["D1", "01/01/2026", "Xong", "100000", "Ghi nợ", "Shopee", "K1", "An", ""],
+        ["D2", "02/01/2026", "Xong", "80000", "Ghi nợ", "Store", "K1", "An", "50000"],
+        ["D3", "03/01/2026", "Xong", "50000", "COD", "Store", "K1", "An", ""],
+        ["D4", "04/01/2026", "Xong", "60000", "Ghi nợ", "phone", "K2", "Bình", "60000"],
+    ]
+    PAYMENTS = [
+        ["Mã đơn", "Ngày thu", "Tiền thu"],
+        ["D1", "05/01/2026", "30000"],
+        ["D2", "02/01/2026", "20000"],
+        ["D2", "06/01/2026", "10000"],
+        ["D3", "07/01/2026", "50000"],
+    ]
+
+    def test_d01_ledger_gives_the_contract_numbers(self):
+        ledger = load_debt_ledger(self.catalog(orders=self.ORDERS, payments=self.PAYMENTS),
+                                  D01_RULEBOOK)
+        self.assertEqual([o.excluded for o in ledger.orders], ["marketplace", "", "cod", ""])
+        x = date(2026, 1, 31)
+        self.assertEqual(reference_debts(ledger, x), {
+            "rows": {"K1": Decimal(50000), "K2": Decimal(60000)},
+            "total": Decimal(110000), "customers": 2})
+        ranked, open_orders, total = compute.debt_ranking(ledger, x)
+        self.assertEqual([(key, name, amount) for key, name, amount, _ in ranked],
+                         [("K2", "Bình", Decimal(60000)), ("K1", "An", Decimal(50000))])
+        self.assertEqual((open_orders, total), (2, Decimal(110000)))
+        # §7: only D2 and D4 add debt; only D2's later payment is collected.
+        self.assertEqual(reference_flow(ledger, date(2026, 1, 1), x),
+                         [Decimal(120000), Decimal(10000)])
+        self.assertEqual(reference_flow(ledger, date(2026, 1, 1), x, "K1"),
+                         [Decimal(60000), Decimal(10000)])
 
 
 class ContractBackendsTest(unittest.TestCase):
