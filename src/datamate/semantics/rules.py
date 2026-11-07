@@ -1,6 +1,10 @@
+import re
 from dataclasses import dataclass
 
 from datamate.semantics.text import fold
+
+DEBT_TABLE_FEATURES = ("table_answer", "until_end_of_day", "debt_orders", "debt_at_date",
+                       "debt_by_customer", "debt_excluded", "customer_identity", "ties_by_code")
 
 
 @dataclass(frozen=True)
@@ -67,11 +71,15 @@ def read_rules(rulebook: str) -> Rules:
     """
     rows = {}
     originals = {}
+    conflicts = set()
     for line in rulebook.splitlines():
         cells = [x.strip() for x in line.strip().strip("|").split("|")]
         if line.lstrip().startswith("|") and len(cells) >= 2:
-            rows[fold(cells[0])] = fold(cells[1])
-            originals[fold(cells[0])] = line.strip()
+            key, value = fold(cells[0]), fold(cells[1])
+            if key in rows and rows[key] != value:
+                conflicts.add(key)
+            rows[key] = value
+            originals[key] = line.strip()
     validity = rows.get("don tinh vao doanh thu", "")
     amount = rows.get("doanh thu mot don", "")
     month = rows.get("thang nay", "")
@@ -82,6 +90,12 @@ def read_rules(rulebook: str) -> Rules:
 
     def enable(feature: str, key: str | None, *value_tokens: str) -> bool:
         if key is None or not all(token in rows[key] for token in value_tokens):
+            return False
+        features[feature] = originals[key]
+        return True
+
+    def exact(feature: str, key: str | None, *wordings: str) -> bool:
+        if key in conflicts or rows.get(key) not in wordings:
             return False
         features[feature] = originals[key]
         return True
@@ -164,23 +178,37 @@ def read_rules(rulebook: str) -> Rules:
                                     "chia cho doanh thu ca shop"),
         unit_quantity=enable("unit_quantity", _find(rows, "ban duoc bao nhieu don vi"),
                              "don vi co ban la", "mat hang co don vi co ban khac khong tinh"),
-        calendar_month=enable("calendar_month", "thang m/y" if "thang m/y" in rows else None,
-                              "ca thang", "ngay 1", "ngay cuoi thang"),
-        boolean_answer=enable("boolean_answer", "boolean" if "boolean" in rows else None,
-                              "true", "false"),
+        calendar_month=exact("calendar_month", "thang m/y",
+                             "ca thang tu ngay 1 den het ngay cuoi thang"),
+        boolean_answer=exact("boolean_answer", "boolean", "true / false"),
         trend_rule=any(defines_trend(key) for key in rows)
+        or any(re.search(r"\b(?:tang lien tuc|giam lien tuc|xu huong)\b", v) for v in rows.values())
         or any(defines_trend(folded) for folded, _ in lines),
-        table_answer=enable("table_answer", "table" if "table" in rows else None,
-                            "columns", "rows", "json number"),
-        until_end_of_day=enable("until_end_of_day", _find(rows, "den het ngay x"),
-                                "tinh trang luc het ngay do", "tu dau du lieu"),
-        debt_orders=enable("debt_orders", _find(rows, "don duoc tinh vao no"),
-                           "khong huy", "don tra hang van tinh"),
-        debt_at_date=enable("debt_at_date", _find(rows, "no mot don tai ngay x"),
-                            "tong don", "gom phi giao", "khoan tra den het ngay x"),
-        debt_by_customer=enable("debt_by_customer", _find(rows, "no theo khach"),
-                                "khach le", "tong no", "khong co dong"),
-        debt_excluded=enable("debt_excluded", _find(rows, "don cod", "san tmdt"),
-                             "khong phai khach no", "bo khoi cong no"),
+        table_answer=exact("table_answer", "table", "columns rows o so la json number"),
+        until_end_of_day=exact(
+            "until_end_of_day", _find(rows, "den het ngay x"),
+            "tinh trang luc het ngay do tinh moi phat sinh tu dau du lieu",
+            "hoi so con lai con no con ton con hang tinh trang luc het ngay do tinh moi phat "
+            "sinh tu dau du lieu den het ngay do khong phai ky thang nay",
+        ),
+        debt_orders=exact("debt_orders", "don duoc tinh vao no",
+                          "don khong huy don tra hang van tinh neu con no"),
+        debt_at_date=exact(
+            "debt_at_date", "no mot don tai ngay x",
+            "phan chua tra cua tong don gom phi giao tru cac khoan tra den het ngay x",
+            "phan chua tra cua tong don so khach phai tra ca don da tru giam gia tren ca don "
+            "gom phi giao tinh cac khoan tra den het ngay x con no cong cac don con no 0",
+        ),
+        debt_by_customer=exact(
+            "debt_by_customer", "no theo khach",
+            "don khach le van vao tong no nhung khong co dong trong bang",
+            "xac dinh khach nhu 3 don khach le van tinh vao tong no nhung khong co dong "
+            "trong bang no theo khach",
+        ),
+        debt_excluded=exact(
+            "debt_excluded", _find(rows, "don cod", "san tmdt"),
+            "khong phai khach no bo khoi cong no",
+            "khong phai khach no ke ca khi chua thu duoc tien bo khoi cong no va tuoi no",
+        ),
         rule_rows=tuple(features.items()),
     )
