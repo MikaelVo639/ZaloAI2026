@@ -94,6 +94,9 @@ pipeline, scorer or model code beyond inheriting the C01-fixes base commit.
 - [x] POS profile rejects an incomplete sibling payment file and unions it when complete.
 - [x] Foreign, conflicting or per-source money-unit declarations are `amount` errors.
 - [x] Evidence runner resolves relative paths and binds revision to adapter source/manifest SHA.
+- [x] Markdown `### Công nợ` sections are debt hints even when the mapping is in later lines.
+- [x] POS payment siblings missing date, order id, or amount are all rejected as `partial`.
+- [x] Global `nghìn VND` is converted; unknown declarations such as JPY are `amount`.
 
 ## 5. Verification run
 
@@ -116,9 +119,8 @@ Local Windows checkout results at the review-fix revision:
 | Missing-channel capability | `biz_106`, `biz_129`: typed `partial`, no inferred channel |
 | Deadline-only capability | `biz_116`, `biz_118`: `absent` |
 | Smoke | 24/24 records; local proxy 21 correct, 0 wrong, 3 abstain |
-| Full suite | 275 passed in 28.251s |
+| Full suite | 275 passed in 31.616s |
 | `git diff --check` / compile | Pass |
-| `git diff --check` | Pass |
 
 The proxy score is local and not an official competition score.
 

@@ -339,6 +339,19 @@ class DebtLedgerTests(_Shop):
             load_debt_ledger(self.catalog(readme=mixed), RULEBOOK)
         self.assertEqual(caught.exception.code, "amount")
 
+        thousand_vnd = thousand.replace("nghìn đồng", "nghìn VND")
+        ledger = load_debt_ledger(self.catalog(readme=thousand_vnd), RULEBOOK)
+        self.assertEqual(ledger.orders[0].total, Decimal("100000500"))
+
+        unknown = README.replace(
+            "- Dữ liệu có đến hết 31/01/2026.",
+            "- Dữ liệu có đến hết 31/01/2026.\n"
+            "- Tất cả các cột tiền có đơn vị JPY.",
+        )
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(self.catalog(readme=unknown), RULEBOOK)
+        self.assertEqual(caught.exception.code, "amount")
+
     def test_coded_customer_keeps_real_code_even_when_display_name_is_walk_in(self):
         customers = [["Mã KH", "Khách hàng"], ["K1", "Khách lẻ"], ["K2", "Bình"]]
         ledger = load_debt_ledger(self.catalog(customers=customers), RULEBOOK)
@@ -425,14 +438,20 @@ File máy POS xuất ra.
 
         listed = readme.replace("- `customers.csv`", "- `customers.csv`\n- `payments_2.csv`")
         (root / "README.md").write_text(listed, encoding="utf-8")
-        with (root / "payments_2.csv").open(
-                "w", encoding="utf-8-sig", newline="") as stream:
-            csv.writer(stream).writerows([
-                ["Mã hóa đơn", "Giá trị"], ["D1", "20"],
-            ])
-        with self.assertRaises(DebtSourceError) as caught:
-            load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
-        self.assertEqual(caught.exception.code, "partial")
+        incomplete_sources = (
+            (["Mã hóa đơn", "Giá trị"], ["D1", "20"]),
+            (["Mã hóa đơn", "Thời gian"], ["D1", "03/01/2026"]),
+            (["Thời gian", "Giá trị"], ["03/01/2026", "20"]),
+        )
+        for header, row in incomplete_sources:
+            with self.subTest(missing=set(("Mã hóa đơn", "Thời gian", "Giá trị"))
+                              - set(header)):
+                with (root / "payments_2.csv").open(
+                        "w", encoding="utf-8-sig", newline="") as stream:
+                    csv.writer(stream).writerows([header, row])
+                with self.assertRaises(DebtSourceError) as caught:
+                    load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+                self.assertEqual(caught.exception.code, "partial")
 
         with (root / "payments_2.csv").open(
                 "w", encoding="utf-8-sig", newline="") as stream:
@@ -464,6 +483,7 @@ File máy POS xuất ra.
             "- **Công nợ**: **Paid** là số tiền trả lần đó; **Total** là số khách phải "
             "trả cho cả đơn.",
             "- Công nợ: Paid là số tiền trả lần đó; Total là số khách phải trả cho cả đơn.",
+            "### Công nợ\nPaid là số tiền trả lần đó. Total là số khách phải trả cho cả đơn.",
         )
         for convention in conventions:
             (root / "README.md").write_text(

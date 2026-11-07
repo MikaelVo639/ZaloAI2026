@@ -158,10 +158,14 @@ _DEBT_PROFILE_CANDIDATES = {
     "debt_pos_kiotviet.v1": (
         ({"Mã hóa đơn", "Tổng sau giảm giá"}, _DEBT_PROFILES[0][1][0][1]),
         ({"Mã hóa đơn", "Giá trị"}, _DEBT_PROFILES[0][1][1][1]),
+        ({"Mã hóa đơn", "Thời gian"}, _DEBT_PROFILES[0][1][1][1]),
+        ({"Thời gian", "Giá trị"}, _DEBT_PROFILES[0][1][1][1]),
     ),
     "debt_banhang.v1": (
         ({"Order ID", "Tong tien"}, _DEBT_PROFILES[1][1][0][1]),
         ({"Mã bill", "Số tiền thu"}, _DEBT_PROFILES[1][1][1][1]),
+        ({"Mã bill", "Thời gian thu"}, _DEBT_PROFILES[1][1][1][1]),
+        ({"Thời gian thu", "Số tiền thu"}, _DEBT_PROFILES[1][1][1][1]),
     ),
 }
 
@@ -287,6 +291,10 @@ def _has_debt_hint(catalog: Catalog, sections: Iterable[Section],
                    references: dict[str, str], evidence: Iterable[str]) -> bool:
     if references or any(evidence):
         return True
+    for line in catalog.readme.splitlines():
+        heading = re.match(r"^\s*#{1,6}\s+(.+?)\s*#*\s*$", line)
+        if heading and fold(heading.group(1)).strip() == "cong no":
+            return True
     return any(_field(meaning) in {"payment_amount", "paid_to_date", "closing_debt"}
                for section in sections for meaning in section.columns.values())
 
@@ -415,9 +423,12 @@ def _money_unit(readme: str) -> tuple[str, Decimal, tuple[str, ...]]:
     """
     def declares_unit(line: str) -> bool:
         text = fold(line)
-        return ("don vi tien" in text
-                or bool(re.search(r"\b(?:nghin|ngan|trieu|ty) dong\b", text))
-                or bool(re.search(r"\b(?:vnd|eur|usd|cent|xu)\b", text)))
+        declaration = "don vi tien" in text or (
+            "cot tien" in text and "don vi" in text)
+        currency = bool(re.search(
+            r"\b(?:nghin|ngan|trieu|ty)\s+(?:dong|vnd)\b|"
+            r"\b(?:vnd|eur|usd|jpy|gbp|cny|krw|aud|cad|cent|xu)\b", text))
+        return declaration or currency
 
     evidence = tuple(line.strip() for line in readme.splitlines() if declares_unit(line))
     if not evidence:
@@ -430,14 +441,15 @@ def _money_unit(readme: str) -> tuple[str, Decimal, tuple[str, ...]]:
         line_units: set[str] = set()
         if re.search(r"\.(?:csv|xlsx|xls|db|sqlite)\b", line, re.IGNORECASE) or "`" in line:
             scoped.append(line)
-        if "nghin dong" in text or "ngan dong" in text:
+        thousand = re.search(r"\b(?:nghin|ngan)\s+(?:dong|vnd)\b", text)
+        unsupported_scale = re.search(r"\b(?:trieu|ty)\s+(?:dong|vnd)\b", text)
+        if thousand:
             line_units.add("thousand_vnd")
-        if re.search(r"\bvnd\b", text) or (
-                re.search(r"\bdong\b", text)
-                and not re.search(r"\b(?:nghin|ngan|trieu|ty) dong\b", text)):
+        unscaled = re.sub(r"\b(?:nghin|ngan|trieu|ty)\s+(?:dong|vnd)\b", "", text)
+        if re.search(r"\b(?:vnd|dong)\b", unscaled):
             line_units.add("vnd")
-        if (re.search(r"\b(?:eur|usd|cent|xu)\b", text)
-                or "trieu dong" in text or "ty dong" in text
+        if (re.search(r"\b(?:eur|usd|jpy|gbp|cny|krw|aud|cad|cent|xu)\b", text)
+                or unsupported_scale
                 or not line_units):
             line_units.add("unsupported")
         units.update(line_units)
