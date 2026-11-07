@@ -321,28 +321,47 @@ Không suy đơn vị từ độ lớn của số liệu.
 
    ```json
    {
-     "columns": {"orders": {"order_id": "BanHang_HoaDon.xlsx::Sheet1#Order ID", "total": "BanHang_HoaDon.xlsx::Sheet1#Tong tien"},
-                 "payments": {"order_id": "BanHang_PhieuThu.xlsx::Sheet1#Mã bill", "amount": "BanHang_PhieuThu.xlsx::Sheet1#Số tiền thu"}},
+     "adapter_version": "readme_debt.v1",
+     "sources": {"orders": ["orders.csv"], "payments": ["payments.csv"]},
+     "columns": {
+       "orders": [{"source": "orders.csv", "origin": "readme", "fields": {
+         "order_id": "Mã đơn", "order_day": "Ngày đặt", "order_total": "Tổng phải thu",
+         "status": "Trạng thái", "channel": "Kênh", "payment_method": "Hình thức thanh toán",
+         "customer_id": "Mã khách", "closing_debt": "Còn nợ", "paid_to_date": "Đã trả"
+       }}],
+       "payments": [{"source": "payments.csv", "origin": "readme", "fields": {
+         "order_id": "Mã đơn", "payment_day": "Ngày thu", "payment_amount": "Tiền thu"
+       }}]
+     },
      "readme": ["**Công nợ**: mỗi lần khách trả tiền cho một đơn là một dòng, …"],
      "rules": ["| Đơn được tính vào nợ | … |", "| Nợ một đơn tại ngày X | … |"],
-     "checks": {"orders_unique": 1200, "payments_joined": 1530, "zero_payments": 0,
-                "orphan_payments": 0, "closing_debt_present": true, "closing_debt_checked": 1185},
-     "labels": {"payment_method": {"ghi no": 310, "tien mat": 820}, "channel": {"store": 1200}},
+     "checks": {"orders_unique": 2, "payments_joined": 3, "zero_payments": 0,
+                "orphan_payments": 0, "closing_debt_present": true, "closing_debt_checked": 2,
+                "closing_debt_mismatches": 0, "paid_to_date_present": true,
+                "paid_to_date_checked": 2, "paid_to_date_mismatches": 0},
+     "labels": {"payment:ghi no": 2, "channel:store": 2, "state:hoan thanh": 2},
      "coverage": {"first_day": "2025-01-02", "last_day": "2026-08-14", "source": "readme"},
      "money": {"unit": "vnd", "multiplier_to_vnd": "1", "evidence": []},
-     "customer_identity": {"uses_customer_codes": true, "basis": "README: Mã KH mua"}
+     "customer_identity": {"uses_customer_codes": true,
+                           "basis": [{"source": "orders.csv", "column": "Mã khách"}]}
    }
    ```
 
-   - `columns`: file::bảng / sheet đã gộp cho từng vai trò và cột dùng cho từng trường.
+   - `adapter_version`: phiên bản adapter đã đọc ledger.
+   - `sources`: danh sách nguồn theo từng vai trò. Nguồn XLSX hoặc SQLite có thể ghi theo
+     dạng `file::sheet` hoặc `file::bảng`.
+   - `columns`: danh sách mapping theo từng vai trò. Mỗi mapping có `source`, `origin` và
+     `fields` ánh xạ trường ngữ nghĩa sang tên cột gốc.
    - `readme`, `rules`: dòng README và dòng luật của split đã dùng.
    - `checks`: kết quả kiểm tra 0–4 và 7 (số đơn, số khoản trả, trùng / mồ côi, số đơn đã
      đối chiếu "còn nợ" / "đã trả" và số lệch).
-   - `labels`: tập nhãn thực gặp kèm số dòng (6.3).
+   - `labels`: số dòng theo từng nhãn, với khoá `state:<nhãn>`, `payment:<nhãn>` hoặc
+     `channel:<nhãn>` (6.3).
    - `coverage`: `first_day`, `last_day` (ISO) và `source` (`"readme"` | `"observed"`).
    - `money`: `unit` (`"vnd"` | `"thousand_vnd"`), `multiplier_to_vnd` (chuỗi số), `evidence`
      (các dòng README khai báo đơn vị; rỗng khi không khai báo).
-   - `customer_identity`: `uses_customer_codes` và căn cứ (`basis`) của nó (§6.5).
+   - `customer_identity`: `uses_customer_codes` và danh sách căn cứ (`basis`) có `source`,
+     `column` (§6.5).
    - D01 được thêm khoá khác (ví dụ `mappings`) nhưng không đổi nghĩa các khoá trên.
 
 ### 6.5 Khoá khách: shop dùng mã và shop không dùng mã
