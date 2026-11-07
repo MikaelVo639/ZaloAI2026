@@ -425,11 +425,24 @@ def _channel_unrecorded(catalog: Catalog, section: Section, fields: dict[str, st
         return False
     try:
         tables = _matching_tables(catalog, section)
+        if not tables or any(_CHANNEL_WORDS.search(fold(name)) or fold(name).strip() == "san"
+                             for table in tables for name in _header_names(table)):
+            return False
+        # A header such as "Nguồn" / "Nơi bán" escapes the word list; a cell naming a
+        # marketplace still proves marketplace orders exist in the file.
+        return not any(_names_marketplace(value) for table in tables
+                       for _ordinal, row in _records(table, section.columns)
+                       for value in row.values())
     except ReadmeSalesError:
         return False
-    return bool(tables) and not any(
-        _CHANNEL_WORDS.search(fold(name)) or fold(name).strip() == "san"
-        for table in tables for name in _header_names(table))
+
+
+def _names_marketplace(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    label = normalize_label(value)
+    return label in _MARKETPLACE or (
+        label.startswith("san ") and label.removeprefix("san ") in _MARKETPLACE)
 
 
 def _payment_partitions(catalog: Catalog,

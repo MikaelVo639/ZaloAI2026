@@ -61,6 +61,18 @@ class OrdersWithoutChannelTests(_Shop):
                     self.load(orders=orders)
                 self.assertIn(raised.exception.code, {"partial", "column_missing"})
 
+    def test_marketplace_value_under_a_neutral_header_keeps_the_source_partial(self):
+        # "Nguồn" / "Nơi bán" are not channel words for the header check, but a cell that
+        # names a marketplace proves marketplace orders exist in the file.
+        for header, value in (("Nguồn", "Shopee"), ("Nơi bán", "Sàn Lazada"),
+                              ("Ghi chú", "TikTok Shop")):
+            with self.subTest(header=header):
+                orders = [row + [cell] for row, cell in zip(
+                    ORDERS, [header, "", value, ""])]
+                with self.assertRaises(DebtSourceError) as raised:
+                    self.load(orders=orders)
+                self.assertEqual(raised.exception.code, "partial")
+
     def test_payment_method_is_still_required(self):
         readme = NO_CHANNEL_README.replace("- **Thanh toán**: hình thức thanh toán\n", "")
         with self.assertRaises(DebtSourceError) as raised:

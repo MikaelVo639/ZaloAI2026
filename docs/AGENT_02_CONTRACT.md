@@ -285,7 +285,9 @@ Bảng đơn không có cột kênh / nguồn đơn thì D01 vẫn dựng ledger
    "trên sàn", "thương mại điện tử", "online", "shopee", "lazada", "tiki", "tiktok",
    "channel", "source", "platform", "marketplace" (so sau `fold`, theo từ).
 3. Header thật của bảng đơn (kể cả cột README không mô tả) không có cột mang các từ trên,
-   cũng không có cột tên "Sàn".
+   cũng không có cột tên "Sàn". Không ô nào của bảng đơn (mọi cột) ghi tên sàn trong bảng
+   đóng 6.3 ("Shopee", "Sàn Lazada", …): cột "Nguồn" / "Nơi bán" lọt danh sách từ ở trên
+   nhưng giá trị như vậy cho thấy file có đơn sàn.
 
 Khi đó shop không có đơn sàn trong dữ liệu: `excluded` chỉ còn `"cod"` theo hình thức thanh
 toán. `lineage["checks"]["channel_column"]` = `"absent"` (shop có cột kênh: `"recorded"`),
