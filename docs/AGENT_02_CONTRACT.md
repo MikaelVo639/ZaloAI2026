@@ -275,6 +275,30 @@ Không suy đơn vị từ độ lớn của số liệu.
 - `lineage` ghi tập nhãn thực gặp của từng cột (trạng thái, thanh toán, kênh) kèm số dòng,
   để reviewer thấy toàn bộ giá trị mà không phải mở dữ liệu.
 
+### 6.3a Shop không ghi kênh bán (đề xuất, chờ Data duyệt)
+
+Bảng đơn không có cột kênh / nguồn đơn thì D01 vẫn dựng ledger khi **cả ba** điều sau đúng:
+
+1. Bảng đơn có đủ mã đơn, ngày đặt, trạng thái, tổng phải thu và **hình thức thanh toán**.
+   Thiếu hình thức thanh toán vẫn là `partial` (không biết đơn nào COD).
+2. README không có từ nào về kênh hay sàn: "kênh", "nguồn đơn", "sàn TMĐT", "qua sàn",
+   "trên sàn", "thương mại điện tử", "online", "shopee", "lazada", "tiki", "tiktok",
+   "channel", "source", "platform", "marketplace" (so sau `fold`, theo từ).
+3. Header thật của bảng đơn (kể cả cột README không mô tả) không có cột mang các từ trên,
+   cũng không có cột tên "Sàn".
+
+Khi đó shop không có đơn sàn trong dữ liệu: `excluded` chỉ còn `"cod"` theo hình thức thanh
+toán. `lineage["checks"]["channel_column"]` = `"absent"` (shop có cột kênh: `"recorded"`),
+`lineage["labels"]` không có nhãn `channel:`. Mọi kiểm tra 6.4 (đối chiếu "còn nợ", "đã trả")
+giữ nguyên. Một điều kiện sai → `partial` như trước.
+
+Hai cách viết README đi kèm:
+- Nghĩa cột kèm danh sách nhãn sau dấu hai chấm ("hình thức thanh toán của đơn: cash tiền
+  mặt, …, debt ghi nợ") được đọc theo phần trước dấu hai chấm. Nhãn vẫn so với bảng đóng 6.3.
+- Bảng danh sách khách có cột mã khách và đúng một cột nghĩa là "tên" → cột đó là tên khách.
+
+Trên train: `biz_106`, `biz_129` thoả cả ba điều kiện và đối chiếu khớp toàn bộ (xem mô tả PR).
+
 ### 6.4 Kiểm tra bắt buộc
 
 0. **Đủ nguồn.** Phải xác định được cả: mã đơn, ngày đặt, tổng phải thu (cột B) trên
