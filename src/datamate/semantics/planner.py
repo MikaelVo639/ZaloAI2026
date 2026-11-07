@@ -309,7 +309,7 @@ def _increasing(text: str, today: date, rules: Rules) -> Plan | None | bool:
     if not re.search(rf"\b{_REVENUE}\b", text) or _NEGATIVE_TREND.search(text):
         return False  # "số đơn tăng liên tục", "giảm liên tục", "tăng ít nhất 10 %"
     reduced = _PAIR.sub(" ", text) if pairs else text
-    stated = re.search(r"\b(\d+|hai|ba|bon|nam|sau) thang\b(?= \d{1,2}/\d{4})", reduced)
+    stated = re.search(r"\b(\d+|hai|ba|bon|nam|sau) thang\b", reduced)
     count = (_COUNT_WORD.get(stated.group(1)) or int(stated.group(1))) if stated else None
     if stated:
         reduced = reduced[:stated.start()] + " thang " + reduced[stated.end():]
@@ -330,6 +330,11 @@ def _increasing(text: str, today: date, rules: Rules) -> Plan | None | bool:
     else:
         months = [(int(y), int(m)) for m, y in re.findall(_BARE_MONTH, reduced)]
         reduced = re.sub(r"\b(?:thang )?" + _BARE_MONTH, " ", reduced)
+        if not months and pairs:
+            # A pair-only wording still names the complete chain: "B cao hơn A và C cao hơn B".
+            # Build A, B, C here; the exact-pair check below rejects gaps or a broken chain.
+            months = [(int(pairs[0][3]), int(pairs[0][2]))]
+            months.extend((int(y1), int(m1)) for m1, y1, _, _ in pairs)
     if not 2 <= len(months) <= 12 or any(b <= a for a, b in zip(months, months[1:])):
         return False  # one month, duplicates, or months not in time order
     if count is not None and count != len(months):

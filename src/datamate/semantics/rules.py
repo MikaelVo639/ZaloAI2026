@@ -98,6 +98,12 @@ def read_rules(rulebook: str) -> Rules:
         features[feature] = line
         return True
 
+    def defines_trend(folded: str) -> bool:
+        """Recognize a trend definition without mistaking sort-order rules for one."""
+        return ("lien tuc" in folded or "xu huong" in folded
+                or ("doanh thu" in folded
+                    and ("tang dan" in folded or "giam dan" in folded)))
+
     money = _find(rows, "ban duoc bao nhieu tien", "thu ve bao nhieu tien")
     return Rules(
         revenue=all(token in validity for token in ("khong huy", "khong tra", "ca don"))
@@ -162,8 +168,8 @@ def read_rules(rulebook: str) -> Rules:
                               "ca thang", "ngay 1", "ngay cuoi thang"),
         boolean_answer=enable("boolean_answer", "boolean" if "boolean" in rows else None,
                               "true", "false"),
-        trend_rule=any(token in key for key in rows
-                       for token in ("lien tuc", "xu huong", "tang dan", "giam dan")),
+        trend_rule=any(defines_trend(key) for key in rows)
+        or any(defines_trend(folded) for folded, _ in lines),
         table_answer=enable("table_answer", "table" if "table" in rows else None,
                             "columns", "rows", "json number"),
         until_end_of_day=enable("until_end_of_day", _find(rows, "den het ngay x"),

@@ -55,7 +55,9 @@ class RevenueIncreasingTests(unittest.TestCase):
                 "Từ tháng 2/2026 đến tháng 4/2026 doanh thu tháng sau có luôn cao hơn tháng trước "
                 "không?",
                 "Xu hướng doanh thu 3 tháng 2/2026, 3/2026, 4/2026: có phải tháng 3/2026 cao hơn "
-                "tháng 2/2026 và tháng 4/2026 cao hơn tháng 3/2026 nhỉ?"):
+                "tháng 2/2026 và tháng 4/2026 cao hơn tháng 3/2026 nhỉ?",
+                "Doanh thu có phải tháng 3/2026 cao hơn tháng 2/2026 và tháng 4/2026 cao hơn "
+                "tháng 3/2026 không?"):
             with self.subTest(text=text):
                 result = plan(text)
                 self.assertEqual(result.intent, "revenue_increasing")
@@ -85,6 +87,8 @@ class RevenueIncreasingTests(unittest.TestCase):
                 "doanh thu 2 tháng 2/2026 3/2026 4/2026 có tăng liên tục không",   # count differs
                 "doanh thu tháng 4/2026 có tăng liên tục không",                   # one month
                 "doanh thu có tăng liên tục không",                                # no month
+                "doanh thu 4 tháng có phải tháng 3/2026 cao hơn tháng 2/2026 và tháng "
+                "4/2026 cao hơn tháng 3/2026 không",                               # count differs
                 "doanh thu 3 tháng 2/2026 3/2026 4/2026 có giảm liên tục không",
                 "số đơn 3 tháng 2/2026 3/2026 4/2026 có tăng liên tục không",
                 "doanh thu 3 tháng 2/2026 3/2026 4/2026 có tăng liên tục ít nhất 10% không",
@@ -104,6 +108,8 @@ class RevenueIncreasingTests(unittest.TestCase):
         self.assertIsNone(plan(text, book=rulebook("month")))
         defined = rulebook(extra="| Tăng liên tục | Tháng sau không thấp hơn tháng trước |")
         self.assertIsNone(plan(text, book=defined))  # another meaning: do not guess
+        prose = rulebook(extra="Tăng liên tục nghĩa là tháng sau không thấp hơn tháng trước.")
+        self.assertIsNone(plan(text, book=prose))
         span = "Từ tháng 2/2026 đến tháng 4/2026 doanh thu tháng sau có luôn cao hơn tháng trước"
         self.assertIsNone(plan(span, book=rulebook("range")))
 
