@@ -1,9 +1,8 @@
 """C01: contract for boolean/table and debt intents (docs/AGENT_02_CONTRACT.md).
 
-These tests lock the agreed interface before S01/D01/A01 implement it: the new intents
-and the debt source types exist, the current backends refuse every new intent instead of
-answering it partially, and the examples in the contract document stay consistent with
-the code. A01 updates the "refuses" tests when it enables an intent with its regressions.
+These tests lock the agreed interface and ensure that the backend only enables the
+C01 intents with an executor. The examples in the contract document stay consistent
+with the code.
 
 The synthetic ledgers below are the contract's reference cases for customer keys (§6.5)
 and new debt (§7). ``reference_*`` restate the contract in a few lines so that the
@@ -259,10 +258,12 @@ class CustomerKeyAndFlowReferenceTest(unittest.TestCase):
                          [Decimal(150000), Decimal(0)])
 
 
-class CurrentBackendsRefuseNewIntentsTest(unittest.TestCase):
-    def test_baseline_reports_every_new_intent_unsupported(self):
+class ContractBackendsTest(unittest.TestCase):
+    def test_baseline_enables_only_the_two_implemented_c01_intents(self):
         for name, plan in contract_plans().items():
-            self.assertTrue(compute.unsupported(plan), name)
+            self.assertEqual(bool(compute.unsupported(plan)), name not in {
+                "revenue_increasing", "top_debt_customers",
+            }, name)
 
     def test_answer_plan_abstains_before_reading_data(self):
         catalog = Catalog("biz_demo", "", ())
@@ -270,7 +271,7 @@ class CurrentBackendsRefuseNewIntentsTest(unittest.TestCase):
             candidate = compute.answer_plan({}, catalog, plan)
             self.assertEqual(candidate.type, "abstain", name)
 
-    def test_validation_rejects_boolean_and_table_for_unimplemented_plans(self):
+    def test_validation_rejects_boolean_and_table_without_calculation_evidence(self):
         evidence = {"code": {"call": "f()", "source": "def f(): ..."}}
         outputs = {
             "revenue_increasing": ("boolean", True),

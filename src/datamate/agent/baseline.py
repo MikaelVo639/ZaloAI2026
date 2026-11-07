@@ -1,4 +1,5 @@
 import math
+from datetime import date
 from typing import Any
 
 from datamate.agent import compute as tasks
@@ -26,6 +27,7 @@ class BaselineAgent:
 
     # Worker tasks; module-level functions so the spawn worker can import them.
     prepare = staticmethod(tasks.prepare_sales)
+    prepare_debt = staticmethod(tasks.prepare_debt)
     compute = staticmethod(tasks.answer_plan)
     names = staticmethod(tasks.product_names)
     vocabulary = staticmethod(tasks.vocabulary)
@@ -47,7 +49,7 @@ class BaselineAgent:
         plan = self._plan(question, context)
         if plan is None:
             return Candidate(reason="Question or split rules outside baseline grammar")
-        return self._answer_plan(plan, context)
+        return self._answer_plan(plan, context, as_of_date=question.as_of_date)
 
     def _plan(self, question: Question, context: BusinessContext) -> Plan | None:
         """Shared deterministic planning, including SEM-01's product-name retry."""
@@ -62,10 +64,17 @@ class BaselineAgent:
                                      self._vocabulary(context))
         return plan
 
-    def _answer_plan(self, plan: Plan, context: BusinessContext) -> Candidate:
+    def _answer_plan(self, plan: Plan, context: BusinessContext, *,
+                     as_of_date: date | None = None) -> Candidate:
         planned = {"intent": plan.intent, "start": plan.start.isoformat(),
                    "end": plan.end.isoformat(), "rules": plan.evidence}
-        failure = self._prepare(context)
+        if plan.intent in tasks.C01_INTENTS:
+            reason = tasks.unsupported(plan)
+            if reason or (as_of_date is not None and plan.end > as_of_date):
+                return Candidate(reason=reason or "Requested date is after as_of_date",
+                                 evidence=planned)
+        failure = self._prepare(context, debt=True) if plan.intent == "top_debt_customers" else (
+            self._prepare(context))
         if failure is not None:
             failure.evidence = {**planned, **failure.evidence}
             return failure
@@ -104,23 +113,32 @@ class BaselineAgent:
             context.cache["vocabulary"] = vocabulary
         return context.cache["vocabulary"]
 
-    def _prepare(self, context: BusinessContext) -> Candidate | None:
-        """Load the business in the worker once; never retry a failed business."""
-        state = context.cache.get("worker_sales")
+    def _prepare(self, context: BusinessContext, *, debt: bool = False) -> Candidate | None:
+        """Load the required source once per worker generation and split rulebook."""
+        cache_key = "worker_debt" if debt else "worker_sales"
+        rulebook = context.split.rulebook
+        state = context.cache.get(cache_key)
+        if state is not None and state["rulebook"] != rulebook:
+            state = None
         if state is not None and not state["ok"]:
             return Candidate(reason=state["reason"], evidence=dict(state["evidence"]))
         if (state is not None and self.worker.alive
                 and state["generation"] == self.worker.generation):
             return None
         # First question of the business, or the worker was replaced after a timeout.
-        result = self.worker.run(self.prepare, self.ingestion_timeout,
-                                 catalog=context.catalog, rulebook=context.split.rulebook)
+        task = self.prepare_debt if debt else self.prepare
+        result = self.worker.run(task, self.ingestion_timeout,
+                                 catalog=context.catalog, rulebook=rulebook)
         evidence: dict[str, Any] = {"ingestion_execution": result.execution()}
-        if result.ok and result.value["ok"]:
-            context.cache["worker_sales"] = {"ok": True, "generation": self.worker.generation}
+        if result.ok and (debt or result.value["ok"]):
+            # The debt worker retains typed failures for interpretation with the Plan.
+            context.cache[cache_key] = {"ok": True, "generation": self.worker.generation,
+                                        "rulebook": rulebook}
             return None
-        reason = result.value["reason"] if result.ok else _failure_reason("Sales ingestion", result)
-        context.cache["worker_sales"] = {"ok": False, "reason": reason, "evidence": evidence}
+        step = "Debt ingestion" if debt else "Sales ingestion"
+        reason = result.value["reason"] if result.ok else _failure_reason(step, result)
+        context.cache[cache_key] = {"ok": False, "reason": reason, "evidence": evidence,
+                                    "rulebook": rulebook}
         return Candidate(reason=reason, evidence=dict(evidence))
 
 

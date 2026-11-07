@@ -1,8 +1,7 @@
 """S01: grammar for the C01 intents revenue_increasing (boolean) and top_debt_customers (table).
 
 Contract: docs/AGENT_02_CONTRACT.md §4-§5. Rulebook rows are synthetic paraphrases written for
-tests, not organizer data. The executor is A01's work: until then every Plan below must be
-refused by the current backend, so these questions keep abstaining.
+tests, not organizer data.
 """
 import unittest
 from datetime import date
@@ -198,13 +197,13 @@ class TopDebtCustomersTests(unittest.TestCase):
 
 
 class CurrentBackendTests(unittest.TestCase):
-    def test_new_plans_abstain_until_the_executor_exists(self):
+    def test_new_plans_still_need_a_current_split_rulebook(self):
         catalog = Catalog("b", "", ())
         for text in ("doanh thu 3 tháng 2/2026 3/2026 4/2026 có tăng liên tục không",
                      "3 khách nợ nhiều nhất đến hết ngày 14/07/2026 kèm số tiền còn nợ"):
             with self.subTest(text=text):
                 result = plan(text)
-                self.assertTrue(compute.unsupported(result))
+                self.assertFalse(compute.unsupported(result))
                 self.assertEqual(compute.answer_plan({}, catalog, result).type, "abstain")
 
     def test_sem02_month_series_is_unchanged(self):
