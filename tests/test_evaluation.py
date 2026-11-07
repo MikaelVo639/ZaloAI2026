@@ -39,6 +39,27 @@ class EvaluationTests(unittest.TestCase):
                                   "rows": [[10, "Tú"], [20, "LAN"]]})
         self.assertTrue(matches(actual, expected))
 
+    def test_table_first_cell_aliases_per_reference_row(self):
+        expected = record("table", {"columns": ["khach_hang", "so_tien_no"],
+                                    "rows": [["Lưu Phong Bình", 98000], ["Tú", 10]]},
+                          alias=[["KH0178", "Lưu Phong Bình - 0978 611 903"], []])
+        for name in ("Lưu Phong Bình - 0978 611 903", "kh0178", "Lưu Phong Bình"):
+            with self.subTest(name=name):
+                actual = record("table", {"columns": ["khach_hang", "so_tien_no"],
+                                          "rows": [["Tú", 10], [name, 98000]]})
+                self.assertTrue(matches(actual, expected))
+        wrong_amount = record("table", {"columns": ["khach_hang", "so_tien_no"],
+                                        "rows": [["KH0178", 98001], ["Tú", 10]]})
+        swapped = record("table", {"columns": ["khach_hang", "so_tien_no"],
+                                   "rows": [["Tú", 98000], ["KH0178", 10]]})
+        duplicate = record("table", {"columns": ["khach_hang", "so_tien_no"],
+                                     "rows": [["KH0178", 98000], ["Lưu Phong Bình", 98000]]})
+        unaccented = record("table", {"columns": ["khach_hang", "so_tien_no"],
+                                      "rows": [["Luu Phong Binh", 98000], ["Tú", 10]]})
+        for actual in (wrong_amount, swapped, duplicate, unaccented):
+            with self.subTest(actual=actual["answer"]["rows"]):
+                self.assertFalse(matches(actual, expected))
+
     def test_percent_rounding_and_exact_currency(self):
         self.assertTrue(matches(record("percent", -12.451), record("percent", -12.45)))
         self.assertFalse(matches(record("number", 10**12 + 1), record("number", 10**12)))
