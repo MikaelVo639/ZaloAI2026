@@ -326,7 +326,7 @@ class DebtLedgerTests(_Shop):
         orders.append(["Mã", "Ngày"])
         orders.append(["D1", "01/01/2026"])
         payments = book.create_sheet("ThuTien")
-        payments.append(["Mã đơn", "Ngày thu", "Tiền thu"])
+        payments.append(["Mã", "Ngày", "Tiền thu"])
         payments.append(["D1", "02/01/2026", "50"])
         book.save(root / "BaoCao.xlsx")
         book.close()
@@ -343,6 +343,38 @@ class DebtLedgerTests(_Shop):
         self.assertEqual(caught.exception.code, "column_missing")
         self.assertIn("BaoCao.xlsx::ThuTien", caught.exception.diagnostics["sources"])
 
+        # A workbook-wide mapping matches both sheets' common columns but misses
+        # the amount on ThuTien.
+        (root / "README.md").write_text(
+            partial_sheet.replace(', sheet `DonHang`', ''), encoding="utf-8")
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+        self.assertEqual(caught.exception.code, "column_missing")
+        self.assertEqual(caught.exception.diagnostics["sources"], ["BaoCao.xlsx::ThuTien"])
+
+    def test_absence_allows_reviewed_product_metadata_but_not_unknown_columns(self):
+        root = self.data / "shop"
+        root.mkdir(parents=True)
+        (root / "README.md").write_text("""# Shop
+## File
+- `products.csv`
+## Cột trong `products.csv`
+- **Mã**: mã hàng
+- **Tên**: tên
+- **Nhóm**: nhóm hàng
+""", encoding="utf-8")
+        path = root / "products.csv"
+        path.write_text("Mã,Tên,Nhóm,Bảo hành\nP1,Trà,Đồ uống,12\n", encoding="utf-8")
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+        self.assertEqual(caught.exception.code, "absent")
+
+        path.write_text("Mã,Tên,Nhóm,Tiền thu\nP1,Trà,Đồ uống,12\n", encoding="utf-8")
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+        self.assertEqual(caught.exception.code, "column_missing")
+        self.assertEqual(caught.exception.diagnostics["sources"], ["products.csv::products"])
+
     def test_incomplete_second_payment_file_is_not_silently_skipped(self):
         readme = README.replace("- `customers.csv`\n", "- `customers.csv`\n- `payments_2.csv`\n")
         readme += """
@@ -356,6 +388,29 @@ class DebtLedgerTests(_Shop):
         with self.assertRaises(DebtSourceError) as caught:
             load_debt_ledger(self.catalog(readme=readme, extra=extra), RULEBOOK)
         self.assertEqual(caught.exception.code, "partial")
+
+    def test_payment_role_is_retained_from_inventory_or_mapped_file_family(self):
+        for filename, description in (
+            ("ThuBoSung.csv", " (bảng khoản trả tiếp theo)"),
+            ("payments_2.csv", ""),
+        ):
+            with self.subTest(filename=filename):
+                readme = README.replace(
+                    "- `payments.csv`\n",
+                    f"- `payments.csv`\n- `{filename}`{description}\n",
+                )
+                catalog = self.catalog(
+                    readme=readme, extra={filename: [["Mã đơn"], ["D1"]]})
+                try:
+                    with self.assertRaises(DebtSourceError) as caught:
+                        load_debt_ledger(catalog, RULEBOOK)
+                finally:
+                    (self.data / "shop" / filename).unlink()
+                self.assertEqual(caught.exception.code, "partial")
+                source, = caught.exception.diagnostics["sources"]
+                self.assertEqual(source["source"], f"{filename}::{Path(filename).stem}")
+                self.assertEqual(source["role"], "payments")
+                self.assertEqual(source["missing_fields"], ["payment_amount", "payment_day"])
 
     def test_money_units_are_converted_or_rejected_explicitly(self):
         thousand = README.replace(
@@ -406,8 +461,14 @@ class DebtLedgerTests(_Shop):
             "Đơn vị tiền: 1.000 VND.",
             "Đơn vị tiền: 1000 đồng.",
             "Đơn vị tiền: x1000 VND.",
+            "Đơn vị tiền: 1,000 VND.",
+            "Đơn vị tiền: 2.000 VND.",
+            "Đơn vị tiền: x2000 VND.",
+            "Đơn vị tiền: VND hoặc SGD.",
+            "Đơn vị tiền: VND/kg.",
             "Các cột tiền tính bằng nghìn.",
             "Số tiền ghi theo ngàn (k).",
+            "Đơn vị tiền của cột Tổng thu: nghìn VND.",
         )
         for declaration in unsupported_scales:
             with self.subTest(declaration=declaration):
@@ -418,6 +479,17 @@ class DebtLedgerTests(_Shop):
                 with self.assertRaises(DebtSourceError) as caught:
                     load_debt_ledger(self.catalog(readme=readme), RULEBOOK)
                 self.assertEqual(caught.exception.code, "amount")
+
+        for expression, multiplier in (
+            ("VND", "1"), ("đồng", "1"), ("nghìn VND", "1000"), ("ngàn VND", "1000"),
+            ("nghìn đồng", "1000"), ("ngàn đồng", "1000"),
+        ):
+            with self.subTest(expression=expression):
+                declaration = f"- Đơn vị tiền: **{expression}**."
+                ledger = load_debt_ledger(
+                    self.catalog(readme=f"{README}\n{declaration}\n"), RULEBOOK)
+                self.assertEqual(ledger.lineage["money"]["multiplier_to_vnd"], multiplier)
+                self.assertEqual(ledger.lineage["money"]["evidence"], [declaration])
 
     def test_coded_customer_keeps_real_code_even_when_display_name_is_walk_in(self):
         customers = [["Mã KH", "Khách hàng"], ["K1", "Khách lẻ"], ["K2", "Bình"]]
@@ -544,6 +616,51 @@ File máy POS xuất ra.
         self.assertEqual((len(complete.orders), len(complete.payments)), (1, 2))
         self.assertEqual(sum(payment.amount for payment in complete.payments), Decimal(70))
         self.assertEqual(complete.lineage["checks"]["paid_to_date_checked"], 1)
+
+    def test_pos_payment_family_is_grouped_by_filename_across_workbooks(self):
+        from openpyxl import Workbook
+
+        root = self.data / "shop"
+        root.mkdir(parents=True)
+        (root / "README.md").write_text("""# Shop
+File máy POS xuất ra.
+## File
+- `orders.csv`
+- `SoQuy_1.xlsx`
+- `SoQuy_2.xlsx`
+## Quy ước
+- **Công nợ**: **Giá trị** là số tiền trả lần đó; **Tổng sau giảm giá** là số khách phải trả cho cả đơn.
+""", encoding="utf-8")
+        (root / "orders.csv").write_text(
+            "Mã hóa đơn,Thời gian,Trạng thái,Tổng sau giảm giá,Phương thức thanh toán,"
+            "Kênh bán,Mã KH\nD1,01/01/2026,Xong,100,Ghi nợ,Store,K1\n",
+            encoding="utf-8",
+        )
+        header = ["Mã hóa đơn", "Thời gian", "Giá trị"]
+
+        def write_receipts(name, sheet_name, rows):
+            book = Workbook()
+            sheet = book.active
+            sheet.title = sheet_name
+            for row in rows:
+                sheet.append(row)
+            book.save(root / name)
+            book.close()
+
+        write_receipts("SoQuy_1.xlsx", "PhieuThu", [header, ["D1", "02/01/2026", 50]])
+        write_receipts("SoQuy_2.xlsx", "TiepTheo", [[header[0]], ["D1"]])
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+        self.assertEqual(caught.exception.code, "partial")
+        source, = caught.exception.diagnostics["sources"]
+        self.assertEqual(source["source"], "SoQuy_2.xlsx::TiepTheo")
+        self.assertEqual(source["missing_fields"], ["payment_amount", "payment_day"])
+
+        write_receipts("SoQuy_2.xlsx", "TiepTheo", [header, ["D1", "03/01/2026", 20]])
+        ledger = load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+        self.assertEqual(len(ledger.orders), 1)
+        self.assertEqual([payment.amount for payment in ledger.payments],
+                         [Decimal(50), Decimal(20)])
 
     def test_debt_convention_without_column_mapping_is_partial_not_absent(self):
         template = """# Shop
