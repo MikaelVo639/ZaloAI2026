@@ -156,18 +156,26 @@ _DEBT_PROFILES = (
 
 _DEBT_PROFILE_CANDIDATES = {
     "debt_pos_kiotviet.v1": (
-        ({"Mã hóa đơn", "Tổng sau giảm giá"}, _DEBT_PROFILES[0][1][0][1]),
-        ({"Mã hóa đơn", "Giá trị"}, _DEBT_PROFILES[0][1][1][1]),
-        ({"Mã hóa đơn", "Thời gian"}, _DEBT_PROFILES[0][1][1][1]),
-        ({"Thời gian", "Giá trị"}, _DEBT_PROFILES[0][1][1][1]),
+        ("orders", {"Mã hóa đơn", "Tổng sau giảm giá"}, _DEBT_PROFILES[0][1][0][1]),
+        ("payments", {"Mã hóa đơn", "Giá trị"}, _DEBT_PROFILES[0][1][1][1]),
+        ("payments", {"Mã hóa đơn", "Thời gian"}, _DEBT_PROFILES[0][1][1][1]),
+        ("payments", {"Thời gian", "Giá trị"}, _DEBT_PROFILES[0][1][1][1]),
     ),
     "debt_banhang.v1": (
-        ({"Order ID", "Tong tien"}, _DEBT_PROFILES[1][1][0][1]),
-        ({"Mã bill", "Số tiền thu"}, _DEBT_PROFILES[1][1][1][1]),
-        ({"Mã bill", "Thời gian thu"}, _DEBT_PROFILES[1][1][1][1]),
-        ({"Thời gian thu", "Số tiền thu"}, _DEBT_PROFILES[1][1][1][1]),
+        ("orders", {"Order ID", "Tong tien"}, _DEBT_PROFILES[1][1][0][1]),
+        ("payments", {"Mã bill", "Số tiền thu"}, _DEBT_PROFILES[1][1][1][1]),
+        ("payments", {"Mã bill", "Thời gian thu"}, _DEBT_PROFILES[1][1][1][1]),
+        ("payments", {"Thời gian thu", "Số tiền thu"}, _DEBT_PROFILES[1][1][1][1]),
     ),
 }
+
+
+def _source_family(filename: str, sheet: str | None = None) -> str:
+    stem = filename.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    sheet_key = fold(sheet or "")
+    generic_sheet = bool(re.fullmatch(r"sheet\s*\d+", sheet_key))
+    basis = stem if not sheet_key or generic_sheet else sheet or stem
+    return re.sub(r"(?:\s+\d+)$", "", fold(basis)).strip()
 
 
 def _profile_sections(catalog: Catalog, documented: list[Section]) -> list[Section]:
@@ -175,7 +183,8 @@ def _profile_sections(catalog: Catalog, documented: list[Section]) -> list[Secti
     if not ("pos" in text.split() or "phan mem ban hang" in text):
         return []
     covered = {filename_key(section.file) for section in documented}
-    headers = [(table, _header_names(table)) for table in catalog.tables
+    all_headers = [(table, _header_names(table)) for table in catalog.tables]
+    headers = [(table, header) for table, header in all_headers
                if filename_key(table.path.name) not in covered]
     for version, signatures in _DEBT_PROFILES:
         found: list[Section] = []
@@ -191,13 +200,29 @@ def _profile_sections(catalog: Catalog, documented: list[Section]) -> list[Secti
                     break
             if matched:
                 continue
-            for marker, meanings in _DEBT_PROFILE_CANDIDATES[version]:
+            for role, marker, meanings in _DEBT_PROFILE_CANDIDATES[version]:
                 if marker <= header:
                     found.append(Section(
                         table.path.name, table.name,
                         {column: meaning for column, meaning in meanings.items()
-                         if column in header}, origin=f"{version}.partial"))
+                         if column in header}, origin=f"{version}.partial.{role}"))
                     break
+        payment_families = {
+            _source_family(section.file, section.sheet) for section in found
+            if {"order_id", "payment_day", "payment_amount"}
+            <= set(_section_fields(section, {}))
+        }
+        represented = {(filename_key(section.file), section.sheet) for section in found}
+        payment_meanings = signatures[1][1]
+        for table, header in all_headers:
+            identity = (filename_key(table.path.name), table.name)
+            if (identity in represented
+                    or _source_family(table.path.name, table.name) not in payment_families):
+                continue
+            found.append(Section(
+                table.path.name, table.name,
+                {column: meaning for column, meaning in payment_meanings.items()
+                 if column in header}, origin=f"{version}.partial.payments"))
         if any("order_total" in _section_fields(s, {}) for s in found) and any(
                 "payment_amount" in _section_fields(s, {}) for s in found):
             return found
@@ -272,8 +297,10 @@ def _section_fields(section: Section, references: dict[str, str]) -> dict[str, s
     return result
 
 
-def _documented_sources_complete(catalog: Catalog, sections: Iterable[Section]) -> bool:
-    documented = {filename_key(section.file) for section in sections}
+def _source_completeness(catalog: Catalog, sections: Iterable[Section]
+                         ) -> tuple[bool, tuple[str, ...]]:
+    sections = tuple(sections)
+    documented_files: set[str] = set()
     in_files = False
     for line in catalog.readme.splitlines():
         if line.startswith("## "):
@@ -282,9 +309,33 @@ def _documented_sources_complete(catalog: Catalog, sections: Iterable[Section]) 
         if in_files:
             match = re.match(r"\s*-\s+`([^`]+)`", line)
             if match:
-                documented.add(filename_key(match.group(1)))
-    present = {filename_key(table.path.name) for table in catalog.tables}
-    return bool(catalog.readme.strip()) and bool(documented) and present <= documented
+                documented_files.add(filename_key(match.group(1)))
+    tables_by_file: dict[str, list[Any]] = defaultdict(list)
+    for table in catalog.tables:
+        tables_by_file[filename_key(table.path.name)].append(table)
+    unresolved: list[str] = []
+    for table in catalog.tables:
+        key = filename_key(table.path.name)
+        covered = False
+        for section in sections:
+            if (filename_key(section.file) != key
+                    or section.sheet is not None and section.sheet != table.name):
+                continue
+            try:
+                records = _records(table, section.columns)
+                next(records, None)
+                records.close()
+                covered = True
+                break
+            except ReadmeSalesError:
+                continue
+        if key not in documented_files or not covered:
+            unresolved.append(table.key)
+    present_files = set(tables_by_file)
+    unresolved.extend(f"{name}::<missing>" for name in sorted(
+        documented_files - present_files))
+    complete = bool(catalog.readme.strip()) and bool(documented_files) and not unresolved
+    return complete, tuple(sorted(set(unresolved)))
 
 
 def _has_debt_hint(catalog: Catalog, sections: Iterable[Section],
@@ -345,13 +396,23 @@ def _role_sections(catalog: Catalog, sections: list[Section], references: dict[s
             role = "payments"
         elif {"customer_id", "customer_name"} <= set(fields) and "order_id" not in fields:
             role = "customers"
+        elif section.origin.endswith(".partial.payments"):
+            incomplete.append({"source": section.label, "role": "payments",
+                               "fields": sorted(fields),
+                               "missing_fields": sorted(required["payments"] - set(fields))})
+        elif section.origin.endswith(".partial.orders"):
+            incomplete.append({"source": section.label, "role": "orders",
+                               "fields": sorted(fields),
+                               "missing_fields": sorted(required["orders"] - set(fields))})
         elif fields.get("order_total") or fields.get("closing_debt") or fields.get(
                 "paid_to_date") or ("order_day" in fields and "status" in fields):
             incomplete.append({"source": section.label, "role": "orders",
-                               "fields": sorted(fields)})
+                               "fields": sorted(fields),
+                               "missing_fields": sorted(required["orders"] - set(fields))})
         elif "payment_amount" in fields or "payment_day" in fields:
             incomplete.append({"source": section.label, "role": "payments",
-                               "fields": sorted(fields)})
+                               "fields": sorted(fields),
+                               "missing_fields": sorted(required["payments"] - set(fields))})
         if role:
             try:
                 tables = _matching_tables(catalog, section)
@@ -425,10 +486,13 @@ def _money_unit(readme: str) -> tuple[str, Decimal, tuple[str, ...]]:
         text = fold(line)
         declaration = "don vi tien" in text or (
             "cot tien" in text and "don vi" in text)
+        scaled_money = "tien" in text and (
+            bool(re.search(r"\b(?:nghin|ngan|trieu|ty|k)\b", text))
+            or bool(re.search(r"\bx\s*1000\b|\b1?000\b", text)))
         currency = bool(re.search(
             r"\b(?:nghin|ngan|trieu|ty)\s+(?:dong|vnd)\b|"
             r"\b(?:vnd|eur|usd|jpy|gbp|cny|krw|aud|cad|cent|xu)\b", text))
-        return declaration or currency
+        return declaration or scaled_money or currency
 
     evidence = tuple(line.strip() for line in readme.splitlines() if declares_unit(line))
     if not evidence:
@@ -443,13 +507,14 @@ def _money_unit(readme: str) -> tuple[str, Decimal, tuple[str, ...]]:
             scoped.append(line)
         thousand = re.search(r"\b(?:nghin|ngan)\s+(?:dong|vnd)\b", text)
         unsupported_scale = re.search(r"\b(?:trieu|ty)\s+(?:dong|vnd)\b", text)
+        numeric_scale = re.search(r"\bx\s*1000\b|\b1[.]?000\b", line, re.IGNORECASE)
         if thousand:
             line_units.add("thousand_vnd")
         unscaled = re.sub(r"\b(?:nghin|ngan|trieu|ty)\s+(?:dong|vnd)\b", "", text)
         if re.search(r"\b(?:vnd|dong)\b", unscaled):
             line_units.add("vnd")
         if (re.search(r"\b(?:eur|usd|jpy|gbp|cny|krw|aud|cad|cent|xu)\b", text)
-                or unsupported_scale
+                or unsupported_scale or numeric_scale
                 or not line_units):
             line_units.add("unsupported")
         units.update(line_units)
@@ -516,9 +581,12 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
     sections += _profile_sections(catalog, sections)
     references, readme_lines = _debt_references(catalog.readme)
     if not _has_debt_hint(catalog, sections, references, readme_lines):
-        if _documented_sources_complete(catalog, sections):
-            raise DebtSourceError("absent", "README documents no debt source")
-        raise DebtSourceError("column_missing", "README is incomplete for debt detection")
+        complete, unresolved = _source_completeness(catalog, sections)
+        if complete:
+            raise DebtSourceError("absent", "README documents no debt source",
+                                  sources_complete=True)
+        raise DebtSourceError("column_missing", "README is incomplete for debt detection",
+                              sources=list(unresolved))
     required_references = {"payment_amount", "order_total"}
     if not required_references <= set(references.values()):
         code = "partial" if not references else "column_missing"
@@ -593,6 +661,8 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
             "customer_name": _text(row.get("customer_name")),
             "closing_debt": row.get("closing_debt"),
             "closing_column": "closing_debt" in row,
+            "paid_to_date": row.get("paid_to_date"),
+            "paid_to_date_column": "paid_to_date" in row,
             "source": source,
         })
     if not raw_orders:
@@ -600,6 +670,7 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
 
     orders: list[DebtOrder] = []
     closing: dict[str, Decimal] = {}
+    paid_to_date: dict[str, Decimal] = {}
     for raw in raw_orders:
         customer_id = raw["customer_id"]
         if not uses_customer_codes and customer_id:
@@ -612,6 +683,10 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
         if raw["closing_column"] and not _blank(raw["closing_debt"]):
             closing[raw["order_id"]] = _amount(
                 raw["closing_debt"], field="closing_debt", source=raw["source"],
+                multiplier=money_multiplier)
+        if raw["paid_to_date_column"] and not _blank(raw["paid_to_date"]):
+            paid_to_date[raw["order_id"]] = _amount(
+                raw["paid_to_date"], field="paid_to_date", source=raw["source"],
                 multiplier=money_multiplier)
         orders.append(DebtOrder(
             raw["order_id"], raw["day"], raw["state"], raw["total"],
@@ -666,6 +741,18 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
                                       source=order.source)
             checked += 1
 
+    paid_checked = 0
+    paid_to_date_present = any(raw["paid_to_date_column"] for raw in raw_orders)
+    if paid_to_date_present:
+        for order in orders:
+            if order.order_id not in paid_to_date:
+                raise DebtSourceError("reconcile", "Paid-to-date amount is missing for an order",
+                                      source=order.source)
+            if paid[order.order_id] != paid_to_date[order.order_id]:
+                raise DebtSourceError("reconcile", "Paid-to-date does not match payments",
+                                      source=order.source)
+            paid_checked += 1
+
     source_labels = {
         role: [section.label for section, _fields in entries]
         for role, entries in roles.items()
@@ -689,6 +776,10 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
             "orphan_payments": 0,
             "closing_debt_present": closing_column_present,
             "closing_debt_checked": checked,
+            "closing_debt_mismatches": 0,
+            "paid_to_date_present": paid_to_date_present,
+            "paid_to_date_checked": paid_checked,
+            "paid_to_date_mismatches": 0,
         },
         "labels": dict(sorted(label_counts.items())),
         "coverage": {

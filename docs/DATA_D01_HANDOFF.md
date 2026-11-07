@@ -31,6 +31,8 @@ Agent execution:
 - strict detection of incomplete sibling files/sheets before role selection;
 - VND/thousand-VND unit handling with evidence and unsupported-unit rejection;
 - zero-payment retention/counting and non-negative receivable reconciliation.
+- per-`file::sheet` completeness before `absent`, file-family role propagation, and
+  paid-to-date reconciliation.
 
 The adapter reuses the existing catalog/read-only table readers and README record helpers,
 so CSV, XLSX, SQLite and XLSX report headers follow the same source handling as DATA-03.
@@ -49,8 +51,9 @@ so CSV, XLSX, SQLite and XLSX report headers follow the same source handling as 
 | Missing capability | Partial/ambiguous source → `partial`/typed abstention error; only a fully documented shop with no numeric debt signal receives `absent`. Deadline-only tables are not numeric debt signals. |
 | Coverage | README `Dữ liệu có đến hết …` first; otherwise latest observed order/payment date with lineage source `observed`. A README date earlier than a record is `reconcile`. |
 | Closing debt | For every non-cancelled, non-excluded order, a confirmed non-negative receivable is reconciled as `max(total - payments_through_last_day, 0)`. |
+| Paid-to-date | When the order source exposes `Khách đã trả`/`Đã thu`, every order is reconciled against payments through `last_day`; mismatch → `reconcile`. |
 | Money sign | Negative totals/payments → `amount`; zero payments are retained and counted in lineage. |
-| Money unit | Default source currency is VND; an explicit reviewed `nghìn đồng` convention is converted by 1,000. Unsupported stated scales → `amount`. |
+| Money unit | Default source currency is VND. Global VND/đồng → ×1; nghìn/ngàn VND/đồng → ×1,000. Numeric factors, bare `k`/nghìn, foreign, scoped or conflicting declarations → `amount`. |
 | Missing channel | Remains `partial`; D01 does not infer `Store` or absence of marketplace orders. |
 
 ## 3. Files changed
@@ -97,6 +100,10 @@ pipeline, scorer or model code beyond inheriting the C01-fixes base commit.
 - [x] Markdown `### Công nợ` sections are debt hints even when the mapping is in later lines.
 - [x] POS payment siblings missing date, order id, or amount are all rejected as `partial`.
 - [x] Global `nghìn VND` is converted; unknown declarations such as JPY are `amount`.
+- [x] `absent` requires every physical `file::sheet` to match a reviewed mapping/profile.
+- [x] A recognised `SoQuy_*` family rejects siblings missing two or all required fields.
+- [x] Numeric/bare money factors (`1.000`, `1000`, `x1000`, bare nghìn/k) are `amount`.
+- [x] `paid_to_date` mismatch is `reconcile`; successful lineage records checks/mismatches.
 
 ## 5. Verification run
 
@@ -113,13 +120,14 @@ Local Windows checkout results at the review-fix revision:
 
 | Check | Result |
 |---|---|
-| D01 + evidence-runner focused tests | 20 passed |
+| D01 + evidence-runner focused tests | 21 passed |
 | Reviewed raw development sources | `biz_109`: 33,065 orders / 36,974 payments; `biz_124`: 51,044 / 51,238 |
 | Closing reconciliation | `biz_124`: 47,852 applicable orders checked, 0 mismatch |
+| Paid-to-date reconciliation | `biz_109`: 33,065 checked; `biz_124`: 51,044 checked; 0 mismatch |
 | Missing-channel capability | `biz_106`, `biz_129`: typed `partial`, no inferred channel |
 | Deadline-only capability | `biz_116`, `biz_118`: `absent` |
 | Smoke | 24/24 records; local proxy 21 correct, 0 wrong, 3 abstain |
-| Full suite | 275 passed in 31.616s |
+| Full suite | 276 passed in 33.302s |
 | `git diff --check` / compile | Pass |
 
 The proxy score is local and not an official competition score.

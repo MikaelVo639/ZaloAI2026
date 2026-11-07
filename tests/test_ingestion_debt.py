@@ -293,6 +293,56 @@ class DebtLedgerTests(_Shop):
             load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
         self.assertEqual(caught.exception.code, "column_missing")
 
+    def test_absent_requires_every_file_and_sheet_to_have_a_reviewed_mapping(self):
+        root = self.data / "shop"
+        root.mkdir(parents=True)
+        listed_only = """# Shop
+## File
+- `orders.csv`
+- `payments.csv`
+- `customers.csv`
+"""
+        (root / "README.md").write_text(listed_only, encoding="utf-8")
+        for name, rows in {
+            "orders.csv": [["Mã", "Ngày"], ["D1", "01/01/2026"]],
+            "payments.csv": [["Mã đơn", "Ngày thu", "Tiền thu"],
+                             ["D1", "02/01/2026", "50"]],
+            "customers.csv": [["Mã KH", "Tên"], ["K1", "An"]],
+        }.items():
+            with (root / name).open("w", encoding="utf-8-sig", newline="") as stream:
+                csv.writer(stream).writerows(rows)
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+        self.assertEqual(caught.exception.code, "column_missing")
+        self.assertIn("payments.csv::payments", caught.exception.diagnostics["sources"])
+
+        for name in ("orders.csv", "payments.csv", "customers.csv"):
+            (root / name).unlink()
+        from openpyxl import Workbook
+
+        book = Workbook()
+        orders = book.active
+        orders.title = "DonHang"
+        orders.append(["Mã", "Ngày"])
+        orders.append(["D1", "01/01/2026"])
+        payments = book.create_sheet("ThuTien")
+        payments.append(["Mã đơn", "Ngày thu", "Tiền thu"])
+        payments.append(["D1", "02/01/2026", "50"])
+        book.save(root / "BaoCao.xlsx")
+        book.close()
+        partial_sheet = """# Shop
+## File
+- `BaoCao.xlsx`
+## Cột trong `BaoCao.xlsx`, sheet `DonHang`
+- **Mã**: mã đơn
+- **Ngày**: ngày bán
+"""
+        (root / "README.md").write_text(partial_sheet, encoding="utf-8")
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+        self.assertEqual(caught.exception.code, "column_missing")
+        self.assertIn("BaoCao.xlsx::ThuTien", caught.exception.diagnostics["sources"])
+
     def test_incomplete_second_payment_file_is_not_silently_skipped(self):
         readme = README.replace("- `customers.csv`\n", "- `customers.csv`\n- `payments_2.csv`\n")
         readme += """
@@ -352,6 +402,23 @@ class DebtLedgerTests(_Shop):
             load_debt_ledger(self.catalog(readme=unknown), RULEBOOK)
         self.assertEqual(caught.exception.code, "amount")
 
+        unsupported_scales = (
+            "Đơn vị tiền: 1.000 VND.",
+            "Đơn vị tiền: 1000 đồng.",
+            "Đơn vị tiền: x1000 VND.",
+            "Các cột tiền tính bằng nghìn.",
+            "Số tiền ghi theo ngàn (k).",
+        )
+        for declaration in unsupported_scales:
+            with self.subTest(declaration=declaration):
+                readme = README.replace(
+                    "- Dữ liệu có đến hết 31/01/2026.",
+                    f"- Dữ liệu có đến hết 31/01/2026.\n- {declaration}",
+                )
+                with self.assertRaises(DebtSourceError) as caught:
+                    load_debt_ledger(self.catalog(readme=readme), RULEBOOK)
+                self.assertEqual(caught.exception.code, "amount")
+
     def test_coded_customer_keeps_real_code_even_when_display_name_is_walk_in(self):
         customers = [["Mã KH", "Khách hàng"], ["K1", "Khách lẻ"], ["K2", "Bình"]]
         ledger = load_debt_ledger(self.catalog(customers=customers), RULEBOOK)
@@ -401,7 +468,7 @@ class DebtLedgerTests(_Shop):
 File máy POS xuất ra.
 ## File
 - `orders.csv`
-- `payments.csv`
+- `SoQuy_1.csv`
 - `customers.csv`
 ## Quy ước
 - **Công nợ**: mỗi lần khách trả tiền cho một đơn là một dòng, **Giá trị** là số tiền trả lần đó; **Tổng sau giảm giá** là số khách phải trả cho cả đơn.
@@ -418,7 +485,7 @@ File máy POS xuất ra.
                 ["D1", "01/01/2026", "Xong", "100", "Ghi nợ", "Store", "K1",
                  "Tên trên đơn", "50"],
             ],
-            "payments.csv": [
+            "SoQuy_1.csv": [
                 ["Mã phiếu", "Thời gian", "Mã hóa đơn", "Phương thức thanh toán",
                  "Giá trị"],
                 ["P1", "02/01/2026", "D1", "Tiền mặt", "50"],
@@ -436,24 +503,38 @@ File máy POS xuất ra.
         self.assertEqual(ledger.lineage["columns"]["orders"][0]["origin"],
                          "debt_pos_kiotviet.v1")
 
-        listed = readme.replace("- `customers.csv`", "- `customers.csv`\n- `payments_2.csv`")
+        listed = readme.replace("- `customers.csv`", "- `customers.csv`\n- `SoQuy_2.csv`")
         (root / "README.md").write_text(listed, encoding="utf-8")
         incomplete_sources = (
             (["Mã hóa đơn", "Giá trị"], ["D1", "20"]),
             (["Mã hóa đơn", "Thời gian"], ["D1", "03/01/2026"]),
             (["Thời gian", "Giá trị"], ["03/01/2026", "20"]),
+            (["Mã phiếu", "Mã hóa đơn"], ["P2", "D1"]),
+            (["Mã hóa đơn"], ["D1"]),
+            (["Giá trị"], ["20"]),
         )
         for header, row in incomplete_sources:
             with self.subTest(missing=set(("Mã hóa đơn", "Thời gian", "Giá trị"))
                               - set(header)):
-                with (root / "payments_2.csv").open(
+                with (root / "SoQuy_2.csv").open(
                         "w", encoding="utf-8-sig", newline="") as stream:
                     csv.writer(stream).writerows([header, row])
                 with self.assertRaises(DebtSourceError) as caught:
                     load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
                 self.assertEqual(caught.exception.code, "partial")
 
-        with (root / "payments_2.csv").open(
+        files["orders.csv"][1][-1] = "70"
+        with (root / "orders.csv").open(
+                "w", encoding="utf-8-sig", newline="") as stream:
+            csv.writer(stream).writerows(files["orders.csv"])
+        with (root / "SoQuy_2.csv").open(
+                "w", encoding="utf-8-sig", newline="") as stream:
+            csv.writer(stream).writerows([["Mã hóa đơn", "Thời gian", "Giá trị"]])
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+        self.assertEqual(caught.exception.code, "reconcile")
+
+        with (root / "SoQuy_2.csv").open(
                 "w", encoding="utf-8-sig", newline="") as stream:
             csv.writer(stream).writerows([
                 ["Mã hóa đơn", "Thời gian", "Giá trị"],
@@ -461,6 +542,8 @@ File máy POS xuất ra.
             ])
         complete = load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
         self.assertEqual((len(complete.orders), len(complete.payments)), (1, 2))
+        self.assertEqual(sum(payment.amount for payment in complete.payments), Decimal(70))
+        self.assertEqual(complete.lineage["checks"]["paid_to_date_checked"], 1)
 
     def test_debt_convention_without_column_mapping_is_partial_not_absent(self):
         template = """# Shop
