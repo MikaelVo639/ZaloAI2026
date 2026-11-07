@@ -37,6 +37,16 @@ class Rules:
     product_group_share: bool = False   # mẫu số tỉ trọng nhóm hàng: cả shop, gồm phí phục vụ
     customer_group: bool = False        # nhóm khách: theo cột; đơn vãng lai không thuộc nhóm nào
     customer_group_share: bool = False  # tỉ trọng nhóm khách: chia doanh thu cả shop cùng kỳ
+    # S01 (contract C01, docs/AGENT_02_CONTRACT.md §4-§5)
+    calendar_month: bool = False        # "Tháng M/Y": cả tháng, ngày 1 đến hết ngày cuối tháng
+    boolean_answer: bool = False        # format boolean: true / false
+    trend_rule: bool = False            # the rulebook defines "tăng liên tục" / "xu hướng" itself
+    table_answer: bool = False          # format table: {"columns", "rows"}, ô số là JSON number
+    until_end_of_day: bool = False      # "đến hết ngày X": tình trạng lúc hết ngày, từ đầu dữ liệu
+    debt_orders: bool = False           # đơn tính vào nợ: không huỷ, đơn trả hàng vẫn tính
+    debt_at_date: bool = False          # nợ một đơn tại X: tổng đơn (gồm phí giao) trừ khoản trả đến X
+    debt_by_customer: bool = False      # nợ theo khách: khách lẻ vào tổng nợ, không có dòng
+    debt_excluded: bool = False         # đơn COD / sàn: không phải khách nợ
     rule_rows: tuple[tuple[str, str], ...] = ()  # (feature, original rulebook line) used as evidence
 
     def row(self, feature: str) -> str | None:
@@ -87,6 +97,12 @@ def read_rules(rulebook: str) -> Rules:
             return False
         features[feature] = line
         return True
+
+    def defines_trend(folded: str) -> bool:
+        """Recognize a trend definition without mistaking sort-order rules for one."""
+        return ("lien tuc" in folded or "xu huong" in folded
+                or ("doanh thu" in folded
+                    and ("tang dan" in folded or "giam dan" in folded)))
 
     money = _find(rows, "ban duoc bao nhieu tien", "thu ve bao nhieu tien")
     return Rules(
@@ -148,5 +164,23 @@ def read_rules(rulebook: str) -> Rules:
                                     "chia cho doanh thu ca shop"),
         unit_quantity=enable("unit_quantity", _find(rows, "ban duoc bao nhieu don vi"),
                              "don vi co ban la", "mat hang co don vi co ban khac khong tinh"),
+        calendar_month=enable("calendar_month", "thang m/y" if "thang m/y" in rows else None,
+                              "ca thang", "ngay 1", "ngay cuoi thang"),
+        boolean_answer=enable("boolean_answer", "boolean" if "boolean" in rows else None,
+                              "true", "false"),
+        trend_rule=any(defines_trend(key) for key in rows)
+        or any(defines_trend(folded) for folded, _ in lines),
+        table_answer=enable("table_answer", "table" if "table" in rows else None,
+                            "columns", "rows", "json number"),
+        until_end_of_day=enable("until_end_of_day", _find(rows, "den het ngay x"),
+                                "tinh trang luc het ngay do", "tu dau du lieu"),
+        debt_orders=enable("debt_orders", _find(rows, "don duoc tinh vao no"),
+                           "khong huy", "don tra hang van tinh"),
+        debt_at_date=enable("debt_at_date", _find(rows, "no mot don tai ngay x"),
+                            "tong don", "gom phi giao", "khoan tra den het ngay x"),
+        debt_by_customer=enable("debt_by_customer", _find(rows, "no theo khach"),
+                                "khach le", "tong no", "khong co dong"),
+        debt_excluded=enable("debt_excluded", _find(rows, "don cod", "san tmdt"),
+                             "khong phai khach no", "bo khoi cong no"),
         rule_rows=tuple(features.items()),
     )

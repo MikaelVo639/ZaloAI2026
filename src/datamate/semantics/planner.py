@@ -120,6 +120,10 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         text, reference = comparison
     if share and not re.search(rf"\b{_REVENUE}\b", text):
         text = text + " doanh thu"  # "nhóm X đóng góp bao nhiêu % tổng doanh thu"
+    contract = _increasing(text, today, rules) or _debt_table(text, today, rules)
+    if contract is not None:
+        # C01 intents take no filter, group, share or comparison: anything else abstains.
+        return contract if contract and not (filters or group or reference) else None
     if not reference and not group:
         special = (_months(text, today, rules) or _customers(text, today, rules)
                    or _thresholds(text, today, rules))
@@ -279,6 +283,127 @@ def _months(text: str, today: date, rules: Rules) -> Plan | None | bool:
     return Plan("revenue", min(p[0] for p in periods), max(p[1] for p in periods),
                 evidence=_rows(rules, *used), periods=periods,
                 shape="best_period" if best else "series")
+
+
+# ---------------------------------------------------------------- S01: revenue_increasing
+# Contract C01 §4: "doanh thu có tăng liên tục qua các tháng ...", answered by a boolean.
+_TREND = re.compile(
+    r"\b(?:co )?tang lien tuc\b"
+    r"|\b(?:doanh thu |dthu )?thang sau co luon cao hon thang truoc\b")
+_PAIR = re.compile(r"\bthang (\d{1,2})/(\d{4}) cao hon thang (\d{1,2})/(\d{4})\b")
+_TREND_WORDS = re.compile(
+    r"\b(?:xu huong|co phai|tu|qua|roi|r|den|toi|va|cac|thang|(?:\d+|hai|ba|bon|nam|sau) thang|"
+    r"khong|ko|k|hok|hong|khum|ha|vay|a|nhi|nhe|z)\b")
+_NEGATIVE_TREND = re.compile(r"\b(?:giam|tut|di xuong|it nhat|toi thieu|phan tram|lan)\b")
+
+
+def _increasing(text: str, today: date, rules: Rules) -> Plan | None | bool:
+    """None: not a trend question; False: a trend question this grammar must not answer."""
+    text = re.sub(r"\s+", " ", text).strip()
+    trend = _TREND.search(text)
+    pairs = _PAIR.findall(text)
+    if not trend and not (pairs and re.search(r"\bco phai\b", text)):
+        return None
+    if not (rules.boolean_answer and rules.calendar_month) or rules.trend_rule:
+        return False
+    if not re.search(rf"\b{_REVENUE}\b", text) or _NEGATIVE_TREND.search(text):
+        return False  # "số đơn tăng liên tục", "giảm liên tục", "tăng ít nhất 10 %"
+    reduced = _PAIR.sub(" ", text) if pairs else text
+    stated = re.search(r"\b(\d+|hai|ba|bon|nam|sau) thang\b", reduced)
+    count = (_COUNT_WORD.get(stated.group(1)) or int(stated.group(1))) if stated else None
+    if stated:
+        reduced = reduced[:stated.start()] + " thang " + reduced[stated.end():]
+    span = re.search(r"\btu thang (\d{1,2})/(\d{4}) (?:den|toi) (?:het )?thang (\d{1,2})/(\d{4})\b",
+                     reduced)
+    used = ["boolean_answer", "calendar_month"]
+    if span:
+        if not rules.inclusive_range:
+            return False
+        used.append("inclusive_range")
+        months: list[tuple[int, int]] = []
+        year, month = int(span.group(2)), int(span.group(1))
+        last = (int(span.group(4)), int(span.group(3)))
+        while (year, month) <= last and len(months) <= 12:
+            months.append((year, month))
+            month, year = (month + 1, year) if month < 12 else (1, year + 1)
+        reduced = reduced[:span.start()] + " " + reduced[span.end():]
+    else:
+        months = [(int(y), int(m)) for m, y in re.findall(_BARE_MONTH, reduced)]
+        reduced = re.sub(r"\b(?:thang )?" + _BARE_MONTH, " ", reduced)
+        if not months and pairs:
+            # A pair-only wording still names the complete chain: "B cao hơn A và C cao hơn B".
+            # Build A, B, C here; the exact-pair check below rejects gaps or a broken chain.
+            months = [(int(pairs[0][3]), int(pairs[0][2]))]
+            months.extend((int(y1), int(m1)) for m1, y1, _, _ in pairs)
+    if not 2 <= len(months) <= 12 or any(b <= a for a, b in zip(months, months[1:])):
+        return False  # one month, duplicates, or months not in time order
+    if count is not None and count != len(months):
+        return False
+    if pairs:
+        # "có phải tháng B cao hơn tháng A và tháng C cao hơn tháng B": exactly every
+        # consecutive pair, later month first.
+        stated_pairs = [((int(y1), int(m1)), (int(y2), int(m2))) for m1, y1, m2, y2 in pairs]
+        if stated_pairs != [(b, a) for a, b in zip(months, months[1:])]:
+            return False
+    reduced = _TREND.sub(" ", reduced)
+    reduced = re.sub(rf"\b(?:tong )?{_REVENUE}\b|\bcao hon\b", " ", reduced)
+    reduced = _TREND_WORDS.sub(" ", reduced)
+    if _FILLERS.sub(" ", reduced).strip():
+        return False
+    try:
+        periods = tuple(_month(y, m) for y, m in months)
+    except ValueError:
+        return False
+    if periods[-1][1] > today:
+        return False  # a month still running or in the future
+    return Plan("revenue_increasing", periods[0][0], periods[-1][1],
+                evidence=_rows(rules, *used), periods=periods)
+
+
+# ---------------------------------------------------------------- S01: top_debt_customers
+# Contract C01 §5: "k khách nợ nhiều nhất đến hết ngày X, mỗi người còn nợ bao nhiêu".
+_DEBT = re.compile(r"\b(?:dang no|con no|cong no|no)\b")
+_DEBT_TOP = re.compile(
+    r"\b(?:top )?(\d+) (?:khach hang|khach)(?: nao)?(?: co)? (?:dang |con )?(?:cong )?no "
+    r"(?:nhieu|nhiu|lon|cao) nhat\b")
+_DEBT_AMOUNTS = re.compile(
+    rf"\bmoi nguoi con no {_AMOUNT}\b|\bkem so tien con no\b"
+    r"|\b(?:va )?so (?:tien )?no cua tung nguoi\b|\b(?:cho (?:minh |toi )?)?bang\b")
+_DEBT_DATE = re.compile(rf"\b(?:tinh )?den het (?:ngay )?{_DATE}\b"
+                        r"|\b(?:tinh )?den (?:het )?hom nay\b")
+_DEBT_WORDS = re.compile(r"\b(?:giup minh|xem giup|liet ke|cho minh|cho toi|cho|tinh|ha|a|nhe|vay)\b")
+
+
+def _debt_table(text: str, today: date, rules: Rules) -> Plan | None | bool:
+    """None: not a debt ranking question; False: one this grammar must not answer."""
+    text = re.sub(r"\s+", " ", text).strip()
+    top = _DEBT_TOP.search(text)
+    if not top:
+        return None if not (_DEBT.search(text) and re.search(rf"\b{_CUSTOMER}\b", text)
+                            and re.search(r"\bnhat\b", text)) else False
+    features = ("table_answer", "until_end_of_day", "debt_orders", "debt_at_date",
+                "debt_by_customer", "debt_excluded", "customer_identity", "ties_by_code")
+    if not all(getattr(rules, feature) for feature in features):
+        return False
+    reduced = text[:top.start()] + " " + text[top.end():]
+    if not _DEBT_AMOUNTS.search(reduced):
+        return False  # "khách nào nợ nhiều nhất" without the amounts is not a table (C01 §5)
+    reduced = _DEBT_AMOUNTS.sub(" ", reduced)
+    moment = _DEBT_DATE.search(reduced)
+    if not moment:
+        return False  # no "đến hết ngày X": the snapshot date is unknown
+    try:
+        day = (date(int(moment.group(3)), int(moment.group(2)), int(moment.group(1)))
+               if moment.group(1) else today)
+    except ValueError:
+        return False
+    reduced = reduced[:moment.start()] + " " + reduced[moment.end():]
+    if _FILLERS.sub(" ", _DEBT_WORDS.sub(" ", reduced)).strip():
+        return False
+    top_k = int(top.group(1))
+    if not 1 <= top_k <= 50 or day > today:
+        return False
+    return Plan("top_debt_customers", day, day, top_k, _rows(rules, *features))
 
 
 # ---------------------------------------------------------------- SEM-02: customers
