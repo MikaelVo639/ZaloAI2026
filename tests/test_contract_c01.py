@@ -147,6 +147,20 @@ OVERPAID = DebtLedger((
     date(2026, 4, 1), X, uses_customer_codes=True)
 OVERPAID_FLOW_EXPECTED = [Decimal(150000), Decimal(30000)]  # [nợ thêm, trả được]
 
+# COD / marketplace orders are not customer debt (rulebook §4), even when marked "ghi nợ":
+# they add nothing to nợ thêm nor to tiền thu nợ. A plain credit order is the control.
+MARKETPLACE = DebtLedger((
+    order("D1", 100000, code="KH01", name="Khách mẫu A", excluded="marketplace"),
+    order("D2", 80000, code="KH01", name="Khách mẫu A", day=date(2026, 4, 2)),
+    order("D3", 50000, code="KH01", name="Khách mẫu A", day=date(2026, 4, 3), excluded="cod"),
+), (pay("D1", 30000, date(2026, 4, 5)), pay("D2", 20000, date(2026, 4, 2)),
+    pay("D2", 10000, date(2026, 4, 6)), pay("D3", 50000, date(2026, 4, 7))),
+    date(2026, 4, 1), X, uses_customer_codes=True)
+MARKETPLACE_ONLY = DebtLedger(MARKETPLACE.orders[:1], MARKETPLACE.payments[:1],
+                              date(2026, 4, 1), X, uses_customer_codes=True)
+MARKETPLACE_FLOW_EXPECTED = [Decimal(60000), Decimal(10000)]  # only D2 counts
+MARKETPLACE_COLLECTED_EXPECTED = Decimal(10000)
+
 
 def customer_key(debt_order: DebtOrder, ledger: DebtLedger) -> str | None:
     """Contract §6.5, restated: the code in a shop with codes, else the normalized name."""
@@ -178,15 +192,17 @@ def reference_debts(ledger: DebtLedger, x: date) -> dict:
     return {"rows": dict(rows), "total": total, "customers": len(rows)}
 
 
-def reference_flow(ledger: DebtLedger, start: date, end: date, key: str) -> list[Decimal]:
-    """Contract §7 debt_flow, restated: [nợ thêm, trả được] of one customer."""
+def reference_flow(ledger: DebtLedger, start: date, end: date,
+                   key: str | None = None) -> list[Decimal]:
+    """Contract §7, restated: [nợ thêm, trả được] of one customer (debt_flow), or of every
+    credit order when ``key`` is None (the second number is then debt_collected)."""
     payments = defaultdict(list)
     for payment in ledger.payments:
         payments[payment.order_id].append(payment)
     new = repaid = Decimal(0)
     for debt_order in ledger.orders:
-        if (not debt_order.on_credit or debt_order.state == "huy"
-                or customer_key(debt_order, ledger) != key):
+        if (not debt_order.on_credit or debt_order.state == "huy" or debt_order.excluded
+                or (key is not None and customer_key(debt_order, ledger) != key)):
             continue
         own = payments[debt_order.order_id]
         if start <= debt_order.day <= end:
@@ -205,7 +221,8 @@ def ledger_problems(ledger: DebtLedger) -> list[str]:
 
 
 class CustomerKeyAndFlowReferenceTest(unittest.TestCase):
-    """Reference cases from review C01-1 and C01-2; A01 reuses fixtures and expectations."""
+    """Reference cases from Agent reviews (customer keys, new debt, COD / marketplace);
+    A01 reuses the fixtures and expectations for its executor."""
 
     def test_shop_without_customer_codes_groups_by_name(self):
         self.assertEqual(reference_debts(NO_CODES, X), NO_CODES_EXPECTED)
@@ -225,8 +242,15 @@ class CustomerKeyAndFlowReferenceTest(unittest.TestCase):
         broken = DebtLedger((order("D1", 1000, code="KH01", name="A"),), (), X, X,
                             uses_customer_codes=False)
         self.assertEqual(ledger_problems(broken), ["customer_mode"])
-        for ledger in (NO_CODES, CODES_ALL_MISSING, SAME_NAME_TWO_CODES, OVERPAID):
+        for ledger in (NO_CODES, CODES_ALL_MISSING, SAME_NAME_TWO_CODES, OVERPAID, MARKETPLACE):
             self.assertEqual(ledger_problems(ledger), [])
+
+    def test_cod_and_marketplace_orders_are_not_debt_flow(self):
+        april = (date(2026, 4, 1), X)
+        self.assertEqual(reference_flow(MARKETPLACE_ONLY, *april, "KH01"), [0, 0])
+        self.assertEqual(reference_flow(MARKETPLACE, *april, "KH01"), MARKETPLACE_FLOW_EXPECTED)
+        self.assertEqual(reference_flow(MARKETPLACE, *april)[1], MARKETPLACE_COLLECTED_EXPECTED)
+        self.assertEqual(reference_debts(MARKETPLACE, X)["total"], Decimal(50000))
 
     def test_new_debt_is_never_negative(self):
         flow = reference_flow(OVERPAID, date(2026, 4, 1), date(2026, 4, 30), "KH01")

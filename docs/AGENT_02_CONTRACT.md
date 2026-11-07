@@ -1,8 +1,10 @@
 # Contract C01 — boolean, table và nguồn công nợ
 
-Trạng thái: **đề xuất đã hoàn tất; Data (@longlth2297) đã xác nhận ở `9c4e726`, chờ
-Agent (@tqhuy0602) kiểm lại** trên PR #23 và issue #15. Đã sửa theo review Agent lần 1
-(khoá khách theo loại shop, nợ thêm không âm) và ghi các lưu ý triển khai của Data vào §6.
+Trạng thái: **đề xuất đã hoàn tất; Data (@longlth2297) xác nhận ở `9c4e726`; Agent
+(@tqhuy0602) không chặn merge PR #27 ở `6dc6d7c`.** PR #23 đã merge; PR #27 mang phần sửa
+sau merge. Đã sửa theo các review Agent (khoá khách theo loại shop, nợ thêm không âm, bỏ COD
+/ sàn khỏi thu nợ, schema `lineage`, định nghĩa "mô tả đủ", đơn vị tiền, đối chiếu "đã trả")
+và ghi các lưu ý triển khai của Data vào §6.
 Thay bản đề xuất AGENT-02 trước đó.
 Liên quan SEM-02 #15, AGENT-02 #16, DATA-03 #14. Giữ nguyên SEM-01 #18 và SEM/DATA #22.
 
@@ -236,7 +238,20 @@ README train ghi công nợ theo một mẫu (có shop ghi tên cột kiểu `b�
 | `uses_customer_codes` | README / schema của shop (§6.5) | **không** suy ra từ việc có mã xuất hiện trên đơn |
 | `customer_id` | mã khách trên đơn, chỉ khi `uses_customer_codes` | đơn trống mã → `None` (khách lẻ), kể cả khi đơn có tên |
 | `customer_name` | tên từ danh sách khách hoặc trên đơn, giữ nguyên cách viết | shop không dùng mã: đây là căn cứ xác định khách |
-| `first_day`, `last_day` | ngày đặt sớm nhất; "Dữ liệu có đến hết dd/mm/yyyy" của README | README không ghi: `last_day` = ngày lớn nhất của đơn và khoản trả đã đọc, `lineage["coverage"] = "observed"` (có ghi: `"readme"`). Quy ước phòng thủ, chưa gặp trên train |
+| `first_day`, `last_day` | ngày đặt sớm nhất; "Dữ liệu có đến hết dd/mm/yyyy" của README | README không ghi: `last_day` = ngày lớn nhất của đơn và khoản trả đã đọc. Ghi vào `lineage["coverage"]` = `{"first_day", "last_day", "source"}` với `source` là `"readme"` hoặc `"observed"` (6.4.8). Quy ước phòng thủ, chưa gặp trên train |
+| Đơn vị tiền của `total`, `amount` | dòng README khai báo đơn vị tiền | quy tắc bên dưới; ghi vào `lineage["money"]` |
+
+**Đơn vị tiền.** Mọi số tiền trong ledger là **VND**. D01 đổi một lần lúc đọc, theo
+khai báo của README cho **toàn bộ** cột tiền công nợ:
+
+| README khai báo | Đơn vị (`lineage["money"]["unit"]`) | Hệ số |
+|---|---|---|
+| không khai báo | `vnd` | 1 |
+| "VND", "đồng" | `vnd` | 1 |
+| "nghìn đồng", "ngàn đồng", "nghìn VND", "ngàn VND" cho toàn bộ cột tiền | `thousand_vnd` | 1000 |
+| hệ số viết bằng số ("1.000 VND", "x1000"), "nghìn" / "k" không kèm đơn vị, "triệu" / "tỷ đồng", ngoại tệ (USD, EUR…), đơn vị khác nhau giữa các nguồn / cột | — | `DebtSourceError("amount")` → abstain |
+
+Không suy đơn vị từ độ lớn của số liệu.
 
 ### 6.3 Nhãn đóng
 
@@ -269,13 +284,23 @@ README train ghi công nợ theo một mẫu (có shop ghi tên cột kiểu `b�
    âm → `DebtSourceError("amount")`. Rulebook ghi "Hoàn tiền trả hàng không trừ", nên
    không coi khoản âm là hoàn tiền. Khoản trả bằng 0 giữ lại, không ảnh hưởng kết quả;
    số dòng như vậy ghi vào `lineage`. Đây là kiểm tra phòng thủ, chưa thấy trên train.
-4. **Đối chiếu** khi README có cột "còn nợ cuối dữ liệu": với mọi đơn không huỷ và không
-   `excluded`, nợ tính được tại `last_day` phải **bằng đúng** cột đó. Lệch một đơn →
+4. **Đối chiếu** với cột trạng thái cuối dữ liệu của bảng đơn, khi có. Lệch một đơn →
    `DebtSourceError("reconcile")`.
+   - Cột "còn nợ cuối dữ liệu": với mọi đơn không huỷ và không `excluded`, nợ tính được
+     tại `last_day` phải **bằng đúng** cột đó.
+   - Cột "đã trả" (ví dụ "Khách đã trả", "Đã thu"): với **mọi** đơn, tổng `DebtPayment.amount`
+     có `day <= last_day` phải **bằng đúng** cột đó. Kiểm tra này bắt được khoản trả bị sót
+     khi nguồn thu tiền tách nhiều file. Trên train, một shop có cột này và tổng khoản trả
+     khớp ở 33.065 / 33.065 đơn.
+   - Ghi số đơn đã đối chiếu và số lệch của từng cột vào `lineage["checks"]`.
 5. Rulebook của split phải có các dòng §4 "Đơn được tính vào nợ", "Nợ một đơn tại ngày X",
    "Đơn COD, đơn bán qua sàn TMĐT"; thiếu → `DebtSourceError("rules_missing")`.
 6. `DebtSourceError("absent")` chỉ khi **cả ba** điều sau đúng:
-   - README mô tả đủ mọi file của shop;
+   - README mô tả đủ mọi bảng của shop. "Mô tả đủ" nghĩa là **mỗi bảng** `file::sheet`
+     (CSV, từng sheet Excel, từng bảng SQLite trong catalog) có mục cột riêng trong README,
+     hoặc khớp một profile POS đã duyệt. Tên file trong mục `## File` chỉ là danh mục, chưa
+     đủ. Còn bảng nào chưa rõ nội dung (ví dụ workbook có sheet thu tiền mà README không
+     mô tả cột) → `DebtSourceError("column_missing")` → abstain, **không** `absent`;
    - không có dòng "Công nợ" nào;
    - không có bảng / cột nào mang nghĩa **số tiền** của nợ: khoản trả, đã trả, còn nợ,
      tổng phải thu kèm khoản trả.
@@ -291,11 +316,53 @@ README train ghi công nợ theo một mẫu (có shop ghi tên cột kiểu `b�
 7. `uses_customer_codes=False` thì **mọi** `customer_id` là `None`; có đơn mang mã →
    `DebtSourceError("customer_mode")`. Không xác định được shop có dùng mã hay không →
    cùng mã lỗi, abstain.
-8. `lineage` ghi:
-   - file::bảng / sheet đã gộp cho từng vai trò, cột đã dùng cho từng trường, dòng README;
-   - căn cứ của `uses_customer_codes`, nguồn coverage (`readme` / `observed`), dòng luật của split;
-   - tập nhãn thực gặp (6.3);
-   - kết quả kiểm tra 0–4 và 7: số đơn, số khoản trả, số trùng / mồ côi, số đơn đã đối chiếu và số lệch.
+8. `lineage` là một dict có các khoá cố định dưới đây, để A01 đọc bằng chứng theo cùng một
+   schema (giá trị ví dụ, tổng hợp):
+
+   ```json
+   {
+     "adapter_version": "readme_debt.v1",
+     "sources": {"orders": ["orders.csv"], "payments": ["payments.csv"]},
+     "columns": {
+       "orders": [{"source": "orders.csv", "origin": "readme", "fields": {
+         "order_id": "Mã đơn", "order_day": "Ngày đặt", "order_total": "Tổng phải thu",
+         "status": "Trạng thái", "channel": "Kênh", "payment_method": "Hình thức thanh toán",
+         "customer_id": "Mã khách", "closing_debt": "Còn nợ", "paid_to_date": "Đã trả"
+       }}],
+       "payments": [{"source": "payments.csv", "origin": "readme", "fields": {
+         "order_id": "Mã đơn", "payment_day": "Ngày thu", "payment_amount": "Tiền thu"
+       }}]
+     },
+     "readme": ["**Công nợ**: mỗi lần khách trả tiền cho một đơn là một dòng, …"],
+     "rules": ["| Đơn được tính vào nợ | … |", "| Nợ một đơn tại ngày X | … |"],
+     "checks": {"orders_unique": 2, "payments_joined": 3, "zero_payments": 0,
+                "orphan_payments": 0, "closing_debt_present": true, "closing_debt_checked": 2,
+                "closing_debt_mismatches": 0, "paid_to_date_present": true,
+                "paid_to_date_checked": 2, "paid_to_date_mismatches": 0},
+     "labels": {"payment:ghi no": 2, "channel:store": 2, "state:hoan thanh": 2},
+     "coverage": {"first_day": "2025-01-02", "last_day": "2026-08-14", "source": "readme"},
+     "money": {"unit": "vnd", "multiplier_to_vnd": "1", "evidence": []},
+     "customer_identity": {"uses_customer_codes": true,
+                           "basis": [{"source": "orders.csv", "column": "Mã khách"}]}
+   }
+   ```
+
+   - `adapter_version`: phiên bản adapter đã đọc ledger.
+   - `sources`: danh sách nguồn theo từng vai trò. Nguồn XLSX hoặc SQLite có thể ghi theo
+     dạng `file::sheet` hoặc `file::bảng`.
+   - `columns`: danh sách mapping theo từng vai trò. Mỗi mapping có `source`, `origin` và
+     `fields` ánh xạ trường ngữ nghĩa sang tên cột gốc.
+   - `readme`, `rules`: dòng README và dòng luật của split đã dùng.
+   - `checks`: kết quả kiểm tra 0–4 và 7 (số đơn, số khoản trả, trùng / mồ côi, số đơn đã
+     đối chiếu "còn nợ" / "đã trả" và số lệch).
+   - `labels`: số dòng theo từng nhãn, với khoá `state:<nhãn>`, `payment:<nhãn>` hoặc
+     `channel:<nhãn>` (6.3).
+   - `coverage`: `first_day`, `last_day` (ISO) và `source` (`"readme"` | `"observed"`).
+   - `money`: `unit` (`"vnd"` | `"thousand_vnd"`), `multiplier_to_vnd` (chuỗi số), `evidence`
+     (các dòng README khai báo đơn vị; rỗng khi không khai báo).
+   - `customer_identity`: `uses_customer_codes` và danh sách căn cứ (`basis`) có `source`,
+     `column` (§6.5).
+   - D01 được thêm khoá khác (ví dụ `mappings`) nhưng không đổi nghĩa các khoá trên.
 
 ### 6.5 Khoá khách: shop dùng mã và shop không dùng mã
 
@@ -338,9 +405,12 @@ hiện trong dữ liệu. Nên chuyển sang cùng cờ do Data cung cấp; vi�
 | `debt_total` | `start == end == X` | number | tổng nợ còn lại tại X, **kể cả khách lẻ** | §4 ba dòng ở 6.4.5, §2 "Đến hết ngày X" |
 | `debt_total` + `Threshold("order", "age_days", ">", N)` | như trên | number | chỉ đơn có tuổi `X − day > N` ("quá / hơn / trên N ngày"); "từ N ngày trở lên" là `">="` | + §4 "Tuổi nợ", §2 "Quá N…" |
 | `debt_customer_count` | `start == end == X` | number | số khoá khách (không tính khách lẻ) có nợ > 0 | + §3 "Xác định khách", §4 "Nợ theo khách" |
-| `debt_collected` | kỳ `start..end` | number | tổng khoản trả có `start <= day <= end`, `day > ngày đặt`, của đơn `on_credit`, không huỷ (kể cả đơn kỳ trước, đơn trả hàng) | §4 "Nợ thêm, trả nợ, thu nợ trong kỳ" |
-| `debt_flow` + `Filter("customer", tên)` | kỳ `start..end` | list `[nợ thêm, trả được]` | nợ thêm = tổng theo đơn của `max(total − paid_on_order_day, 0)`, với các đơn `on_credit`, không huỷ, đặt trong kỳ; trả được như `debt_collected`; chỉ đơn của khách đó (khoá §6.5) | + §3 "Xác định khách" |
+| `debt_collected` | kỳ `start..end` | number | tổng khoản trả có `start <= day <= end`, `day > ngày đặt`, của đơn `on_credit`, không huỷ, `excluded == ""` (bỏ COD / sàn; kể cả đơn kỳ trước, đơn trả hàng) | §4 "Nợ thêm, trả nợ, thu nợ trong kỳ", "Đơn COD, đơn bán qua sàn TMĐT" |
+| `debt_flow` + `Filter("customer", tên)` | kỳ `start..end` | list `[nợ thêm, trả được]` | nợ thêm = tổng theo đơn của `max(total − paid_on_order_day, 0)`, với các đơn `on_credit`, không huỷ, `excluded == ""`, đặt trong kỳ; trả được như `debt_collected`; chỉ đơn của khách đó (khoá §6.5) | + §3 "Xác định khách" |
 
+- Đơn COD / sàn (`excluded != ""`) **không** vào `debt_collected` hay `debt_flow`, kể cả khi
+  hình thức ghi là ghi nợ (`on_credit=True`): rulebook §4 "không phải khách nợ … bỏ khỏi
+  công nợ". Ví dụ: đơn sàn 100.000, khách trả 30.000 sau ngày đặt → nợ thêm 0, trả được 0.
 - Nợ thêm của **một đơn** không bao giờ âm:
 
   ```python
@@ -415,10 +485,21 @@ hiện trong dữ liệu. Nên chuyển sang cùng cờ do Data cung cấp; vi�
 - trả dư không tạo nợ âm;
 - bằng nhau ở ranh giới top-k → theo mã; ít hơn k khách nợ; không ai nợ → abstain;
 - ô số là int, tên cột đúng `DEBT_TABLE_COLUMNS`;
-- đối chiếu "Còn nợ" lệch → abstain.
+- đối chiếu "Còn nợ" lệch → abstain; tổng khoản trả lệch cột "đã trả" (sót khoản trả ở
+  file thu tiền thứ hai) → abstain;
+- README chỉ liệt kê tên file trong `## File`, hoặc workbook có sheet thu tiền chưa mô tả cột
+  → `column_missing`, **không** `absent`;
+- đơn vị tiền: không khai báo / "đồng" → ×1; "nghìn đồng" cho toàn bộ cột tiền → ×1000;
+  "x1000", "k", "triệu đồng", ngoại tệ, hai nguồn khác đơn vị → `amount`;
+- `lineage["coverage"]["source"]` là `"observed"` khi README không ghi ngày cuối dữ liệu.
 
-**`debt_flow`** (A01): tổng đơn 100.000, trả trong ngày đặt 120.000 → nợ thêm 0 (fixture
-trong `tests/test_contract_c01.py`); khoản trả sau ngày đặt chỉ vào "trả được".
+**`debt_flow` / `debt_collected`** (A01, fixture trong `tests/test_contract_c01.py`):
+
+- tổng đơn 100.000, trả trong ngày đặt 120.000 → nợ thêm 0 (`OVERPAID`);
+- khoản trả sau ngày đặt chỉ vào "trả được";
+- đơn sàn có `on_credit=True` (100.000, trả 30.000 sau ngày đặt) → `[0, 0]` (`MARKETPLACE_ONLY`);
+- cùng khách thêm một đơn ghi nợ thường và một đơn COD → chỉ đơn thường được tính:
+  `[60.000, 10.000]`, thu nợ cả shop 10.000 (`MARKETPLACE`).
 
 **Cả hai:** thiếu nguồn / luật, worker lỗi / timeout → abstain; evidence `code` / `result`
 khớp đáp án; backend cũ từ chối intent mới (`test_contract_c01.py`); regression SEM-02
@@ -434,10 +515,14 @@ script đọc nhãn train và dựng ledger thủ công cho từng business (án
 uv run python <thư mục C01>/verify/verify_c01_train.py --data-dir data/raw/train --holdout outputs/business_split.json
 ```
 
-- Script `C01/verify/verify_c01_train.py` và log lần chạy 06/11
-  `C01/verify/logs/verify_c01_train_20261106.txt` nằm trong thư mục bàn giao C01 (ngoài
-  repo), không commit. Log ghi: boolean 22 / 22 (bỏ 1 câu của business validation),
-  table 7 / 7, number / list 46 / 46, đối chiếu "Còn nợ" lệch 0 đơn ở cả 2 shop có cột này.
+- Bộ verify đóng gói thành `C01_verify_20261107.zip` (SHA256 `16ee25fa49f6ed073e602c8a34fef8fac4ded2509583f62689da179afae0f866`),
+  chia sẻ cho nhóm qua thư mục chung, không commit; đường dẫn nằm trong mô tả PR C01. Gồm:
+  - script `verify/verify_c01_train.py`;
+  - log mới nhất `verify/logs/verify_c01_train_20261107.txt`, chạy sau khi bỏ COD / sàn khỏi
+    thu nợ và nợ thêm. Kết quả không đổi, vì ở 3 shop đã kiểm không có đơn ghi nợ nào là COD / sàn;
+  - `verify/MANIFEST.json`.
+- Log ghi: boolean 22 / 22 (bỏ 1 câu của business validation), table 7 / 7, number / list
+  46 / 46, đối chiếu "Còn nợ" lệch 0 đơn ở cả 2 shop có cột này.
 - Đầu log ghi revision của checkout và SHA256 của `questions.jsonl`, `answers.jsonl`,
   `rulebook.md`, manifest holdout. `C01/verify/MANIFEST.json` ghi SHA256 của script, log
   và từng file dữ liệu của các business đã dùng, để reviewer kiểm đúng input trước khi
@@ -452,7 +537,7 @@ uv run python <thư mục C01>/verify/verify_c01_train.py --data-dir data/raw/tr
 |---|---|---|---|
 | Semantics | @Kurosuz | tên intent, Plan, luật bắt buộc, nghĩa "tăng liên tục", phạm vi abstain | đề xuất trong PR C01 |
 | Data | @longlth2297 | nguồn / cột / nhãn §6, kiểm tra 6.4, cách xác định `uses_customer_codes` §6.5, mã lỗi `absent` / `customer_mode` | **đã xác nhận** ở `9c4e726`; các lưu ý triển khai của Data đã ghi vào §6.2–6.4 (không đổi interface) |
-| Agent | @tqhuy0602 | executor / evidence / validation §4–§5, khoá khách §6.5, nợ thêm §7, tương thích backend, regression §10 | review lần 1 xong (2 điểm đã sửa), chờ kiểm lại |
+| Agent | @tqhuy0602 | executor / evidence / validation §4–§5, khoá khách §6.5, nợ thêm §7, tương thích backend, regression §10 | **không chặn merge** PR #27 ở `6dc6d7c`; 4 điểm P2 (schema `lineage["coverage"]`, định nghĩa "mô tả đủ", đơn vị tiền, đối chiếu "đã trả") đã ghi vào §6 |
 
 Chỉ coi C01 xong khi cả ba xác nhận trên PR và issue #15. Phần kiểm tra format
 boolean / table hiện có **không** được coi là đã trả lời được các câu này.
