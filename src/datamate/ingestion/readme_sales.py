@@ -411,10 +411,23 @@ def _matching_tables(catalog: Catalog, section: Section) -> list[Table]:
             if t.path in files and (section.sheet is None or t.name == section.sheet)]
 
 
-def _records(table: Table, columns: Iterable[str]) -> Iterator[tuple[int, dict[str, Any]]]:
+def _records(table: Table, columns: Iterable[str], *,
+             allowed_extra_columns: frozenset[str] | None = None
+             ) -> Iterator[tuple[int, dict[str, Any]]]:
     """Rows of ``table`` keyed by header; the header may sit below title rows (xlsx)."""
     needed = set(columns)
+
+    def validate_header(names: Iterable[str]) -> None:
+        if allowed_extra_columns is None:
+            return
+        unexpected = sorted(name for name in set(names) - needed - allowed_extra_columns
+                            if name and not re.fullmatch(r"_empty_\d+", name))
+        if unexpected:
+            raise ReadmeSalesError("SCHEMA_MISMATCH", "Source has undocumented columns",
+                                   table=table.key, unexpected=unexpected)
+
     if needed <= set(table.columns):
+        validate_header(table.columns)
         for ordinal, row in enumerate(iter_rows(table), 1):
             yield ordinal, row
         return
@@ -438,6 +451,7 @@ def _records(table: Table, columns: Iterable[str]) -> Iterator[tuple[int, dict[s
         if header is None:
             raise ReadmeSalesError("HEADER_NOT_FOUND", "README columns not found near the top",
                                    table=table.key)
+        validate_header(header)
         for ordinal, values in enumerate(rows, 1):
             if any(v is not None and (not isinstance(v, str) or v.strip()) for v in values):
                 yield ordinal, {name: value for name, value in zip(header, values) if name}
