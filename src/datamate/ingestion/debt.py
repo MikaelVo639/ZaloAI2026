@@ -80,6 +80,7 @@ def _field(meaning: str) -> str | None:
         "ma khach trong": "customer_id",
         "ten khach": "customer_name",
         "hinh thuc thanh toan": "payment_method",
+        "hinh thuc thanh toan cua don": "payment_method",
         "kenh ban": "channel",
         "nguon don": "channel",
         "thoi diem thu": "payment_day",
@@ -96,6 +97,10 @@ def _field(meaning: str) -> str | None:
     }
     if text in exact:
         return exact[text]
+    # "hình thức thanh toán của đơn: cash tiền mặt, …": the meaning, then its closed labels.
+    head = fold(meaning.split(":", 1)[0]).strip() if ":" in meaning else ""
+    if head in exact:
+        return exact[head]
     if text.startswith("ma don"):
         return "order_id"
     if text.startswith(("thoi diem thu", "ngay thu", "ngay thanh toan")):
@@ -291,6 +296,12 @@ def _section_fields(section: Section, references: dict[str, str]) -> dict[str, s
                 raise DebtSourceError("column_missing", "Several columns have one debt meaning",
                                       source=section.label, field=semantic)
             result[semantic] = column
+    if "customer_id" in result and "order_id" not in result and "customer_name" not in result:
+        # Customer list: "**KH**: tên" next to the customer code names the customer.
+        names = [column for column, meaning in section.columns.items()
+                 if fold(meaning).strip() == "ten"]
+        if len(names) == 1:
+            result["customer_name"] = names[0]
     return result
 
 
@@ -393,6 +404,45 @@ def _rule_rows(rulebook: str) -> tuple[str, ...]:
 
 
 _PAYMENT_FIELDS = frozenset({"order_id", "payment_day", "payment_amount"})
+_ORDER_FIELDS = frozenset({"order_id", "order_day", "status", "order_total", "payment_method"})
+# Any of these in the README or an order header means sales channels exist or may exist.
+_CHANNEL_WORDS = re.compile(
+    r"\b(?:kenh|nguon don|nguon ban|channel|source|platform|marketplace|san tmdt|"
+    r"san thuong mai|qua san|tren san|shopee|lazada|tiki|tiktok|thuong mai dien tu|tmdt|"
+    r"online)\b")
+
+
+def _channel_unrecorded(catalog: Catalog, section: Section, fields: dict[str, str]) -> bool:
+    """Orders table without a channel column, at a shop that never mentions channels.
+
+    C01 §6.3a: COD is still read from the payment method; marketplace orders cannot
+    exist in the source.  Any channel/marketplace word in the README, or a header that
+    may hold a channel, keeps the source ``partial``.
+    """
+    if "channel" in fields or not _ORDER_FIELDS <= set(fields):
+        return False
+    if _CHANNEL_WORDS.search(fold(catalog.readme)):
+        return False
+    try:
+        tables = _matching_tables(catalog, section)
+        if not tables or any(_CHANNEL_WORDS.search(fold(name)) or fold(name).strip() == "san"
+                             for table in tables for name in _header_names(table)):
+            return False
+        # A header such as "Nguồn" / "Nơi bán" escapes the word list; a cell naming a
+        # marketplace still proves marketplace orders exist in the file.
+        return not any(_names_marketplace(value) for table in tables
+                       for _ordinal, row in _records(table, section.columns)
+                       for value in row.values())
+    except ReadmeSalesError:
+        return False
+
+
+def _names_marketplace(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    label = normalize_label(value)
+    return label in _MARKETPLACE or (
+        label.startswith("san ") and label.removeprefix("san ") in _MARKETPLACE)
 
 
 def _payment_partitions(catalog: Catalog,
@@ -505,7 +555,7 @@ def _role_sections(catalog: Catalog, sections: list[Section], references: dict[s
         fields = _section_fields(section, references)
         all_mappings[section.label] = fields
         role = None
-        if required["orders"] <= set(fields):
+        if required["orders"] <= set(fields) or _channel_unrecorded(catalog, section, fields):
             role = "orders"
         elif required["payments"] <= set(fields):
             role = "payments"
@@ -673,7 +723,9 @@ def _payment_labels(payment_method: Any, channel: Any, *, source: str
                               label=raw_payment)
     prefixed_marketplace = (sales_channel.startswith("san ")
                             and sales_channel.removeprefix("san ") in _MARKETPLACE)
-    if sales_channel not in (_MARKETPLACE | _ORDINARY_CHANNEL) and not prefixed_marketplace:
+    if channel is None:
+        pass  # no channel column (C01 §6.3a): only COD is excluded
+    elif sales_channel not in (_MARKETPLACE | _ORDINARY_CHANNEL) and not prefixed_marketplace:
         raise DebtSourceError("label", "Unknown sales channel", source=source,
                               label=str(channel).strip())
     excluded = "cod" if payment in _COD else (
@@ -759,8 +811,10 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
     label_counts: Counter[str] = Counter()
     for section, table_key, ordinal, row in _rows(catalog, roles["orders"]):
         source = f"{table_key}#{ordinal}"
-        _required(row, ("order_id", "order_day", "status", "order_total",
-                        "payment_method", "channel"), role="orders", source=source)
+        channel_recorded = "channel" in row
+        _required(row, ("order_id", "order_day", "status", "order_total", "payment_method",
+                        *(("channel",) if channel_recorded else ())),
+                  role="orders", source=source)
         order_id = str(row["order_id"]).strip()
         if order_id in seen_orders:
             raise DebtSourceError("key", "Order list repeats an order id", source=source)
@@ -770,10 +824,11 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
             raise DebtSourceError("label", "Unknown order status", source=source,
                                   label=str(row["status"]).strip())
         payment_method, on_credit, excluded = _payment_labels(
-            row["payment_method"], row["channel"], source=source)
+            row["payment_method"], row.get("channel"), source=source)
         label_counts[f"state:{state}"] += 1
         label_counts[f"payment:{normalize_label(payment_method)}"] += 1
-        label_counts[f"channel:{normalize_label(row['channel'])}"] += 1
+        if channel_recorded:
+            label_counts[f"channel:{normalize_label(row['channel'])}"] += 1
         raw_orders.append({
             "order_id": order_id,
             "day": _day(row["order_day"], field="order_day", source=source,
@@ -907,6 +962,8 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
             "paid_to_date_present": paid_to_date_present,
             "paid_to_date_checked": paid_checked,
             "paid_to_date_mismatches": 0,
+            "channel_column": "recorded" if any(
+                "channel" in fields for _section, fields in roles["orders"]) else "absent",
         },
         "labels": dict(sorted(label_counts.items())),
         "coverage": {

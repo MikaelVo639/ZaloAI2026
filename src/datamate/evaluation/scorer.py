@@ -9,7 +9,7 @@ from datamate.io import index_records
 from datamate.semantics.text import normalize_answer
 
 
-SCORER_VERSION = "local_proxy_v2_exact_numbers_not_official"
+SCORER_VERSION = "local_proxy_v3_table_row_alias_not_official"
 
 def _number_matches(actual: Any, expected: Any) -> bool:
     if not is_number(actual) or not is_number(expected):
@@ -30,7 +30,9 @@ def _scalar_matches(actual: Any, expected: Any, aliases: Any = None) -> bool:
     return _number_matches(actual, expected)
 
 
-def _table_matches(actual: Any, expected: Any) -> bool:
+def _table_matches(actual: Any, expected: Any, aliases: Any = None) -> bool:
+    """Rows as a set; ``aliases[i]`` lists other accepted names (codes, name + phone as in
+    the file) for the first cell of reference row ``i``, as answers.jsonl ships them."""
     actual_cols = [normalize_answer(c) for c in actual["columns"]]
     expected_cols = [normalize_answer(c) for c in expected["columns"]]
     if len(actual_cols) != len(expected_cols):
@@ -45,9 +47,24 @@ def _table_matches(actual: Any, expected: Any) -> bool:
                      else ("bool", x) if isinstance(x, bool)
                      else ("number", Decimal(str(x))) if is_number(x)
                      else ("null", None) for x in row)
-    predicted = {canonical([row[i] for i in positions]) for row in actual["rows"]}
-    reference = {canonical(row) for row in expected["rows"]}
-    return predicted == reference
+    predicted = [canonical([row[i] for i in positions]) for row in actual["rows"]]
+    reference = [canonical(row) for row in expected["rows"]]
+    if len(set(predicted)) != len(predicted) or len(predicted) != len(set(reference)):
+        return False
+    aliases = aliases if isinstance(aliases, list) else []
+    accepted = []
+    for index, row in enumerate(reference):
+        names = aliases[index] if index < len(aliases) and isinstance(aliases[index], list) else []
+        firsts = {row[0]} | ({("string", normalize_answer(x)) for x in names if isinstance(x, str)}
+                             if row and row[0][0] == "string" else set())
+        accepted.append([(first, *row[1:]) for first in firsts])
+    # One reference row per predicted row; the search also covers two rows sharing an alias.
+    def assign(index: int, used: frozenset[int]) -> bool:
+        if index == len(predicted):
+            return True
+        return any(j not in used and predicted[index] in accepted[j]
+                   and assign(index + 1, used | {j}) for j in range(len(reference)))
+    return assign(0, frozenset())
 
 
 def matches(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
@@ -70,7 +87,7 @@ def matches(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
             _scalar_matches(x, y, aliases[i] if i < len(aliases) else [])
             for i, (x, y) in enumerate(zip(a, b)))
     if kind == "table":
-        return _table_matches(a, b)
+        return _table_matches(a, b, expected.get("alias"))
     return False
 
 
