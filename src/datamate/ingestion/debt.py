@@ -154,6 +154,17 @@ _DEBT_PROFILES = (
     )),
 )
 
+_DEBT_PROFILE_CANDIDATES = {
+    "debt_pos_kiotviet.v1": (
+        ({"Mã hóa đơn", "Tổng sau giảm giá"}, _DEBT_PROFILES[0][1][0][1]),
+        ({"Mã hóa đơn", "Giá trị"}, _DEBT_PROFILES[0][1][1][1]),
+    ),
+    "debt_banhang.v1": (
+        ({"Order ID", "Tong tien"}, _DEBT_PROFILES[1][1][0][1]),
+        ({"Mã bill", "Số tiền thu"}, _DEBT_PROFILES[1][1][1][1]),
+    ),
+}
+
 
 def _profile_sections(catalog: Catalog, documented: list[Section]) -> list[Section]:
     text = fold(catalog.readme)
@@ -165,12 +176,23 @@ def _profile_sections(catalog: Catalog, documented: list[Section]) -> list[Secti
     for version, signatures in _DEBT_PROFILES:
         found: list[Section] = []
         for table, header in headers:
+            matched = False
             for required, meanings in signatures:
                 if required <= header:
                     found.append(Section(
                         table.path.name, table.name,
                         {column: meaning for column, meaning in meanings.items()
                          if column in header}, origin=version))
+                    matched = True
+                    break
+            if matched:
+                continue
+            for marker, meanings in _DEBT_PROFILE_CANDIDATES[version]:
+                if marker <= header:
+                    found.append(Section(
+                        table.path.name, table.name,
+                        {column: meaning for column, meaning in meanings.items()
+                         if column in header}, origin=f"{version}.partial"))
                     break
         if any("order_total" in _section_fields(s, {}) for s in found) and any(
                 "payment_amount" in _section_fields(s, {}) for s in found):
@@ -183,7 +205,8 @@ def _debt_references(readme: str) -> tuple[dict[str, str], tuple[str, ...]]:
     fields: dict[str, str] = {}
     evidence: list[str] = []
     for line in readme.splitlines():
-        if "cong no" not in fold(line):
+        heading, separator, _description = line.partition(":")
+        if not separator or fold(heading).strip() != "cong no":
             continue
         evidence.append(line.strip())
         matches = list(re.finditer(
@@ -260,8 +283,9 @@ def _documented_sources_complete(catalog: Catalog, sections: Iterable[Section]) 
     return bool(catalog.readme.strip()) and bool(documented) and present <= documented
 
 
-def _has_debt_hint(catalog: Catalog, sections: Iterable[Section]) -> bool:
-    if any("**cong no**" in fold(line) for line in catalog.readme.splitlines()):
+def _has_debt_hint(catalog: Catalog, sections: Iterable[Section],
+                   references: dict[str, str], evidence: Iterable[str]) -> bool:
+    if references or any(evidence):
         return True
     return any(_field(meaning) in {"payment_amount", "paid_to_date", "closing_debt"}
                for section in sections for meaning in section.columns.values())
@@ -334,11 +358,12 @@ def _role_sections(catalog: Catalog, sections: list[Section], references: dict[s
                               sources=incomplete)
     missing_references = {"payment_amount", "order_total"} - resolved_references
     if missing_references:
-        raise DebtSourceError("column_missing", "README debt columns do not exist",
+        code = "partial" if not sections else "column_missing"
+        raise DebtSourceError(code, "README debt columns do not exist",
                               fields=sorted(missing_references))
     for role in ("orders", "payments"):
         if not roles.get(role):
-            raise DebtSourceError("column_missing", "README lacks a complete debt source",
+            raise DebtSourceError("partial", "README lacks a complete debt source",
                                   role=role, mappings=all_mappings)
         signatures = {frozenset(fields) for _, fields in roles[role]}
         if len(signatures) != 1:
@@ -388,16 +413,43 @@ def _money_unit(readme: str) -> tuple[str, Decimal, tuple[str, ...]]:
     The challenge sources use VND when no scale is stated.  A global thousand-VND
     convention is explicit enough to convert; any other stated scale is unsupported.
     """
-    evidence = tuple(line.strip() for line in readme.splitlines()
-                     if "don vi" in fold(line) and any(
-                         token in fold(line) for token in ("tien", "dong", "vnd")))
-    folded = "\n".join(fold(line) for line in evidence)
-    if "nghin dong" in folded or "ngan dong" in folded:
-        return "thousand_vnd", Decimal(1000), evidence
-    if any(token in folded for token in ("trieu dong", "ty dong", "usd", "cent", "xu")):
-        raise DebtSourceError("amount", "Debt money unit is unsupported",
-                              evidence=list(evidence))
-    return "vnd", Decimal(1), evidence
+    def declares_unit(line: str) -> bool:
+        text = fold(line)
+        return ("don vi tien" in text
+                or bool(re.search(r"\b(?:nghin|ngan|trieu|ty) dong\b", text))
+                or bool(re.search(r"\b(?:vnd|eur|usd|cent|xu)\b", text)))
+
+    evidence = tuple(line.strip() for line in readme.splitlines() if declares_unit(line))
+    if not evidence:
+        return "vnd", Decimal(1), ()
+
+    units: set[str] = set()
+    scoped: list[str] = []
+    for line in evidence:
+        text = fold(line)
+        line_units: set[str] = set()
+        if re.search(r"\.(?:csv|xlsx|xls|db|sqlite)\b", line, re.IGNORECASE) or "`" in line:
+            scoped.append(line)
+        if "nghin dong" in text or "ngan dong" in text:
+            line_units.add("thousand_vnd")
+        if re.search(r"\bvnd\b", text) or (
+                re.search(r"\bdong\b", text)
+                and not re.search(r"\b(?:nghin|ngan|trieu|ty) dong\b", text)):
+            line_units.add("vnd")
+        if (re.search(r"\b(?:eur|usd|cent|xu)\b", text)
+                or "trieu dong" in text or "ty dong" in text
+                or not line_units):
+            line_units.add("unsupported")
+        units.update(line_units)
+    if scoped:
+        raise DebtSourceError("amount", "Per-source debt money units are unsupported",
+                              evidence=scoped)
+    if len(units) != 1 or "unsupported" in units:
+        raise DebtSourceError("amount", "Debt money unit is unsupported or conflicting",
+                              evidence=list(evidence), units=sorted(units))
+    unit = next(iter(units))
+    multiplier = Decimal(1000) if unit == "thousand_vnd" else Decimal(1)
+    return unit, multiplier, evidence
 
 
 def _day(value: Any, *, field: str, source: str, sheet: str) -> date:
@@ -451,7 +503,7 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
     sections = parse_sections(catalog.readme)
     sections += _profile_sections(catalog, sections)
     references, readme_lines = _debt_references(catalog.readme)
-    if not _has_debt_hint(catalog, sections):
+    if not _has_debt_hint(catalog, sections, references, readme_lines):
         if _documented_sources_complete(catalog, sections):
             raise DebtSourceError("absent", "README documents no debt source")
         raise DebtSourceError("column_missing", "README is incomplete for debt detection")

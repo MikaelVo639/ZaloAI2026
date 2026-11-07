@@ -322,6 +322,23 @@ class DebtLedgerTests(_Shop):
             load_debt_ledger(self.catalog(readme=unsupported), RULEBOOK)
         self.assertEqual(caught.exception.code, "amount")
 
+        foreign = README.replace(
+            "- Dữ liệu có đến hết 31/01/2026.",
+            "- Dữ liệu có đến hết 31/01/2026.\n- Đơn vị tiền: EUR.",
+        )
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(self.catalog(readme=foreign), RULEBOOK)
+        self.assertEqual(caught.exception.code, "amount")
+
+        mixed = README.replace(
+            "- Dữ liệu có đến hết 31/01/2026.",
+            "- Dữ liệu có đến hết 31/01/2026.\n"
+            "- `orders.csv` dùng nghìn đồng; `payments.csv` dùng VND.",
+        )
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(self.catalog(readme=mixed), RULEBOOK)
+        self.assertEqual(caught.exception.code, "amount")
+
     def test_coded_customer_keeps_real_code_even_when_display_name_is_walk_in(self):
         customers = [["Mã KH", "Khách hàng"], ["K1", "Khách lẻ"], ["K2", "Bình"]]
         ledger = load_debt_ledger(self.catalog(customers=customers), RULEBOOK)
@@ -405,6 +422,55 @@ File máy POS xuất ra.
         self.assertEqual(ledger.orders[0].customer_name, "An")
         self.assertEqual(ledger.lineage["columns"]["orders"][0]["origin"],
                          "debt_pos_kiotviet.v1")
+
+        listed = readme.replace("- `customers.csv`", "- `customers.csv`\n- `payments_2.csv`")
+        (root / "README.md").write_text(listed, encoding="utf-8")
+        with (root / "payments_2.csv").open(
+                "w", encoding="utf-8-sig", newline="") as stream:
+            csv.writer(stream).writerows([
+                ["Mã hóa đơn", "Giá trị"], ["D1", "20"],
+            ])
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+        self.assertEqual(caught.exception.code, "partial")
+
+        with (root / "payments_2.csv").open(
+                "w", encoding="utf-8-sig", newline="") as stream:
+            csv.writer(stream).writerows([
+                ["Mã hóa đơn", "Thời gian", "Giá trị"],
+                ["D1", "03/01/2026", "20"],
+            ])
+        complete = load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+        self.assertEqual((len(complete.orders), len(complete.payments)), (1, 2))
+
+    def test_debt_convention_without_column_mapping_is_partial_not_absent(self):
+        template = """# Shop
+## File
+- `orders.csv`
+- `payments.csv`
+## Quy ước
+{convention}
+"""
+        root = self.data / "shop"
+        root.mkdir(parents=True)
+        for name, rows in {
+            "orders.csv": [["Order", "Total"], ["D1", "100"]],
+            "payments.csv": [["Order", "Paid"], ["D1", "50"]],
+        }.items():
+            with (root / name).open("w", encoding="utf-8-sig", newline="") as stream:
+                csv.writer(stream).writerows(rows)
+
+        conventions = (
+            "- **Công nợ**: **Paid** là số tiền trả lần đó; **Total** là số khách phải "
+            "trả cho cả đơn.",
+            "- Công nợ: Paid là số tiền trả lần đó; Total là số khách phải trả cho cả đơn.",
+        )
+        for convention in conventions:
+            (root / "README.md").write_text(
+                template.format(convention=convention), encoding="utf-8")
+            with self.assertRaises(DebtSourceError) as caught:
+                load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+            self.assertEqual(caught.exception.code, "partial")
 
 
 if __name__ == "__main__":

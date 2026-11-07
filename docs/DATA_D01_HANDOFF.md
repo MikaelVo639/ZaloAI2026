@@ -90,6 +90,10 @@ pipeline, scorer or model code beyond inheriting the C01-fixes base commit.
 - [x] Coded customer keeps its code when the display name is `Khách lẻ`.
 - [x] Zero payment is retained/countable; overpayment reconciles to zero receivable.
 - [x] Reviewed POS profile resolves report/source roles without business-id dispatch.
+- [x] Plain/bold debt convention without a usable schema mapping is `partial`, never `absent`.
+- [x] POS profile rejects an incomplete sibling payment file and unions it when complete.
+- [x] Foreign, conflicting or per-source money-unit declarations are `amount` errors.
+- [x] Evidence runner resolves relative paths and binds revision to adapter source/manifest SHA.
 
 ## 5. Verification run
 
@@ -106,13 +110,13 @@ Local Windows checkout results at the review-fix revision:
 
 | Check | Result |
 |---|---|
-| D01 focused tests | 18 passed |
+| D01 + evidence-runner focused tests | 20 passed |
 | Reviewed raw development sources | `biz_109`: 33,065 orders / 36,974 payments; `biz_124`: 51,044 / 51,238 |
 | Closing reconciliation | `biz_124`: 47,852 applicable orders checked, 0 mismatch |
 | Missing-channel capability | `biz_106`, `biz_129`: typed `partial`, no inferred channel |
 | Deadline-only capability | `biz_116`, `biz_118`: `absent` |
 | Smoke | 24/24 records; local proxy 21 correct, 0 wrong, 3 abstain |
-| Full suite | 273 passed in 31.877s |
+| Full suite | 275 passed in 28.251s |
 | `git diff --check` / compile | Pass |
 | `git diff --check` | Pass |
 
@@ -123,22 +127,28 @@ The proxy score is local and not an official competition score.
 Generate the ignored, non-raw evidence artifact with:
 
 ```sh
-python scripts/verify_debt_train.py --train-root <train> --output outputs/d01_train_evidence.json
+python scripts/verify_debt_train.py --train-root <train> \
+  --manifest outputs/agent-integration-holdout-20261104-162921.json \
+  --output outputs/d01_train_evidence.json
 ```
 
-The artifact records revision, rulebook/source SHA256, status, counts and full safe
-lineage. The script rejects the six fixed validation businesses. Current reviewed result:
+The artifact records the script checkout revision, adapter/manifest/rulebook/source
+SHA256, status, counts and full safe lineage. The script resolves relative paths, verifies
+the selected businesses belong to the manifest's train split and rejects its validation
+businesses. Current reviewed result:
 
 - `biz_109`: supported POS workbook/multi-sheet source;
 - `biz_124`: supported BanHang orders/payments/customers and exact closing reconciliation;
 - `biz_106`, `biz_129`: unsupported until C01 decides the no-channel capability.
 
+The full 24-business manifest audit remains **2 supported ledgers, 6 `partial`, 16
+`absent`**. It is written to the ignored `outputs/d01_train_all_evidence.json` artifact.
+
 External C01 acceptance artifacts still belong to the C01 owner:
 
 - `C01/verify/verify_c01_train.py`;
 - `C01/verify/logs/verify_c01_train_20261106.txt`;
-- the fixed `business_split.json` manifest and its checksum;
-- the fixed split manifest/checksum (the audit runner carries a defensive fixed validation list);
+- the remaining C01 verification log and script referenced by that contract;
 - explicit diagnostics for the report-style shop whose five table questions were not
   included in the manual `7/7` result.
 
@@ -151,14 +161,14 @@ Do not use validation/public/private businesses to add aliases or tune this adap
 - [ ] Confirm the payment/channel allowlist covers only labels reviewed in train README/data.
 - [x] Zero payment is retained; negative payment is rejected with `amount` per C01 PR #26.
 - [ ] Confirm fallback coverage to latest order/payment record when README has no date.
-- [ ] Provide the C01 external verification folder, manifest and checksums.
+- [x] Use the fixed group holdout manifest and record its checksum in D01 evidence.
 - [x] Run adapter on the four reviewed development debt sources and attach lineage/error summary.
 
 ### Huy / Agent reviewer
 
 - [ ] Confirm `DebtSourceError.code` handling: only `absent` may support `unanswerable`;
-  `customer_mode`, `rules_missing`, `column_missing`, `key`, `orphan`, `label` and
-  `reconcile` must abstain.
+  `partial`, `amount`, `customer_mode`, `rules_missing`, `column_missing`, `key`,
+  `orphan`, `label` and `reconcile` must abstain.
 - [ ] Confirm `uses_customer_codes` and retained display name are sufficient for A01
   customer-key/evidence behavior.
 - [ ] Confirm `prepare_debt` will cache one ledger per business/rulebook in the worker.
