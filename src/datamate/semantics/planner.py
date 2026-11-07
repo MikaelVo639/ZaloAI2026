@@ -6,7 +6,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from datamate.contracts import Filter, Plan, Question, Threshold
-from datamate.semantics.rules import Rules
+from datamate.semantics.rules import DEBT_TABLE_FEATURES, Rules
 from datamate.semantics.text import normalize_question
 
 _AMOUNT = r"(?:bao nhieu|bao nhiu|bnhiu|bn|nhieu|nhiu|may)"
@@ -79,8 +79,6 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     `names` are product names/codes of the business (from the Agent's data); a question
     naming exactly one of them gets a product filter. Without names, it abstains as before.
     """
-    if not rules.revenue:
-        return None
     today = question.as_of_date
     text = normalize_question(question.question)
     used: list[str] = []
@@ -120,10 +118,14 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         text, reference = comparison
     if share and not re.search(rf"\b{_REVENUE}\b", text):
         text = text + " doanh thu"  # "nhóm X đóng góp bao nhiêu % tổng doanh thu"
-    contract = _increasing(text, today, rules) or _debt_table(text, today, rules)
+    contract = _increasing(text, today, rules)
+    if contract is None:
+        contract = _debt_table(text, today, rules)
     if contract is not None:
         # C01 intents take no filter, group, share or comparison: anything else abstains.
         return contract if contract and not (filters or group or reference) else None
+    if not rules.revenue:
+        return None
     if not reference and not group:
         special = (_months(text, today, rules) or _customers(text, today, rules)
                    or _thresholds(text, today, rules))
@@ -294,7 +296,9 @@ _PAIR = re.compile(r"\bthang (\d{1,2})/(\d{4}) cao hon thang (\d{1,2})/(\d{4})\b
 _TREND_WORDS = re.compile(
     r"\b(?:xu huong|co phai|tu|qua|roi|r|den|toi|va|cac|thang|(?:\d+|hai|ba|bon|nam|sau) thang|"
     r"khong|ko|k|hok|hong|khum|ha|vay|a|nhi|nhe|z)\b")
-_NEGATIVE_TREND = re.compile(r"\b(?:giam|tut|di xuong|it nhat|toi thieu|phan tram|lan)\b")
+_NEGATIVE_TREND = re.compile(
+    r"\b(?:giam|tut|di xuong|it nhat|toi thieu|phan tram|lan)\b"
+    r"|\b(?:khong|ko|k|hok|hong|khum|chua) (?:co )?(?:tang|luon cao hon)\b")
 
 
 def _increasing(text: str, today: date, rules: Rules) -> Plan | None | bool:
@@ -304,7 +308,7 @@ def _increasing(text: str, today: date, rules: Rules) -> Plan | None | bool:
     pairs = _PAIR.findall(text)
     if not trend and not (pairs and re.search(r"\bco phai\b", text)):
         return None
-    if not (rules.boolean_answer and rules.calendar_month) or rules.trend_rule:
+    if not (rules.revenue and rules.boolean_answer and rules.calendar_month) or rules.trend_rule:
         return False
     if not re.search(rf"\b{_REVENUE}\b", text) or _NEGATIVE_TREND.search(text):
         return False  # "số đơn tăng liên tục", "giảm liên tục", "tăng ít nhất 10 %"
@@ -335,8 +339,11 @@ def _increasing(text: str, today: date, rules: Rules) -> Plan | None | bool:
             # Build A, B, C here; the exact-pair check below rejects gaps or a broken chain.
             months = [(int(pairs[0][3]), int(pairs[0][2]))]
             months.extend((int(y1), int(m1)) for m1, y1, _, _ in pairs)
-    if not 2 <= len(months) <= 12 or any(b <= a for a, b in zip(months, months[1:])):
-        return False  # one month, duplicates, or months not in time order
+    if not 2 <= len(months) <= 12 or any(
+        12 * (year2 - year1) + month2 - month1 != 1
+        for (year1, month1), (year2, month2) in zip(months, months[1:])
+    ):
+        return False
     if count is not None and count != len(months):
         return False
     if pairs:
@@ -381,8 +388,7 @@ def _debt_table(text: str, today: date, rules: Rules) -> Plan | None | bool:
     if not top:
         return None if not (_DEBT.search(text) and re.search(rf"\b{_CUSTOMER}\b", text)
                             and re.search(r"\bnhat\b", text)) else False
-    features = ("table_answer", "until_end_of_day", "debt_orders", "debt_at_date",
-                "debt_by_customer", "debt_excluded", "customer_identity", "ties_by_code")
+    features = DEBT_TABLE_FEATURES
     if not all(getattr(rules, feature) for feature in features):
         return False
     reduced = text[:top.start()] + " " + text[top.end():]

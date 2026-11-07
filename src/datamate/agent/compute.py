@@ -8,15 +8,17 @@ quotes, so a reviewer can re-run the exact calculation from a log.
 import inspect
 import re
 from calendar import monthrange
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
 from typing import Any, Callable
 
-from datamate.contracts import Candidate, Catalog, Plan
 from datamate.agent.sales_source import load_business_sales
+from datamate.contracts import DEBT_TABLE_COLUMNS, Candidate, Catalog, DebtLedger, Plan
+from datamate.ingestion.debt import DebtSourceError, _coverage_day, load_debt_ledger
 from datamate.ingestion.sales import Sale
+from datamate.semantics.rules import DEBT_TABLE_FEATURES, read_rules
 from datamate.semantics.text import fold
 
 
@@ -93,6 +95,11 @@ def period_revenues(sales: list[Sale], periods: list[tuple[date, date]]) -> list
 WALK_IN_NAMES = frozenset({"khach le", "kl", "le", "khach vang lai", "vang lai"})
 
 
+def _customer_name_key(value: str | None) -> str | None:
+    name = " ".join(re.sub(r"[^\w\s]", " ", (value or "").lower()).split())
+    return None if not name or fold(name) in WALK_IN_NAMES else name
+
+
 def customer_keys(sales: list[Sale]) -> dict[int, str | None]:
     """Customer of each sale by the rulebook's "Xác định khách": the customer code when the
     shop records codes, otherwise the name written on the order (spacing/case folded);
@@ -103,9 +110,7 @@ def customer_keys(sales: list[Sale]) -> dict[int, str | None]:
         if has_codes:
             keys[index] = sale.customer_id or None
             continue
-        name = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", (sale.customer_name or "").lower()))
-        name = name.strip()
-        keys[index] = None if not name or fold(name) in WALK_IN_NAMES else name
+        keys[index] = _customer_name_key(sale.customer_name)
     return keys
 
 
@@ -198,7 +203,7 @@ def prepare_sales(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -
     """
     key = _catalog_key(catalog)
     if cache.get("sales_key") != key or cache.get("sales_rulebook", "") != rulebook:
-        cache.clear()  # one business at a time keeps worker memory bounded
+        cache.pop("ranking_eligible", None)
         cache["sales_key"] = key
         cache["sales_rulebook"] = rulebook
         try:
@@ -215,6 +220,21 @@ def prepare_sales(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -
     return {"ok": True, "source": source,
             "data_first_day": min(days).isoformat() if days else None,
             "data_last_day": max(days).isoformat() if days else None}
+
+
+def prepare_debt(cache: dict[str, Any], catalog: Catalog, rulebook: str) -> dict[str, Any]:
+    """Cache the current business's D01 ledger or typed source rejection in the worker."""
+    key = (_catalog_key(catalog), catalog.readme, rulebook)
+    if cache.get("debt_key") != key:
+        try:
+            cache["debt"] = load_debt_ledger(catalog, rulebook)
+        except DebtSourceError as exc:
+            cache["debt"] = exc
+        cache["debt_key"] = key
+    loaded = cache["debt"]
+    if isinstance(loaded, DebtSourceError):
+        return {"ok": False, "reason": str(loaded), "debt_source_error": loaded.diagnostics}
+    return {"ok": True}
 
 
 def product_names(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -> list[str]:
@@ -246,9 +266,10 @@ def share_percent(part: Decimal, whole: Decimal) -> float | None:
     return float((part * 100 / whole).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
+C01_INTENTS = frozenset({"revenue_increasing", "top_debt_customers"})
 INTENTS = frozenset({"revenue", "order_count", "top_products", "average_order",
                      "cancel_count", "cancel_rate", "best_day",
-                     "top_customers", "count_where", "quantity"})
+                     "top_customers", "count_where", "quantity"}) | C01_INTENTS
 # Plan filters this backend applies, and the intents each one may be combined with.
 FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity"}),
               "product_group": frozenset({"revenue"}),
@@ -266,6 +287,23 @@ def unsupported(plan: Plan) -> str:
     """
     if plan.intent not in INTENTS:
         return f"Intent {plan.intent!r} not supported by baseline agent"
+    if plan.intent in C01_INTENTS:
+        if (plan.filters or plan.threshold is not None or plan.comparison
+                or plan.compare_start is not None or plan.compare_end is not None
+                or plan.shape or plan.unit or plan.rank_by or type(plan.top_k) is not int):
+            return f"Unsupported fields for {plan.intent}"
+        if plan.intent == "top_debt_customers":
+            if plan.start != plan.end or plan.periods or not 1 <= plan.top_k <= 50:
+                return "Debt table requires a snapshot day and top_k from 1 to 50"
+        elif (plan.top_k != 1 or not 2 <= len(plan.periods) <= 12
+              or (plan.start, plan.end) != (plan.periods[0][0], plan.periods[-1][1])
+              or any(start.day != 1 or end != date(
+                  start.year, start.month, monthrange(start.year, start.month)[1])
+                     for start, end in plan.periods)
+              or any(previous[1].toordinal() + 1 != current[0].toordinal()
+                     for previous, current in zip(plan.periods, plan.periods[1:]))):
+            return "Revenue trend requires 2 to 12 consecutive full months"
+        return ""
     if plan.comparison == "share":
         if plan.compare_start is not None or plan.compare_end is not None:
             return "Share does not support comparison periods"
@@ -345,6 +383,144 @@ def revenue_total(selected: list[Sale]) -> Decimal:
     return sum((s.amount for s in selected), Decimal(0))
 
 
+def revenue_trend(sales: list[Sale], periods: tuple[tuple[date, date], ...]
+                  ) -> tuple[list[Decimal], list[bool]]:
+    totals = [revenue_total(select_valid(sales, start, end)) for start, end in periods]
+    return totals, [current > previous for previous, current in zip(totals, totals[1:])]
+
+
+def debt_ranking(ledger: DebtLedger, day: date
+                 ) -> tuple[list[tuple[str, str, Decimal, int]], int, Decimal]:
+    paid: dict[str, Decimal] = defaultdict(Decimal)
+    for payment in ledger.payments:
+        if payment.day <= day:
+            paid[payment.order_id] += payment.amount
+
+    totals: dict[str, Decimal] = defaultdict(Decimal)
+    counts: Counter[str] = Counter()
+    names: dict[str, Counter[str]] = defaultdict(Counter)
+    total_debt = Decimal(0)
+    open_orders = 0
+    for order in ledger.orders:
+        if order.day > day:
+            continue
+        key = (order.customer_id if ledger.uses_customer_codes
+               else _customer_name_key(order.customer_name))
+        if key is not None and order.customer_name and order.customer_name.strip():
+            names[key][order.customer_name] += 1
+        if order.state == "huy" or order.excluded:
+            continue
+        remaining = order.total - paid[order.order_id]
+        if remaining <= 0:
+            continue
+        open_orders += 1
+        total_debt += remaining
+        if key is not None:
+            totals[key] += remaining
+            counts[key] += 1
+
+    ranked = []
+    for key in sorted(totals, key=lambda key: (-totals[key], key)):
+        display = names[key].most_common(1)
+        ranked.append((key, display[0][0] if display else "", totals[key], counts[key]))
+    return ranked, open_orders, total_debt
+
+
+def _c01_rules(plan: Plan, rulebook: str) -> tuple[str, ...]:
+    rules = read_rules(rulebook)
+    if plan.intent == "revenue_increasing":
+        if not rules.revenue or rules.trend_rule:
+            return ()
+        required = ("boolean_answer", "calendar_month")
+        base = rules.source_rows
+    else:
+        required = DEBT_TABLE_FEATURES
+        base = ()
+    if not all(getattr(rules, feature) for feature in required):
+        return ()
+    split_lines = {line.strip() for line in rulebook.splitlines()}
+    return tuple(dict.fromkeys((*base, *(rules.row(feature) for feature in required),
+                                *(line for line in plan.evidence if line in split_lines))))
+
+
+def _answer_debt_table(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                       rulebook: str, rules: tuple[str, ...]) -> Candidate:
+    day = plan.end
+    snapshot = day.isoformat()
+    evidence: dict[str, Any] = {"intent": plan.intent, "start": snapshot, "end": snapshot,
+                                "snapshot": snapshot, "rules": rules}
+    prepared = prepare_debt(cache, catalog, rulebook)
+    if not prepared["ok"]:
+        diagnostic = prepared["debt_source_error"]
+        evidence["debt_source_error"] = diagnostic
+        if diagnostic["code"] == "absent" and diagnostic.get("sources_complete") is True:
+            evidence["coverage_source"] = "D01 checked the README and all catalog sources"
+            return Candidate("unanswerable", None, 1.0, prepared["reason"], evidence)
+        return Candidate(reason=prepared["reason"], evidence=evidence)
+
+    ledger = cache["debt"]
+    evidence["ledger"] = ledger.lineage
+    if not ledger.first_day <= day <= ledger.last_day:
+        return Candidate(reason="Debt snapshot outside ledger coverage", evidence=evidence)
+    ranked, open_orders, total_debt = debt_ranking(ledger, day)
+    evidence.update(
+        open_orders=open_orders, total_debt=str(total_debt),
+        ranking=[{"customer_key": key, "name": name, "debt": str(amount), "orders": count}
+                 for key, name, amount, count in ranked],
+        code=_code(f"debt_ranking(ledger, date.fromisoformat({day.isoformat()!r}))",
+                   debt_ranking, _customer_name_key, _vnd),
+    )
+    rows = [[name, int(_vnd(amount))] for _, name, amount, _ in ranked[:plan.top_k]]
+    if not rows or any(not name or amount <= 0 for name, amount in rows):
+        return Candidate(reason="Debt ranking has no displayable rows", evidence=evidence)
+    result = {"columns": list(DEBT_TABLE_COLUMNS), "rows": rows}
+    evidence["result"] = result
+    return Candidate("table", result, 1.0, "", evidence)
+
+
+def _answer_revenue_trend(sales: list[Sale], readme: str, plan: Plan,
+                          evidence: dict[str, Any]) -> Candidate:
+    if not sales:
+        return Candidate(reason="Revenue trend has no sales data", evidence=evidence)
+    observed_first = min(sale.day for sale in sales)
+    observed_last = max(sale.day for sale in sales)
+    documented = COVERAGE.search(readme)
+    try:
+        documented_last = _coverage_day(readme)
+        if documented:
+            first, last = map(date.fromisoformat, documented.groups())
+        else:
+            first, last = observed_first, documented_last or observed_last
+    except ValueError:
+        return Candidate(reason="Invalid README coverage", evidence=evidence)
+    evidence["coverage"] = {"first_day": first.isoformat(), "last_day": last.isoformat()}
+    if ((documented_last is not None and documented_last != last)
+            or not first <= observed_first <= observed_last <= last
+            or not first <= plan.start <= plan.end <= last):
+        return Candidate(reason="Revenue trend needs full months within sales coverage",
+                         evidence=evidence)
+    observed_months = {(sale.day.year, sale.day.month) for sale in sales}
+    if any((start.year, start.month) not in observed_months for start, _ in plan.periods):
+        return Candidate(reason="A requested month has no source records", evidence=evidence)
+
+    totals, comparisons = revenue_trend(sales, plan.periods)
+    periods = [{"start": start.isoformat(), "end": end.isoformat(), "revenue": str(total)}
+               for (start, end), total in zip(plan.periods, totals)]
+    result = all(comparisons)
+    windows = tuple((start.isoformat(), end.isoformat()) for start, end in plan.periods)
+    evidence.update(
+        periods=periods,
+        comparisons=[{"previous": previous["start"], "current": current["start"],
+                      "greater": greater}
+                     for previous, current, greater in zip(periods, periods[1:], comparisons)],
+        code=_code(f"revenue_trend(sales, tuple((date.fromisoformat(start), "
+                   f"date.fromisoformat(end)) for start, end in {windows!r}))",
+                   revenue_trend, select_valid, revenue_total),
+        result=result,
+    )
+    return Candidate("boolean", result, 1.0, "", evidence)
+
+
 def change_percent(current: Decimal, previous: Decimal) -> float | None:
     if previous == 0:
         return None
@@ -357,16 +533,25 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
     reason = unsupported(plan)
     if reason:
         return Candidate(reason=reason)
+    c01_rules = ()
+    if plan.intent in C01_INTENTS:
+        c01_rules = _c01_rules(plan, rulebook)
+        if not c01_rules:
+            return Candidate(reason=f"Split rulebook does not support {plan.intent}")
+        if plan.intent == "top_debt_customers":
+            return _answer_debt_table(cache, catalog, plan, rulebook, c01_rules)
     prepared = prepare_sales(cache, catalog, rulebook)
     if not prepared["ok"]:
         return Candidate(reason=prepared["reason"])
     sales, source = cache["sales"]
     evidence: dict[str, Any] = {
         **source, "intent": plan.intent, "start": plan.start.isoformat(),
-        "end": plan.end.isoformat(), "rules": plan.evidence,
+        "end": plan.end.isoformat(), "rules": c01_rules or plan.evidence,
         "inputs": {"tables": source["tables"], "sales_rows": source["sales_rows"],
                    "data_first_day": prepared["data_first_day"],
                    "data_last_day": prepared["data_last_day"]}}
+    if plan.intent == "revenue_increasing":
+        return _answer_revenue_trend(sales, catalog.readme, plan, evidence)
     if plan.compare_start:
         evidence.update(compare_start=plan.compare_start.isoformat(),
                         compare_end=plan.compare_end.isoformat(), comparison=plan.comparison)

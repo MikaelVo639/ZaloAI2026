@@ -2,16 +2,89 @@
 
 import math
 from datetime import date
+from decimal import Decimal
+from typing import Any
 
-from datamate.agent.compute import unsupported
-from datamate.contracts import Candidate, Plan
+from datamate.agent.compute import C01_INTENTS, _vnd, unsupported
+from datamate.contracts import DEBT_TABLE_COLUMNS, Candidate, Plan
 from datamate.evaluation.validation import is_number, validate_record
 
 ANSWER_TYPES = {
     "revenue": "number", "order_count": "number", "average_order": "number",
     "cancel_count": "number", "cancel_rate": "percent", "best_day": "date",
     "quantity": "number", "count_where": "number",
+    "revenue_increasing": "boolean", "top_debt_customers": "table",
 }
+
+
+def _decimal_evidence(value: Any) -> Decimal:
+    if not isinstance(value, str):
+        raise ValueError("Monetary evidence must use Decimal strings")
+    amount = Decimal(value)
+    if not amount.is_finite():
+        raise ValueError("Monetary evidence must be finite")
+    return amount
+
+
+def _check_trend(candidate: Candidate, plan: Plan) -> None:
+    periods = candidate.evidence.get("periods")
+    pairs = candidate.evidence.get("comparisons")
+    if not isinstance(periods, list) or len(periods) != len(plan.periods):
+        raise ValueError("Revenue evidence must cover each requested month")
+    totals = []
+    for item, (start, end) in zip(periods, plan.periods):
+        if (not isinstance(item, dict)
+                or (item.get("start"), item.get("end")) != (start.isoformat(), end.isoformat())):
+            raise ValueError("Revenue evidence has incorrect month boundaries")
+        totals.append(_decimal_evidence(item.get("revenue")))
+    if not isinstance(pairs, list) or len(pairs) != len(periods) - 1:
+        raise ValueError("Revenue evidence must compare adjacent months")
+    outcomes = []
+    for index, pair in enumerate(pairs):
+        greater = totals[index + 1] > totals[index]
+        if (not isinstance(pair, dict) or pair.get("greater") is not greater
+                or pair.get("previous") != periods[index]["start"]
+                or pair.get("current") != periods[index + 1]["start"]):
+            raise ValueError("Revenue comparison disagrees with Decimal totals")
+        outcomes.append(greater)
+    if candidate.answer is not all(outcomes):
+        raise ValueError("Boolean disagrees with the executed comparisons")
+
+
+def _check_debt_table(candidate: Candidate, plan: Plan) -> None:
+    answer = candidate.answer
+    rows = answer["rows"]
+    if answer["columns"] != list(DEBT_TABLE_COLUMNS) or not 1 <= len(rows) <= plan.top_k:
+        raise ValueError("Debt table shape disagrees with the Plan")
+    if any(not isinstance(name, str) or not name.strip()
+           or type(amount) is not int or amount <= 0 for name, amount in rows):
+        raise ValueError("Debt rows require a customer name and positive integer VND")
+
+    evidence = candidate.evidence
+    if evidence.get("snapshot") != plan.end.isoformat() or not isinstance(evidence.get("ledger"), dict):
+        raise ValueError("Debt evidence needs a matching snapshot and ledger lineage")
+    ranking = evidence.get("ranking")
+    if not isinstance(ranking, list):
+        raise ValueError("Debt evidence needs the executed ranking")
+    entries = []
+    seen = set()
+    for item in ranking:
+        key, name, count = item["customer_key"], item["name"], item["orders"]
+        amount = _decimal_evidence(item["debt"])
+        if (not isinstance(key, str) or not key or key in seen or not isinstance(name, str)
+                or type(count) is not int or count <= 0 or amount <= 0):
+            raise ValueError("Invalid or duplicate customer in debt evidence")
+        seen.add(key)
+        entries.append((key, name, amount, count))
+    if entries != sorted(entries, key=lambda entry: (-entry[2], entry[0])):
+        raise ValueError("Debt evidence disagrees with the sort and tie rule")
+    expected = [[name, int(_vnd(amount))] for _, name, amount, _ in entries[:plan.top_k]]
+    if rows != expected:
+        raise ValueError("Debt table differs from the ranked evidence")
+    open_orders = evidence.get("open_orders")
+    if (type(open_orders) is not int or open_orders < sum(entry[3] for entry in entries)
+            or _decimal_evidence(evidence.get("total_debt")) < sum(entry[2] for entry in entries)):
+        raise ValueError("Debt totals are inconsistent with the customer ranking")
 
 
 def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
@@ -38,6 +111,13 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
         if candidate.type == "unanswerable":
             if not candidate.evidence.get("coverage_source"):
                 raise ValueError("Unanswerable needs explicit data coverage evidence")
+            if plan is not None and plan.intent in C01_INTENTS:
+                diagnostic = candidate.evidence.get("debt_source_error", {})
+                if (plan.intent != "top_debt_customers" or not isinstance(diagnostic, dict)
+                        or candidate.evidence.get("snapshot") != plan.end.isoformat()
+                        or diagnostic.get("code") != "absent"
+                        or diagnostic.get("sources_complete") is not True):
+                    raise ValueError("C01 unanswerable requires a verified absent debt source")
             validate_record({"id": "execution", "type": candidate.type,
                              "answer": candidate.answer})
             return candidate
@@ -61,6 +141,10 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
                 expected = ANSWER_TYPES.get(plan.intent)
             if expected is None or candidate.type != expected:
                 raise ValueError("Answer type disagrees with Plan")
+            if plan.intent == "revenue_increasing":
+                _check_trend(candidate, plan)
+            if plan.intent == "top_debt_customers":
+                _check_debt_table(candidate, plan)
             if plan.intent == "cancel_rate" and not 0 <= candidate.answer <= 100:
                 raise ValueError("Cancellation percentage outside [0, 100]")
             if plan.intent == "count_where":
@@ -96,7 +180,7 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
             if candidate.type == "string" and not candidate.answer:
                 raise ValueError("Empty product name")
         return candidate
-    except (ValueError, TypeError, AttributeError, OverflowError) as exc:
+    except (ValueError, TypeError, AttributeError, KeyError, ArithmeticError) as exc:
         evidence = (dict(candidate.evidence) if isinstance(candidate, Candidate)
                     and isinstance(candidate.evidence, dict) else {})
         evidence["validation"] = {"status": "rejected", "error": str(exc)}

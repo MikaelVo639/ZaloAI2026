@@ -1,8 +1,7 @@
 """S01: grammar for the C01 intents revenue_increasing (boolean) and top_debt_customers (table).
 
 Contract: docs/AGENT_02_CONTRACT.md §4-§5. Rulebook rows are synthetic paraphrases written for
-tests, not organizer data. The executor is A01's work: until then every Plan below must be
-refused by the current backend, so these questions keep abstaining.
+tests, not organizer data.
 """
 import unittest
 from datetime import date
@@ -84,6 +83,9 @@ class RevenueIncreasingTests(unittest.TestCase):
         for text in (
                 "doanh thu 3 tháng 3/2026 2/2026 4/2026 có tăng liên tục không",   # not in order
                 "doanh thu 3 tháng 2/2026 2/2026 4/2026 có tăng liên tục không",   # duplicate
+                "doanh thu 2 tháng 2/2026 4/2026 có tăng liên tục không",           # missing March
+                "doanh thu có phải tháng 4/2026 cao hơn tháng 2/2026 không",        # nonadjacent
+                "doanh thu 2 tháng 2/2026 3/2026 không tăng liên tục hả",
                 "doanh thu 2 tháng 2/2026 3/2026 4/2026 có tăng liên tục không",   # count differs
                 "doanh thu tháng 4/2026 có tăng liên tục không",                   # one month
                 "doanh thu có tăng liên tục không",                                # no month
@@ -106,10 +108,20 @@ class RevenueIncreasingTests(unittest.TestCase):
         text = "doanh thu 3 tháng 2/2026 3/2026 4/2026 có tăng liên tục không"
         self.assertIsNone(plan(text, book=rulebook("boolean")))
         self.assertIsNone(plan(text, book=rulebook("month")))
+        for key, replacement in (
+            ("boolean", "| boolean | Không trả true / false |"),
+            ("month", "| Tháng M/Y | Không tính cả tháng, ngày 1 đến ngày cuối tháng |"),
+        ):
+            with self.subTest(key=key):
+                self.assertIsNone(plan(text, book=rulebook().replace(ROWS[key], replacement)))
+        duplicate = rulebook(extra="| boolean | Không trả true / false |\n" + ROWS["boolean"])
+        self.assertIsNone(plan(text, book=duplicate))
         defined = rulebook(extra="| Tăng liên tục | Tháng sau không thấp hơn tháng trước |")
         self.assertIsNone(plan(text, book=defined))  # another meaning: do not guess
         prose = rulebook(extra="Tăng liên tục nghĩa là tháng sau không thấp hơn tháng trước.")
         self.assertIsNone(plan(text, book=prose))
+        renamed = rulebook(extra="| Chỉ tiêu | Tăng liên tục nghĩa là không giảm |")
+        self.assertIsNone(plan(text, book=renamed))
         span = "Từ tháng 2/2026 đến tháng 4/2026 doanh thu tháng sau có luôn cao hơn tháng trước"
         self.assertIsNone(plan(span, book=rulebook("range")))
 
@@ -169,16 +181,29 @@ class TopDebtCustomersTests(unittest.TestCase):
                         "debt_excluded", "customers", "ties"):
             with self.subTest(missing=missing):
                 self.assertIsNone(plan(text, book=rulebook(missing)))
+        bad_table = rulebook().replace(ROWS["table"], ROWS["table"].replace("là", "không là"))
+        self.assertIsNone(plan(text, book=bad_table))
+        bad_debt = rulebook().replace(ROWS["debt_orders"],
+                                      ROWS["debt_orders"].replace("vẫn tính", "vẫn tính, cả đơn huỷ"))
+        self.assertIsNone(plan(text, book=bad_debt))
+
+    def test_debt_only_split_does_not_require_revenue_rules(self):
+        book = "\n".join(line for line in rulebook().splitlines()
+                         if "Đơn tính vào doanh thu" not in line)
+        text = "3 khách nợ nhiều nhất đến hết ngày 14/07/2026 kèm số tiền còn nợ"
+        self.assertEqual(plan(text, book=book).intent, "top_debt_customers")
+        trend = "doanh thu 2 tháng 2/2026 3/2026 có tăng liên tục không"
+        self.assertIsNone(plan(trend, book=book))
 
 
 class CurrentBackendTests(unittest.TestCase):
-    def test_new_plans_abstain_until_the_executor_exists(self):
+    def test_new_plans_still_need_a_current_split_rulebook(self):
         catalog = Catalog("b", "", ())
         for text in ("doanh thu 3 tháng 2/2026 3/2026 4/2026 có tăng liên tục không",
                      "3 khách nợ nhiều nhất đến hết ngày 14/07/2026 kèm số tiền còn nợ"):
             with self.subTest(text=text):
                 result = plan(text)
-                self.assertTrue(compute.unsupported(result))
+                self.assertFalse(compute.unsupported(result))
                 self.assertEqual(compute.answer_plan({}, catalog, result).type, "abstain")
 
     def test_sem02_month_series_is_unchanged(self):
