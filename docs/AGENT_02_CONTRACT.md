@@ -338,9 +338,12 @@ hiện trong dữ liệu. Nên chuyển sang cùng cờ do Data cung cấp; vi�
 | `debt_total` | `start == end == X` | number | tổng nợ còn lại tại X, **kể cả khách lẻ** | §4 ba dòng ở 6.4.5, §2 "Đến hết ngày X" |
 | `debt_total` + `Threshold("order", "age_days", ">", N)` | như trên | number | chỉ đơn có tuổi `X − day > N` ("quá / hơn / trên N ngày"); "từ N ngày trở lên" là `">="` | + §4 "Tuổi nợ", §2 "Quá N…" |
 | `debt_customer_count` | `start == end == X` | number | số khoá khách (không tính khách lẻ) có nợ > 0 | + §3 "Xác định khách", §4 "Nợ theo khách" |
-| `debt_collected` | kỳ `start..end` | number | tổng khoản trả có `start <= day <= end`, `day > ngày đặt`, của đơn `on_credit`, không huỷ (kể cả đơn kỳ trước, đơn trả hàng) | §4 "Nợ thêm, trả nợ, thu nợ trong kỳ" |
-| `debt_flow` + `Filter("customer", tên)` | kỳ `start..end` | list `[nợ thêm, trả được]` | nợ thêm = tổng theo đơn của `max(total − paid_on_order_day, 0)`, với các đơn `on_credit`, không huỷ, đặt trong kỳ; trả được như `debt_collected`; chỉ đơn của khách đó (khoá §6.5) | + §3 "Xác định khách" |
+| `debt_collected` | kỳ `start..end` | number | tổng khoản trả có `start <= day <= end`, `day > ngày đặt`, của đơn `on_credit`, không huỷ, `excluded == ""` (bỏ COD / sàn; kể cả đơn kỳ trước, đơn trả hàng) | §4 "Nợ thêm, trả nợ, thu nợ trong kỳ", "Đơn COD, đơn bán qua sàn TMĐT" |
+| `debt_flow` + `Filter("customer", tên)` | kỳ `start..end` | list `[nợ thêm, trả được]` | nợ thêm = tổng theo đơn của `max(total − paid_on_order_day, 0)`, với các đơn `on_credit`, không huỷ, `excluded == ""`, đặt trong kỳ; trả được như `debt_collected`; chỉ đơn của khách đó (khoá §6.5) | + §3 "Xác định khách" |
 
+- Đơn COD / sàn (`excluded != ""`) **không** vào `debt_collected` hay `debt_flow`, kể cả khi
+  hình thức ghi là ghi nợ (`on_credit=True`): rulebook §4 "không phải khách nợ … bỏ khỏi
+  công nợ". Ví dụ: đơn sàn 100.000, khách trả 30.000 sau ngày đặt → nợ thêm 0, trả được 0.
 - Nợ thêm của **một đơn** không bao giờ âm:
 
   ```python
@@ -417,8 +420,13 @@ hiện trong dữ liệu. Nên chuyển sang cùng cờ do Data cung cấp; vi�
 - ô số là int, tên cột đúng `DEBT_TABLE_COLUMNS`;
 - đối chiếu "Còn nợ" lệch → abstain.
 
-**`debt_flow`** (A01): tổng đơn 100.000, trả trong ngày đặt 120.000 → nợ thêm 0 (fixture
-trong `tests/test_contract_c01.py`); khoản trả sau ngày đặt chỉ vào "trả được".
+**`debt_flow` / `debt_collected`** (A01, fixture trong `tests/test_contract_c01.py`):
+
+- tổng đơn 100.000, trả trong ngày đặt 120.000 → nợ thêm 0 (`OVERPAID`);
+- khoản trả sau ngày đặt chỉ vào "trả được";
+- đơn sàn có `on_credit=True` (100.000, trả 30.000 sau ngày đặt) → `[0, 0]` (`MARKETPLACE_ONLY`);
+- cùng khách thêm một đơn ghi nợ thường và một đơn COD → chỉ đơn thường được tính:
+  `[60.000, 10.000]`, thu nợ cả shop 10.000 (`MARKETPLACE`).
 
 **Cả hai:** thiếu nguồn / luật, worker lỗi / timeout → abstain; evidence `code` / `result`
 khớp đáp án; backend cũ từ chối intent mới (`test_contract_c01.py`); regression SEM-02
@@ -434,9 +442,10 @@ script đọc nhãn train và dựng ledger thủ công cho từng business (án
 uv run python <thư mục C01>/verify/verify_c01_train.py --data-dir data/raw/train --holdout outputs/business_split.json
 ```
 
-- Script `C01/verify/verify_c01_train.py` và log lần chạy 06/11
-  `C01/verify/logs/verify_c01_train_20261106.txt` nằm trong thư mục bàn giao C01 (ngoài
-  repo), không commit. Log ghi: boolean 22 / 22 (bỏ 1 câu của business validation),
+- Script `C01/verify/verify_c01_train.py` và log mới nhất
+  `C01/verify/logs/verify_c01_train_20261107.txt` (sau khi bỏ COD / sàn khỏi thu nợ và
+  nợ thêm, kết quả không đổi vì ở 3 shop đã kiểm không có đơn ghi nợ nào là COD / sàn) nằm trong thư
+  mục bàn giao C01, chia sẻ cho nhóm qua kênh chung, không commit. Log ghi: boolean 22 / 22 (bỏ 1 câu của business validation),
   table 7 / 7, number / list 46 / 46, đối chiếu "Còn nợ" lệch 0 đơn ở cả 2 shop có cột này.
 - Đầu log ghi revision của checkout và SHA256 của `questions.jsonl`, `answers.jsonl`,
   `rulebook.md`, manifest holdout. `C01/verify/MANIFEST.json` ghi SHA256 của script, log
@@ -452,7 +461,7 @@ uv run python <thư mục C01>/verify/verify_c01_train.py --data-dir data/raw/tr
 |---|---|---|---|
 | Semantics | @Kurosuz | tên intent, Plan, luật bắt buộc, nghĩa "tăng liên tục", phạm vi abstain | đề xuất trong PR C01 |
 | Data | @longlth2297 | nguồn / cột / nhãn §6, kiểm tra 6.4, cách xác định `uses_customer_codes` §6.5, mã lỗi `absent` / `customer_mode` | **đã xác nhận** ở `9c4e726`; các lưu ý triển khai của Data đã ghi vào §6.2–6.4 (không đổi interface) |
-| Agent | @tqhuy0602 | executor / evidence / validation §4–§5, khoá khách §6.5, nợ thêm §7, tương thích backend, regression §10 | review lần 1 xong (2 điểm đã sửa), chờ kiểm lại |
+| Agent | @tqhuy0602 | executor / evidence / validation §4–§5, khoá khách §6.5, nợ thêm §7, tương thích backend, regression §10 | review lần 1 (2 điểm) và lần 2 sau merge (COD / sàn trong §7) đã sửa; chờ kiểm lại PR bổ sung |
 
 Chỉ coi C01 xong khi cả ba xác nhận trên PR và issue #15. Phần kiểm tra format
 boolean / table hiện có **không** được coi là đã trả lời được các câu này.
