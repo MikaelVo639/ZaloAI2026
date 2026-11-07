@@ -19,6 +19,7 @@ from datamate.contracts import Catalog, DebtLedger, DebtOrder, DebtPayment
 from datamate.ingestion.readme_sales import (
     ReadmeSalesError,
     Section,
+    _header_names,
     _matching_tables,
     _records,
     parse_amount,
@@ -73,6 +74,7 @@ def _field(meaning: str) -> str | None:
         "ngay ban": "order_day",
         "trang thai don": "status",
         "ma khach": "customer_id",
+        "ma khach trong": "customer_id",
         "ten khach": "customer_name",
         "hinh thuc thanh toan": "payment_method",
         "kenh ban": "channel",
@@ -85,6 +87,9 @@ def _field(meaning: str) -> str | None:
         "tong phai thu ca don": "order_total",
         "so tien cua don chua thu tinh den het ngay cuoi du lieu": "closing_debt",
         "con no cuoi du lieu": "closing_debt",
+        "con no": "closing_debt",
+        "da thanh toan": "paid_to_date",
+        "so tien khach da tra cho don": "paid_to_date",
     }
     if text in exact:
         return exact[text]
@@ -98,7 +103,79 @@ def _field(meaning: str) -> str | None:
         return "order_total"
     if "con no" in text and ("cuoi du lieu" in text or "chua thu" in text):
         return "closing_debt"
+    if text.startswith(("con no", "du no")):
+        return "closing_debt"
+    if "da tra" in text or "da thanh toan" in text:
+        return "paid_to_date"
+    if text.startswith("tong tien don"):
+        return "order_total"
+    if text.startswith("so tien") and "lan do" in text:
+        return "payment_amount"
     return None
+
+
+# Debt-specific, reviewed export profiles.  They are selected by complete structural
+# signatures and README evidence, never by business id.  A recognised but incomplete
+# table remains a partial source and is rejected by _role_sections.
+_DEBT_PROFILES = (
+    ("debt_pos_kiotviet.v1", (
+        ({"Mã hóa đơn", "Thời gian", "Trạng thái", "Tổng sau giảm giá",
+          "Phương thức thanh toán"}, {
+            "Mã hóa đơn": "mã đơn", "Thời gian": "ngày bán",
+            "Trạng thái": "trạng thái đơn",
+            "Tổng sau giảm giá": "số khách phải trả cho cả đơn",
+            "Phương thức thanh toán": "hình thức thanh toán",
+            "Kênh bán": "kênh bán", "Mã KH": "mã khách",
+            "Khách hàng": "tên khách", "Khách đã trả": "đã thanh toán",
+        }),
+        ({"Mã hóa đơn", "Thời gian", "Giá trị"}, {
+            "Mã hóa đơn": "mã đơn", "Thời gian": "thời điểm thu",
+            "Giá trị": "số tiền trả lần đó",
+        }),
+        ({"Mã khách hàng", "Tên khách hàng"}, {
+            "Mã khách hàng": "mã khách", "Tên khách hàng": "tên khách",
+        }),
+    )),
+    ("debt_banhang.v1", (
+        ({"Order ID", "Ngày bán", "Trạng thái", "Tong tien", "Phương thức TT"}, {
+            "Order ID": "mã đơn", "Ngày bán": "ngày bán",
+            "Trạng thái": "trạng thái đơn", "Tong tien": "tổng phải thu cả đơn",
+            "Phương thức TT": "hình thức thanh toán", "Nguồn đơn": "kênh bán",
+            "Mã KH mua": "mã khách", "Tên KH": "tên khách",
+            "Còn nợ": "còn nợ cuối dữ liệu", "Đã thu": "đã thanh toán",
+        }),
+        ({"Mã bill", "Thời gian thu", "Số tiền thu"}, {
+            "Mã bill": "mã đơn", "Thời gian thu": "thời điểm thu",
+            "Số tiền thu": "số tiền trả lần đó",
+        }),
+        ({"Customer ID", "ten_kh"}, {
+            "Customer ID": "mã khách", "ten_kh": "tên khách",
+        }),
+    )),
+)
+
+
+def _profile_sections(catalog: Catalog, documented: list[Section]) -> list[Section]:
+    text = fold(catalog.readme)
+    if not ("pos" in text.split() or "phan mem ban hang" in text):
+        return []
+    covered = {filename_key(section.file) for section in documented}
+    headers = [(table, _header_names(table)) for table in catalog.tables
+               if filename_key(table.path.name) not in covered]
+    for version, signatures in _DEBT_PROFILES:
+        found: list[Section] = []
+        for table, header in headers:
+            for required, meanings in signatures:
+                if required <= header:
+                    found.append(Section(
+                        table.path.name, table.name,
+                        {column: meaning for column, meaning in meanings.items()
+                         if column in header}, origin=version))
+                    break
+        if any("order_total" in _section_fields(s, {}) for s in found) and any(
+                "payment_amount" in _section_fields(s, {}) for s in found):
+            return found
+    return []
 
 
 def _debt_references(readme: str) -> tuple[dict[str, str], tuple[str, ...]]:
@@ -170,14 +247,23 @@ def _section_fields(section: Section, references: dict[str, str]) -> dict[str, s
 
 def _documented_sources_complete(catalog: Catalog, sections: Iterable[Section]) -> bool:
     documented = {filename_key(section.file) for section in sections}
+    in_files = False
+    for line in catalog.readme.splitlines():
+        if line.startswith("## "):
+            in_files = fold(line[3:]).strip() == "file"
+            continue
+        if in_files:
+            match = re.match(r"\s*-\s+`([^`]+)`", line)
+            if match:
+                documented.add(filename_key(match.group(1)))
     present = {filename_key(table.path.name) for table in catalog.tables}
     return bool(catalog.readme.strip()) and bool(documented) and present <= documented
 
 
 def _has_debt_hint(catalog: Catalog, sections: Iterable[Section]) -> bool:
-    if any(token in fold(catalog.readme) for token in ("cong no", "khoan tra", "con no")):
+    if any("**cong no**" in fold(line) for line in catalog.readme.splitlines()):
         return True
-    return any(_field(meaning) in {"payment_amount", "order_total", "closing_debt"}
+    return any(_field(meaning) in {"payment_amount", "paid_to_date", "closing_debt"}
                for section in sections for meaning in section.columns.values())
 
 
@@ -212,6 +298,7 @@ def _role_sections(catalog: Catalog, sections: list[Section], references: dict[s
     }
     all_mappings: dict[str, dict[str, str]] = {}
     resolved_references: set[str] = set()
+    incomplete: list[dict[str, Any]] = []
     for section in sections:
         for column in section.columns:
             referenced = _referenced_field(references, section, column)
@@ -226,6 +313,13 @@ def _role_sections(catalog: Catalog, sections: list[Section], references: dict[s
             role = "payments"
         elif {"customer_id", "customer_name"} <= set(fields) and "order_id" not in fields:
             role = "customers"
+        elif fields.get("order_total") or fields.get("closing_debt") or fields.get(
+                "paid_to_date") or ("order_day" in fields and "status" in fields):
+            incomplete.append({"source": section.label, "role": "orders",
+                               "fields": sorted(fields)})
+        elif "payment_amount" in fields or "payment_day" in fields:
+            incomplete.append({"source": section.label, "role": "payments",
+                               "fields": sorted(fields)})
         if role:
             try:
                 tables = _matching_tables(catalog, section)
@@ -235,6 +329,9 @@ def _role_sections(catalog: Catalog, sections: list[Section], references: dict[s
                 raise DebtSourceError("column_missing", "README source is not present",
                                       source=section.label)
             roles[role].append((section, fields))
+    if incomplete:
+        raise DebtSourceError("partial", "A documented debt source is incomplete",
+                              sources=incomplete)
     missing_references = {"payment_amount", "order_total"} - resolved_references
     if missing_references:
         raise DebtSourceError("column_missing", "README debt columns do not exist",
@@ -272,16 +369,35 @@ def _required(row: dict[str, Any], fields: Iterable[str], *, role: str, source: 
                               role=role, source=source, fields=missing)
 
 
-def _amount(value: Any, *, field: str, source: str, positive: bool = False) -> Decimal:
+def _amount(value: Any, *, field: str, source: str,
+            multiplier: Decimal = Decimal(1)) -> Decimal:
     try:
         result = parse_amount(value)
     except (TypeError, ValueError) as exc:
-        raise DebtSourceError("column_missing", "Debt amount could not be parsed",
+        raise DebtSourceError("amount", "Debt amount could not be parsed",
                               field=field, source=source) from exc
-    if result < 0 or (positive and result == 0):
-        raise DebtSourceError("column_missing", "Debt amount has an unsupported sign",
+    if result < 0:
+        raise DebtSourceError("amount", "Debt amount has an unsupported sign",
                               field=field, source=source)
-    return result
+    return result * multiplier
+
+
+def _money_unit(readme: str) -> tuple[str, Decimal, tuple[str, ...]]:
+    """Return the reviewed unit used by all debt money columns.
+
+    The challenge sources use VND when no scale is stated.  A global thousand-VND
+    convention is explicit enough to convert; any other stated scale is unsupported.
+    """
+    evidence = tuple(line.strip() for line in readme.splitlines()
+                     if "don vi" in fold(line) and any(
+                         token in fold(line) for token in ("tien", "dong", "vnd")))
+    folded = "\n".join(fold(line) for line in evidence)
+    if "nghin dong" in folded or "ngan dong" in folded:
+        return "thousand_vnd", Decimal(1000), evidence
+    if any(token in folded for token in ("trieu dong", "ty dong", "usd", "cent", "xu")):
+        raise DebtSourceError("amount", "Debt money unit is unsupported",
+                              evidence=list(evidence))
+    return "vnd", Decimal(1), evidence
 
 
 def _day(value: Any, *, field: str, source: str, sheet: str) -> date:
@@ -333,6 +449,7 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
     fully checked ledger or raises :class:`DebtSourceError` with a stable code.
     """
     sections = parse_sections(catalog.readme)
+    sections += _profile_sections(catalog, sections)
     references, readme_lines = _debt_references(catalog.readme)
     if not _has_debt_hint(catalog, sections):
         if _documented_sources_complete(catalog, sections):
@@ -340,10 +457,12 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
         raise DebtSourceError("column_missing", "README is incomplete for debt detection")
     required_references = {"payment_amount", "order_total"}
     if not required_references <= set(references.values()):
-        raise DebtSourceError("column_missing", "README debt convention is incomplete",
+        code = "partial" if not references else "column_missing"
+        raise DebtSourceError(code, "README debt convention is incomplete",
                               fields=sorted(required_references - set(references.values())))
     rules = _rule_rows(rulebook)
     roles, mappings = _role_sections(catalog, sections, references)
+    money_unit, money_multiplier, money_evidence = _money_unit(catalog.readme)
 
     order_schema = [(section, fields) for section, fields in roles["orders"]]
     if all("customer_id" in fields for _section, fields in order_schema):
@@ -401,7 +520,8 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
             "day": _day(row["order_day"], field="order_day", source=source,
                         sheet=section.sheet or ""),
             "state": state,
-            "total": _amount(row["order_total"], field="order_total", source=source),
+            "total": _amount(row["order_total"], field="order_total", source=source,
+                             multiplier=money_multiplier),
             "payment_method": payment_method,
             "on_credit": on_credit,
             "excluded": excluded,
@@ -422,11 +542,13 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
             raise DebtSourceError("customer_mode", "A no-code shop produced a customer code",
                                   source=raw["source"])
         name = customers.get(customer_id or "") or raw["customer_name"]
-        if name and normalize_label(name) in _WALK_IN_NAMES:
+        if (not uses_customer_codes or customer_id is None) and name and normalize_label(
+                name) in _WALK_IN_NAMES:
             customer_id, name = None, None
         if raw["closing_column"] and not _blank(raw["closing_debt"]):
             closing[raw["order_id"]] = _amount(
-                raw["closing_debt"], field="closing_debt", source=raw["source"])
+                raw["closing_debt"], field="closing_debt", source=raw["source"],
+                multiplier=money_multiplier)
         orders.append(DebtOrder(
             raw["order_id"], raw["day"], raw["state"], raw["total"],
             raw["payment_method"], raw["on_credit"], raw["excluded"],
@@ -434,6 +556,7 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
         ))
 
     payments: list[DebtPayment] = []
+    zero_payments = 0
     for section, table_key, ordinal, row in _rows(catalog, roles["payments"]):
         source = f"{table_key}#{ordinal}"
         _required(row, ("order_id", "payment_day", "payment_amount"),
@@ -442,12 +565,14 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
         if order_id not in seen_orders:
             raise DebtSourceError("orphan", "Payment references a missing order",
                                   source=source)
+        amount = _amount(row["payment_amount"], field="payment_amount", source=source,
+                         multiplier=money_multiplier)
+        zero_payments += amount == 0
         payments.append(DebtPayment(
             order_id,
             _day(row["payment_day"], field="payment_day", source=source,
                  sheet=section.sheet or ""),
-            _amount(row["payment_amount"], field="payment_amount", source=source,
-                    positive=True),
+            amount,
             source,
         ))
 
@@ -471,7 +596,7 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
             if order.order_id not in closing:
                 raise DebtSourceError("reconcile", "Closing debt is missing for an order",
                                       source=order.source)
-            calculated = order.total - paid[order.order_id]
+            calculated = max(order.total - paid[order.order_id], Decimal(0))
             if calculated != closing[order.order_id]:
                 raise DebtSourceError("reconcile", "Closing debt does not match payments",
                                       source=order.source)
@@ -482,7 +607,8 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
         for role, entries in roles.items()
     }
     columns = {
-        role: [{"source": section.label, "fields": dict(sorted(fields.items()))}
+        role: [{"source": section.label, "origin": section.origin,
+                "fields": dict(sorted(fields.items()))}
                for section, fields in entries]
         for role, entries in roles.items()
     }
@@ -495,6 +621,7 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
         "checks": {
             "orders_unique": len(orders),
             "payments_joined": len(payments),
+            "zero_payments": zero_payments,
             "orphan_payments": 0,
             "closing_debt_present": closing_column_present,
             "closing_debt_checked": checked,
@@ -503,7 +630,12 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
         "coverage": {
             "first_day": min(order.day for order in orders).isoformat(),
             "last_day": last_day.isoformat(),
-            "source": "readme" if documented_last else "latest_record",
+            "source": "readme" if documented_last else "observed",
+        },
+        "money": {
+            "unit": money_unit,
+            "multiplier_to_vnd": str(money_multiplier),
+            "evidence": list(money_evidence),
         },
         "customer_identity": {
             "uses_customer_codes": uses_customer_codes,

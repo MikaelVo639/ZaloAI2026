@@ -6,10 +6,10 @@
 
 **Branch:** `codex/data-d01-debt-ledger`
 
-**Contract dependency:** C01-fixes `9c4e726`
+**Contract dependency:** C01-fixes `9c4e726`; aligned with the Data notes in C01 PR #26
 
-**Status:** implementation and synthetic regression complete; awaiting team review and
-train-artifact verification.
+**Status:** review fixes, synthetic regression and reviewed development-source
+verification complete; awaiting team re-review.
 
 ## 1. Scope delivered
 
@@ -27,6 +27,10 @@ Agent execution:
 - `uses_customer_codes` derived from README/schema, never from observed row values;
 - `customer_mode` failure when the README/schema cannot determine the shop mode;
 - source, column, README, rule, label, coverage and check lineage.
+- reviewed structural profiles for the KiotViet-style POS and BanHang exports;
+- strict detection of incomplete sibling files/sheets before role selection;
+- VND/thousand-VND unit handling with evidence and unsupported-unit rejection;
+- zero-payment retention/counting and non-negative receivable reconciliation.
 
 The adapter reuses the existing catalog/read-only table readers and README record helpers,
 so CSV, XLSX, SQLite and XLSX report headers follow the same source handling as DATA-03.
@@ -42,10 +46,12 @@ so CSV, XLSX, SQLite and XLSX report headers follow the same source handling as 
 | Walk-in | Reviewed walk-in labels become no customer key. |
 | Status | Uses the shared four-state `order_state`; unknown labels → `label`. |
 | COD/marketplace | Stores `excluded="cod"` or `excluded="marketplace"`; no debt calculation is performed in D01. |
-| Missing capability | Partial/ambiguous source → abstention error; only a fully documented shop with no debt source receives `absent`. |
-| Coverage | README `Dữ liệu có đến hết …` first; otherwise latest observed order/payment date. A README date earlier than a record is `reconcile`. |
-| Closing debt | For every non-cancelled, non-excluded order: `total - payments_through_last_day` must exactly equal the documented closing value. |
-| Money sign | Negative order totals and non-positive payment rows are rejected unless a later reviewed contract explicitly supports reversal/refund rows. |
+| Missing capability | Partial/ambiguous source → `partial`/typed abstention error; only a fully documented shop with no numeric debt signal receives `absent`. Deadline-only tables are not numeric debt signals. |
+| Coverage | README `Dữ liệu có đến hết …` first; otherwise latest observed order/payment date with lineage source `observed`. A README date earlier than a record is `reconcile`. |
+| Closing debt | For every non-cancelled, non-excluded order, a confirmed non-negative receivable is reconciled as `max(total - payments_through_last_day, 0)`. |
+| Money sign | Negative totals/payments → `amount`; zero payments are retained and counted in lineage. |
+| Money unit | Default source currency is VND; an explicit reviewed `nghìn đồng` convention is converted by 1,000. Unsupported stated scales → `amount`. |
+| Missing channel | Remains `partial`; D01 does not infer `Store` or absence of marketplace orders. |
 
 ## 3. Files changed
 
@@ -53,6 +59,7 @@ so CSV, XLSX, SQLite and XLSX report headers follow the same source handling as 
 |---|---|
 | `src/datamate/ingestion/debt.py` | Debt source discovery, parsing, validation, reconciliation and lineage. |
 | `tests/test_ingestion_debt.py` | Synthetic D01 regression for valid and rejected source cases. |
+| `scripts/verify_debt_train.py` | Development-only audit runner with validation-business guard and source checksums. |
 | `docs/DATA_D01_HANDOFF.md` | This review handoff. |
 
 No changes were made to `contracts.py`, `semantics/`, Agent executor/validation,
@@ -77,6 +84,12 @@ pipeline, scorer or model code beyond inheriting the C01-fixes base commit.
 - [x] Shop without codes, identified by customer-name schema.
 - [x] Ambiguous customer mode → `DebtSourceError("customer_mode")`.
 - [x] Lineage records sources, fields, rules, checks, coverage and customer-mode basis.
+- [x] Incomplete second payment file is rejected instead of silently skipped.
+- [x] Deadline-only source is `absent`; paid/closing amount hints are partial.
+- [x] VND, thousand-VND conversion and unsupported money unit.
+- [x] Coded customer keeps its code when the display name is `Khách lẻ`.
+- [x] Zero payment is retained/countable; overpayment reconciles to zero receivable.
+- [x] Reviewed POS profile resolves report/source roles without business-id dispatch.
 
 ## 5. Verification run
 
@@ -89,28 +102,43 @@ python -m unittest discover -s tests
 git diff --check
 ```
 
-Local Windows checkout results after rebasing onto C01-fixes:
+Local Windows checkout results at the review-fix revision:
 
 | Check | Result |
 |---|---|
-| C01 + D01 focused tests | 27 passed |
+| D01 focused tests | 18 passed |
+| Reviewed raw development sources | `biz_109`: 33,065 orders / 36,974 payments; `biz_124`: 51,044 / 51,238 |
+| Closing reconciliation | `biz_124`: 47,852 applicable orders checked, 0 mismatch |
+| Missing-channel capability | `biz_106`, `biz_129`: typed `partial`, no inferred channel |
+| Deadline-only capability | `biz_116`, `biz_118`: `absent` |
 | Smoke | 24/24 records; local proxy 21 correct, 0 wrong, 3 abstain |
-| Full suite | 267 passed in 29.150s |
+| Full suite | 273 passed in 31.877s |
+| `git diff --check` / compile | Pass |
 | `git diff --check` | Pass |
 
 The proxy score is local and not an official competition score.
 
-## 6. Evidence still required before calling D01 complete on train
+## 6. Development-source evidence
 
-The repository checkout does not contain raw train data or the C01 external verification
-folder. Before merge/acceptance, the team should provide or run:
+Generate the ignored, non-raw evidence artifact with:
+
+```sh
+python scripts/verify_debt_train.py --train-root <train> --output outputs/d01_train_evidence.json
+```
+
+The artifact records revision, rulebook/source SHA256, status, counts and full safe
+lineage. The script rejects the six fixed validation businesses. Current reviewed result:
+
+- `biz_109`: supported POS workbook/multi-sheet source;
+- `biz_124`: supported BanHang orders/payments/customers and exact closing reconciliation;
+- `biz_106`, `biz_129`: unsupported until C01 decides the no-channel capability.
+
+External C01 acceptance artifacts still belong to the C01 owner:
 
 - `C01/verify/verify_c01_train.py`;
 - `C01/verify/logs/verify_c01_train_20261106.txt`;
 - the fixed `business_split.json` manifest and its checksum;
-- a run of `load_debt_ledger` on the train businesses selected by C01;
-- per-business source/README checksums and adapter lineage;
-- confirmation that closing-debt reconciliation has zero mismatched applicable orders;
+- the fixed split manifest/checksum (the audit runner carries a defensive fixed validation list);
 - explicit diagnostics for the report-style shop whose five table questions were not
   included in the manual `7/7` result.
 
@@ -121,10 +149,10 @@ Do not use validation/public/private businesses to add aliases or tune this adap
 ### Data / C01 owner
 
 - [ ] Confirm the payment/channel allowlist covers only labels reviewed in train README/data.
-- [ ] Confirm rejecting payment `<= 0` is correct, or provide a reviewed reversal/refund rule.
+- [x] Zero payment is retained; negative payment is rejected with `amount` per C01 PR #26.
 - [ ] Confirm fallback coverage to latest order/payment record when README has no date.
 - [ ] Provide the C01 external verification folder, manifest and checksums.
-- [ ] Run the adapter on the C01 development businesses and attach lineage/error summary.
+- [x] Run adapter on the four reviewed development debt sources and attach lineage/error summary.
 
 ### Huy / Agent reviewer
 

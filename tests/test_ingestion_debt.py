@@ -128,7 +128,7 @@ class DebtLedgerTests(_Shop):
         readme = README.replace("- Dữ liệu có đến hết 31/01/2026.\n", "")
         ledger = load_debt_ledger(self.catalog(readme=readme), RULEBOOK)
         self.assertEqual(ledger.last_day, date(2026, 1, 15))
-        self.assertEqual(ledger.lineage["coverage"]["source"], "latest_record")
+        self.assertEqual(ledger.lineage["coverage"]["source"], "observed")
 
     def test_duplicate_order_and_orphan_payment_are_rejected(self):
         duplicate = [
@@ -168,7 +168,7 @@ class DebtLedgerTests(_Shop):
         negative = [["Mã đơn", "Ngày thu", "Tiền thu"], ["D1", "01/01/2026", "-1"]]
         with self.assertRaises(DebtSourceError) as caught:
             load_debt_ledger(self.catalog(payments=negative), RULEBOOK)
-        self.assertEqual(caught.exception.code, "column_missing")
+        self.assertEqual(caught.exception.code, "amount")
 
         early = README.replace("31/01/2026", "05/01/2026")
         with self.assertRaises(DebtSourceError) as caught:
@@ -292,6 +292,119 @@ class DebtLedgerTests(_Shop):
         with self.assertRaises(DebtSourceError) as caught:
             load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
         self.assertEqual(caught.exception.code, "column_missing")
+
+    def test_incomplete_second_payment_file_is_not_silently_skipped(self):
+        readme = README.replace("- `customers.csv`\n", "- `customers.csv`\n- `payments_2.csv`\n")
+        readme += """
+## Cột trong `payments_2.csv`
+- **Mã đơn**: mã đơn
+- **Tiền thu**: số tiền trả lần đó
+"""
+        extra = {"payments_2.csv": [
+            ["Mã đơn", "Tiền thu"], ["D1", "10000"],
+        ]}
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(self.catalog(readme=readme, extra=extra), RULEBOOK)
+        self.assertEqual(caught.exception.code, "partial")
+
+    def test_money_units_are_converted_or_rejected_explicitly(self):
+        thousand = README.replace(
+            "- Dữ liệu có đến hết 31/01/2026.",
+            "- Dữ liệu có đến hết 31/01/2026.\n"
+            "- Tất cả các cột tiền có đơn vị nghìn đồng.",
+        )
+        ledger = load_debt_ledger(self.catalog(readme=thousand), RULEBOOK)
+        self.assertEqual(ledger.orders[0].total, Decimal("100000500"))
+        self.assertEqual(ledger.lineage["money"]["multiplier_to_vnd"], "1000")
+
+        unsupported = thousand.replace("nghìn đồng", "triệu đồng")
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(self.catalog(readme=unsupported), RULEBOOK)
+        self.assertEqual(caught.exception.code, "amount")
+
+    def test_coded_customer_keeps_real_code_even_when_display_name_is_walk_in(self):
+        customers = [["Mã KH", "Khách hàng"], ["K1", "Khách lẻ"], ["K2", "Bình"]]
+        ledger = load_debt_ledger(self.catalog(customers=customers), RULEBOOK)
+        self.assertEqual((ledger.orders[0].customer_id, ledger.orders[0].customer_name),
+                         ("K1", "Khách lẻ"))
+
+    def test_zero_payment_is_kept_and_overpayment_reconciles_to_zero_debt(self):
+        orders = [
+            ["Mã", "Ngày", "Trạng thái", "Tổng thu", "Thanh toán", "Kênh",
+             "Mã khách", "Tên khách", "Còn nợ"],
+            ["D1", "01/01/2026", "Xong", "100", "Ghi nợ", "Store", "K1", "An", "0"],
+        ]
+        payments = [
+            ["Mã đơn", "Ngày thu", "Tiền thu"],
+            ["D1", "01/01/2026", "0"],
+            ["D1", "02/01/2026", "120"],
+        ]
+        ledger = load_debt_ledger(self.catalog(orders=orders, payments=payments), RULEBOOK)
+        self.assertEqual([p.amount for p in ledger.payments], [Decimal(0), Decimal(120)])
+        self.assertEqual(ledger.lineage["checks"]["zero_payments"], 1)
+
+    def test_deadline_only_source_is_absent_but_paid_amount_hint_is_partial(self):
+        deadline = """# Shop
+## File
+- `orders.csv`
+## Cột trong `orders.csv`
+- **Mã**: mã đơn
+- **Hạn nợ**: hạn thanh toán
+"""
+        root = self.data / "shop"
+        root.mkdir(parents=True)
+        (root / "README.md").write_text(deadline, encoding="utf-8")
+        with (root / "orders.csv").open("w", encoding="utf-8-sig", newline="") as stream:
+            csv.writer(stream).writerows([["Mã", "Hạn nợ"], ["D1", "30"]])
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+        self.assertEqual(caught.exception.code, "absent")
+
+        partial = deadline.replace("hạn thanh toán", "số tiền khách đã trả cho đơn")
+        (root / "README.md").write_text(partial, encoding="utf-8")
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+        self.assertEqual(caught.exception.code, "partial")
+
+    def test_reviewed_pos_profile_resolves_orders_payments_and_customers(self):
+        readme = """# Shop
+File máy POS xuất ra.
+## File
+- `orders.csv`
+- `payments.csv`
+- `customers.csv`
+## Quy ước
+- **Công nợ**: mỗi lần khách trả tiền cho một đơn là một dòng, **Giá trị** là số tiền trả lần đó; **Tổng sau giảm giá** là số khách phải trả cho cả đơn.
+- Dữ liệu có đến hết 31/01/2026.
+"""
+        root = self.data / "shop"
+        root.mkdir(parents=True)
+        (root / "README.md").write_text(readme, encoding="utf-8")
+        files = {
+            "orders.csv": [
+                ["Mã hóa đơn", "Thời gian", "Trạng thái", "Tổng sau giảm giá",
+                 "Phương thức thanh toán", "Kênh bán", "Mã KH", "Khách hàng",
+                 "Khách đã trả"],
+                ["D1", "01/01/2026", "Xong", "100", "Ghi nợ", "Store", "K1",
+                 "Tên trên đơn", "50"],
+            ],
+            "payments.csv": [
+                ["Mã phiếu", "Thời gian", "Mã hóa đơn", "Phương thức thanh toán",
+                 "Giá trị"],
+                ["P1", "02/01/2026", "D1", "Tiền mặt", "50"],
+            ],
+            "customers.csv": [
+                ["Mã khách hàng", "Tên khách hàng"], ["K1", "An"],
+            ],
+        }
+        for name, rows in files.items():
+            with (root / name).open("w", encoding="utf-8-sig", newline="") as stream:
+                csv.writer(stream).writerows(rows)
+        ledger = load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+        self.assertEqual((len(ledger.orders), len(ledger.payments)), (1, 1))
+        self.assertEqual(ledger.orders[0].customer_name, "An")
+        self.assertEqual(ledger.lineage["columns"]["orders"][0]["origin"],
+                         "debt_pos_kiotviet.v1")
 
 
 if __name__ == "__main__":
