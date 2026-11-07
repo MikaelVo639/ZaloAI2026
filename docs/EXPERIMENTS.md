@@ -381,3 +381,82 @@ optional runtime hoặc model snapshot/manifest, nên **chưa hoàn tất A/B mo
 threshold B hoặc đo private dưới 6 giờ**. Boolean/table mới có format validation;
 hai intent và nguồn công nợ trong `AGENT_02_CONTRACT.md` vẫn chờ thống nhất. Giữ
 #16 mở cho các điều kiện này, không suy ra hoàn tất role chỉ từ PR đã merge.
+
+## E01 — baseline đối chứng trên Windows, 07/11/2026
+
+Đã chạy `423a1924c855c7567565f1c2c9bb1f370d2dc10b` với
+`configs/baseline.toml`, Windows và Python 3.12.14. Checkout sạch lúc đo.
+`uv sync --locked`, smoke và `git diff --check` qua. Unit test có 239 bài đạt,
+1 bài bỏ qua vì tài khoản Windows thiếu quyền tạo symlink.
+
+| Phân vùng | Tổng | Đúng | Sai | Abstain | PA local |
+|---|---:|---:|---:|---:|---:|
+| Toàn train | 3.000 | 1.930 | 0 | 1.070 | 0.643333 |
+| 24 business phát triển | 2.370 | 1.546 | 0 | 824 | 0.652321 |
+| 6 business validation | 630 | 384 | 0 | 246 | 0.609524 |
+
+Đây là kết quả chấm local proxy trên dữ liệu train đã xem. Inference gồm startup
+mất 738,40 giây và toàn benchmark mất 814,95 giây. Đã đối chiếu đủ 3.000 ID và
+log với submission, 0 câu có lỗi thực thi. Submission trùng SHA256 với lượt
+review AGENT-02 ngày 06/11. Trường worker metadata vắng ở 1.011 câu theo báo cáo
+của runner.
+
+Bản holdout dùng seed 42, fraction 0.2. Đổi CRLF thành LF trên bản manifest
+Windows hiện có để khôi phục đúng checksum manifest của nhóm và giữ nguyên toàn
+bộ business/ID. Artifact nằm ngoài Git ở `outputs/e01/a0-423a192/`, có
+`experiment.json`, `metrics.json`, `handoff.json`, `artifact.zip` và checksum.
+
+| Thành phần | SHA256 |
+|---|---|
+| Input tree do runner Windows ghi | `b90ce894e1c351a377a8eeda12b100eca461b442c08184a0402d1f789cd4f1b4` |
+| Input tree khi xếp đường dẫn theo POSIX | `ab2cfe298b3f3a93a825f973a1e5f479ab5067eadc44bbb1d64fb08ef2fef54d` |
+| Reference | `0b5fe9d13edf5fae306bda9cafaf699c06b639846c8e1d9e41c39a86d1160b3d` |
+| Holdout | `7e356421711fd5ffe4a7ed29e49b67e03c809fa70e1d8aa0cf3c0a787fea2164` |
+| Scorer v2 | `49094297b726fedf05393ba60a1e77e7a1858226dc9438a55a5dfa8b53bb6b07` |
+| Config | `6b53304a32ac03b2b8c79a871369f2ebbba1c8839167446ab2847f043af1d371` |
+| Submission | `a64e4f71ddd8d5722b330371889c3e93269f192703d31c0dc0d47b566854ba60` |
+| Artifact ZIP | `8408f6997fb8b5ddfd0387cc26ac4a9b9ba4cd98d6b67ea5de8d61d1e6882fa1` |
+
+`e01_abstain_triage.csv` gán một chủ đề chính cho từng ID theo từ khóa và giữ
+riêng lý do runner ghi trong log. `e01_abstain_handoff.json` có số lượng theo
+phân vùng và ví dụ từ business phát triển. Các nhóm dưới đây là gợi ý để Long và
+các chủ module đối chiếu với log và nguồn dữ liệu.
+
+| Nhóm cần rà soát | Business phát triển | Validation | Tổng |
+|---|---:|---:|---:|
+| Giá bán | 135 | 8 | 143 |
+| Công nợ | 81 | 37 | 118 |
+| Nhập hàng | 77 | 26 | 103 |
+| Tồn kho hoặc lô | 47 | 19 | 66 |
+| Dấu hiệu vướng nguồn hoặc mapping khác | 13 | 9 | 22 |
+| Xu hướng doanh thu | 20 | 1 | 21 |
+| Nhóm khác đã có nhãn trong CSV | 321 | 107 | 428 |
+| Cần phân loại tiếp | 130 | 39 | 169 |
+| **Tổng** | **824** | **246** | **1.070** |
+
+Có 30 câu khớp nhiều chủ đề. Handoff đánh dấu 14 ứng viên train để rà soát
+`top_debt_customers` và 20 ứng viên train để rà soát `revenue_increasing`.
+Mỗi intent có tối đa 3 ví dụ để đối chiếu với contract. Minh review baseline,
+Long xác nhận nhóm dữ liệu, Huy và Kurosuz rà lại các ca được chuyển tiếp.
+
+Khi có head thuật toán cần review, chuẩn bị môi trường cho checkout đích rồi
+chạy từ checkout Evaluation với dữ liệu, manifest, scorer và config của A0.
+Giữ cùng máy Windows khi so thời gian. Dùng thư mục mới cho từng head.
+
+```sh
+uv run datamate benchmark --checkout ../candidate-checkout --data-dir data/raw/train --holdout outputs/e01/business_split.json --config outputs/e01/a0-423a192/config.toml --output-dir outputs/e01/candidate-new --compare-to outputs/e01/a0-423a192
+```
+
+Xem `comparison.json` và lấy tất cả chuyển trạng thái sang `wrong` trong
+`changes`, kể cả ngoài validation. So runtime và số ID sai trước khi chốt PR.
+Runner Windows và POSIX tính input tree theo thứ tự khác nhau. Nếu đổi máy sang
+Linux, chạy A0 lại trên máy đó trước khi so. Nếu đổi scorer trên cùng môi
+trường, tạo lượt `rescore` mới cho A0.
+
+**A vẫn là mặc định. B chưa đánh giá.** GPU preflight trên máy Windows này
+chưa đạt vì thiếu runtime CUDA và snapshot weights đã chuẩn bị. E02 chạy
+`scripts/run_agent02_acceptance.py` trên máy GPU đã chuẩn bị, dùng revision,
+config và manifest đã chốt cho A và hai lượt B. Xem từng gate trong
+`acceptance.json`, gồm generation thật, kết quả hai lượt, lỗi mới và runtime
+bao gồm load. Nếu hiệu chỉnh B, thu candidate với `min_confidence=0`, chọn
+ngưỡng trên business train, khóa config rồi chạy lại acceptance trên config đó.
