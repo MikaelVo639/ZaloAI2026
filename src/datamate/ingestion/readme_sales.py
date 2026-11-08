@@ -31,7 +31,7 @@ from typing import Any, Iterable, Iterator
 
 from datamate.contracts import Catalog, Table
 from datamate.ingestion.catalog import iter_rows
-from datamate.ingestion.sales import Sale, parse_date
+from datamate.ingestion.sales import Sale, parse_date, parse_minute
 from datamate.ingestion.source_names import filename_key
 from datamate.ingestion.status import StatusError, status_policy
 from datamate.semantics.text import fold
@@ -62,6 +62,9 @@ _MEANINGS = {
     "don vi lon": "big_unit",
     "kenh ban": "channel",
     "ma nhan vien ban": "staff_id",
+    # Order time for the rulebook shifts (ca sáng / ca chiều).
+    "gio dat don": "time",
+    "thoi diem dat don": "time",
 }
 _PREFIXES = (
     ("tien hang cua don", "order_goods"),
@@ -76,7 +79,7 @@ _OTHER_LISTS = (
     "han thanh toan", "ma phieu thu", "so luong nhap", "thoi diem thu",
 )
 _ORDER_FIELDS = ("order_id", "date", "status", "customer_name", "customer_id",
-                 "customer_group", "channel", "payment_method", "staff_id")
+                 "customer_group", "channel", "payment_method", "staff_id", "time")
 
 
 class ReadmeSalesError(ValueError):
@@ -166,6 +169,7 @@ _KIOTVIET = (
         "Khách hàng": "tên khách (Khách lẻ nếu không lưu)",
         "Kênh bán": "kênh bán", "Người bán": "mã nhân viên bán",
         "Phương thức thanh toán": "hình thức thanh toán",
+        "Thời gian tạo": "thời điểm đặt đơn (ngày giờ)",
     }),
     ({"Mã hóa đơn", "Mã hàng", "Tên hàng", "Số lượng", "Đơn giá", "Thành tiền",
       "Số lượng quy đổi"}, {
@@ -178,6 +182,11 @@ _KIOTVIET = (
         "Mã hàng": "mã hàng", "Tên hàng": "tên", "ĐVT": "đơn vị cơ bản",
         "Nhóm hàng(3 Cấp)": "nhóm hàng",
     }),
+    # Customer list with its group, as documented in KiotViet-export READMEs.
+    ({"Mã khách hàng", "Tên khách hàng", "Nhóm khách hàng"}, {
+        "Mã khách hàng": "mã khách", "Tên khách hàng": "tên khách",
+        "Nhóm khách hàng": "nhóm khách",
+    }),
 )
 # SQLite POS database (tables don_hang / chi_tiet_don / san_pham). The README of such a
 # shop documents the line amount (TriGia) and base quantity (SLQuyDoi) itself.
@@ -188,6 +197,7 @@ _SQLITE_POS = (
                         "của đơn",
         "MaKhachHang": "mã khách (trống nếu khách lẻ)", "KenhBanHang": "kênh bán",
         "MaNhanVien": "mã nhân viên bán", "PhuongThucTT": "hình thức thanh toán",
+        "ThoiGianLap": "thời điểm đặt đơn (ngày giờ)",
     }),
     ({"MaHoaDon", "SoThuTu", "MaHangHoa", "SL", "SLQuyDoi", "TriGia"}, {
         "MaHoaDon": "mã đơn", "SoThuTu": "số thứ tự dòng trong đơn", "MaHangHoa": "mã hàng",
@@ -212,6 +222,7 @@ _BANHANG = (
         "Mã KH mua": "mã khách (trống nếu khách lẻ)",
         "Tên KH": "tên khách (Khách lẻ nếu không lưu)", "Nguồn đơn": "kênh bán",
         "Mã NV bán": "mã nhân viên bán", "Phương thức TT": "hình thức thanh toán",
+        "Giờ tạo đơn": "giờ đặt đơn",
     }),
     ({"Mã giao dịch", "TT dòng", "Ma hang", "Slg", "SL cơ bản", "Thanh tien"}, {
         "Mã giao dịch": "mã đơn", "TT dòng": "số thứ tự dòng trong đơn", "Ma hang": "mã hàng",
@@ -718,7 +729,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         if orders and parent is None:
             orphan_lines += 1
             continue
-        state = order_state.setdefault(key, {"days": set(), "statuses": set(),
+        state = order_state.setdefault(key, {"days": set(), "statuses": set(), "times": set(),
                                              "negative": False, "returned": False})
         raw_date = line.get("date") if "date" in line_fields else (parent or {}).get("date")
         raw_status = line.get("status") if "status" in line_fields else (parent or {}).get("status")
@@ -748,6 +759,8 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         if not (negative and conventions.returns_as_negative_lines):
             state["days"].add(day)
             state["statuses"].add(status)
+            raw_time = line.get("time") if "time" in line_fields else (parent or {}).get("time")
+            state["times"].add(parse_minute(raw_time))
     if orphan_lines:
         raise ReadmeSalesError("ORPHAN_FK", "Lines reference orders missing from the order list",
                                orphan_lines=orphan_lines)
@@ -763,6 +776,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
 
     final_status: dict[str, str] = {}
     final_day: dict[str, date] = {}
+    final_time: dict[str, int | None] = {}
     for key, state in order_state.items():
         statuses = set(state["statuses"])
         if state["returned"] or (state["negative"] and conventions.returns_as_negative_lines):
@@ -777,6 +791,9 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
                                    states=len(statuses), days=len(state["days"]))
         final_status[key] = next(iter(statuses))
         final_day[key] = next(iter(state["days"]))
+        # One clock time per order; lines that disagree or a missing time leave it unknown.
+        times = state["times"]
+        final_time[key] = next(iter(times)) if len(times) == 1 else None
         status_counts[final_status[key]] += 1
 
     sales: list[Sale] = []
@@ -824,7 +841,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
             context["customer_group"] = context["customer_group"] or listed["group"]
             context["customer_name"] = context["customer_name"] or listed["name"]
         sales.append(Sale(key, final_day[key], final_status[key], amount, product_id,
-                          product_name, quantity_base,
+                          product_name, quantity_base, minute=final_time[key],
                           product_group=_text((product or {}).get("group")
                                               or line.get("product_group")),
                           **context))
@@ -963,7 +980,8 @@ def _from_orders(roles: dict[str, _Role], rules: _Rules
             amount = parse_amount(row.get("order_goods"))
         except (TypeError, ValueError) as exc:
             raise ReadmeSalesError("VALUE_INVALID", "Invoice date or amount unreadable") from exc
-        sales.append(Sale(key, day, status, amount, None, None, None))
+        sales.append(Sale(key, day, status, amount, None, None, None,
+                          minute=parse_minute(row.get("time"))))
         status_counts[status] += 1
     evidence = {
         "adapter_version": ADAPTER_VERSION,

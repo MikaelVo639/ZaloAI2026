@@ -15,7 +15,15 @@ from functools import lru_cache
 from typing import Any, Callable
 
 from datamate.agent.sales_source import load_business_sales
-from datamate.contracts import DEBT_TABLE_COLUMNS, Candidate, Catalog, DebtLedger, Plan
+from datamate.contracts import (
+    DEBT_TABLE_COLUMNS,
+    Candidate,
+    Catalog,
+    DebtLedger,
+    DebtOrder,
+    DebtPayment,
+    Plan,
+)
 from datamate.ingestion.debt import DebtSourceError, _coverage_day, load_debt_ledger
 from datamate.ingestion.sales import Sale
 from datamate.semantics.rules import DEBT_TABLE_FEATURES, read_rules
@@ -267,11 +275,15 @@ def share_percent(part: Decimal, whole: Decimal) -> float | None:
 
 
 C01_INTENTS = frozenset({"revenue_increasing", "top_debt_customers"})
+# Contract C01 §7: further debt questions on the same D01 ledger.
+DEBT_INTENTS = frozenset({"debt_total", "debt_customer_count", "debt_collected", "debt_flow"})
+DEBT_MEASURE_FEATURES = ("debt_orders", "debt_at_date", "debt_excluded", "customer_identity")
 INTENTS = frozenset({"revenue", "order_count", "top_products", "average_order",
                      "cancel_count", "cancel_rate", "best_day",
-                     "top_customers", "count_where", "quantity"}) | C01_INTENTS
+                     "top_customers", "count_where", "quantity"}) | C01_INTENTS | DEBT_INTENTS
 # Plan filters this backend applies, and the intents each one may be combined with.
 FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity"}),
+              "shift": frozenset({"revenue", "order_count"}),
               "product_group": frozenset({"revenue"}),
               "customer_group": frozenset({"revenue"})}
 GROUP_FIELDS = ("product_group", "customer_group")
@@ -287,6 +299,25 @@ def unsupported(plan: Plan) -> str:
     """
     if plan.intent not in INTENTS:
         return f"Intent {plan.intent!r} not supported by baseline agent"
+    if plan.intent in DEBT_INTENTS:
+        if (plan.comparison or plan.compare_start is not None or plan.periods or plan.shape
+                or plan.unit or plan.rank_by or plan.top_k != 1):
+            return f"Unsupported fields for {plan.intent}"
+        snapshot = plan.intent in ("debt_total", "debt_customer_count")
+        if snapshot and plan.start != plan.end:
+            return "Debt balance is a snapshot at one day"
+        if plan.intent == "debt_flow":
+            if len(plan.filters) != 1 or plan.filters[0].field != "customer":
+                return "Debt flow needs one customer"
+        elif plan.filters:
+            return f"Filters not supported for {plan.intent}"
+        t = plan.threshold
+        if t is not None and (plan.intent != "debt_total" or t.subject != "order"
+                              or t.measure != "age_days" or t.op not in (">", ">=")
+                              or not isinstance(t.value, Decimal) or t.value < 0
+                              or t.value != t.value.to_integral()):
+            return "Only debt_total takes an order age threshold"
+        return ""
     if plan.intent in C01_INTENTS:
         if (plan.filters or plan.threshold is not None or plan.comparison
                 or plan.compare_start is not None or plan.compare_end is not None
@@ -311,6 +342,11 @@ def unsupported(plan: Plan) -> str:
                        and plan.filters[0].field in GROUP_FIELDS)
         if not group_share and (plan.intent != "count_where" or plan.threshold is None):
             return f"Comparison 'share' for {plan.intent!r} not supported"
+    elif plan.comparison == "shift_change_percent":
+        if (plan.intent not in ("revenue", "order_count") or plan.compare_start is not None
+                or plan.compare_end is not None or len(plan.filters) != 1
+                or plan.filters[0].field != "shift"):
+            return "Shift comparison needs one shift filter and no comparison period"
     elif plan.comparison or plan.compare_start or plan.compare_end:
         if (plan.comparison != "change_percent" or plan.intent != "revenue" or plan.filters
                 or not (plan.compare_start and plan.compare_end)):
@@ -426,6 +462,143 @@ def debt_ranking(ledger: DebtLedger, day: date
     return ranked, open_orders, total_debt
 
 
+def open_debts(ledger: DebtLedger, day: date) -> list[tuple[DebtOrder, Decimal]]:
+    """Orders still owing at the end of ``day`` (C01 §4): not cancelled, not COD /
+    marketplace, ordered by ``day``; payments counted up to ``day``."""
+    paid: dict[str, Decimal] = defaultdict(Decimal)
+    for payment in ledger.payments:
+        if payment.day <= day:
+            paid[payment.order_id] += payment.amount
+    result = []
+    for order in ledger.orders:
+        if order.day > day or order.state == "huy" or order.excluded:
+            continue
+        remaining = order.total - paid[order.order_id]
+        if remaining > 0:
+            result.append((order, remaining))
+    return result
+
+
+def debt_total(ledger: DebtLedger, day: date, min_age: int | None = None,
+               inclusive: bool = False) -> Decimal:
+    """Total owed at the end of ``day``, walk-in orders included; optionally only orders
+    older than ``min_age`` days (age = day - order day; ``inclusive``: age >= min_age)."""
+    total = Decimal(0)
+    for order, remaining in open_debts(ledger, day):
+        age = (day - order.day).days
+        if min_age is None or age > min_age or (inclusive and age == min_age):
+            total += remaining
+    return total
+
+
+def debt_customer_count(ledger: DebtLedger, day: date) -> int:
+    """Customers (not walk-in) who still owe at the end of ``day``."""
+    keys = {_debt_key(order, ledger) for order, _ in open_debts(ledger, day)}
+    return len(keys - {None})
+
+
+def _debt_key(order: DebtOrder, ledger: DebtLedger) -> str | None:
+    return (order.customer_id if ledger.uses_customer_codes
+            else _customer_name_key(order.customer_name))
+
+
+def debt_flow(ledger: DebtLedger, start: date, end: date,
+              key: str | None = None) -> tuple[Decimal, Decimal]:
+    """[nợ thêm, trả được] of credit orders (of one customer when ``key`` is given), C01 §7.
+
+    Nợ thêm: unpaid part of orders placed in the period, after payments on the order day.
+    Trả được: payments made in the period after the order day, any order date."""
+    payments: dict[str, list[DebtPayment]] = defaultdict(list)
+    for payment in ledger.payments:
+        payments[payment.order_id].append(payment)
+    new = repaid = Decimal(0)
+    for order in ledger.orders:
+        if not order.on_credit or order.state == "huy" or order.excluded:
+            continue
+        if key is not None and _debt_key(order, ledger) != key:
+            continue
+        own = payments[order.order_id]
+        if start <= order.day <= end:
+            same_day = sum((p.amount for p in own if p.day == order.day), Decimal(0))
+            new += max(order.total - same_day, Decimal(0))
+        repaid += sum((p.amount for p in own if order.day < p.day and start <= p.day <= end),
+                      Decimal(0))
+    return new, repaid
+
+
+def _debt_customer(ledger: DebtLedger, name: str) -> tuple[str | None, int]:
+    """The one customer key whose name folds to ``name``; (None, matches) otherwise."""
+    keys = {_debt_key(order, ledger) for order in ledger.orders
+            if order.customer_name and fold(order.customer_name) == name}
+    keys.discard(None)
+    return (next(iter(keys)), 1) if len(keys) == 1 else (None, len(keys))
+
+
+def _answer_debt_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                         rulebook: str) -> Candidate:
+    rules = read_rules(rulebook)
+    needed = list(DEBT_MEASURE_FEATURES)
+    if plan.intent in ("debt_total", "debt_customer_count"):
+        needed.append("until_end_of_day")
+    if plan.intent in ("debt_customer_count", "debt_flow"):
+        needed.append("debt_by_customer")
+    if plan.intent in ("debt_collected", "debt_flow"):
+        needed.append("debt_flow_rule")
+    if plan.threshold is not None:
+        needed.append("debt_age")
+    evidence: dict[str, Any] = {"intent": plan.intent, "start": plan.start.isoformat(),
+                                "end": plan.end.isoformat()}
+    if not all(getattr(rules, feature) for feature in needed):
+        return Candidate(reason=f"Split rulebook does not support {plan.intent}",
+                         evidence=evidence)
+    evidence["rules"] = tuple(dict.fromkeys(rules.row(feature) for feature in needed))
+    if re.search(r"\b(?:tra gop|so gop)\b", fold(catalog.readme)):
+        # Rulebook: debt questions include instalment orders kept in a separate book,
+        # which the D01 ledger does not read.
+        return Candidate(reason="Instalment book is not part of the debt ledger",
+                         evidence=evidence)
+    prepared = prepare_debt(cache, catalog, rulebook)
+    if not prepared["ok"]:
+        evidence["debt_source_error"] = prepared["debt_source_error"]
+        return Candidate(reason=prepared["reason"], evidence=evidence)
+    ledger = cache["debt"]
+    evidence["ledger"] = ledger.lineage
+    if not ledger.first_day <= plan.start <= plan.end <= ledger.last_day:
+        return Candidate(reason="Debt question outside ledger coverage", evidence=evidence)
+    day = f"date.fromisoformat({plan.end.isoformat()!r})"
+    period = f"date.fromisoformat({plan.start.isoformat()!r}), {day}"
+    if plan.intent == "debt_total":
+        t = plan.threshold
+        age = int(t.value) if t is not None else None
+        inclusive = t is not None and t.op == ">="
+        value = int(_vnd(debt_total(ledger, plan.end, age, inclusive)))
+        evidence.update(code=_code(f"_vnd(debt_total(ledger, {day}, {age!r}, {inclusive!r}))",
+                                   open_debts, debt_total, _vnd), result=value)
+        return Candidate("number", value, 1.0, "", evidence)
+    if plan.intent == "debt_customer_count":
+        value = debt_customer_count(ledger, plan.end)
+        evidence.update(code=_code(f"debt_customer_count(ledger, {day})", open_debts,
+                                   debt_customer_count, _debt_key, _customer_name_key),
+                        result=value)
+        return Candidate("number", value, 1.0, "", evidence)
+    if plan.intent == "debt_collected":
+        value = int(_vnd(debt_flow(ledger, plan.start, plan.end)[1]))
+        evidence.update(code=_code(f"_vnd(debt_flow(ledger, {period})[1])", debt_flow,
+                                   _debt_key, _vnd), result=value)
+        return Candidate("number", value, 1.0, "", evidence)
+    name = fold(plan.filters[0].value)
+    key, matches = _debt_customer(ledger, name)
+    evidence["customer"] = {"name": name, "matching_keys": matches}
+    if key is None:
+        return Candidate(reason="Customer name matches no customer or several",
+                         evidence=evidence)
+    new, repaid = debt_flow(ledger, plan.start, plan.end, key)
+    value = [int(_vnd(new)), int(_vnd(repaid))]
+    evidence.update(code=_code(f"debt_flow(ledger, {period}, {key!r})", debt_flow, _debt_key,
+                               _vnd), result=value)
+    return Candidate("list", value, 1.0, "", evidence)
+
+
 def _c01_rules(plan: Plan, rulebook: str) -> tuple[str, ...]:
     rules = read_rules(rulebook)
     if plan.intent == "revenue_increasing":
@@ -521,6 +694,61 @@ def _answer_revenue_trend(sales: list[Sale], readme: str, plan: Plan,
     return Candidate("boolean", result, 1.0, "", evidence)
 
 
+def select_shift(selected: list[Sale], first: int, last: int) -> list[Sale]:
+    """Sales whose order was placed from minute ``first`` to minute ``last`` of the day."""
+    return [s for s in selected if s.minute is not None and first <= s.minute <= last]
+
+
+def _answer_shift(plan: Plan, sales: list[Sale], rulebook: str,
+                  evidence: dict[str, Any]) -> Candidate:
+    """Revenue or orders of a rulebook shift, or its % change against the base shift."""
+    rules = read_rules(rulebook)
+    windows = {name: (first, last) for name, first, last in rules.shifts}
+    name = plan.filters[0].value
+    if name not in windows:
+        return Candidate(reason="Split rulebook defines no such shift", evidence=evidence)
+    selected = select_valid(sales, plan.start, plan.end)
+    missing = sum(1 for s in selected if s.minute is None)
+    evidence["inputs"].update(selected_rows=len(selected), rows_without_time=missing,
+                              selected_orders=len({s.order_id for s in selected}),
+                              shifts={k: list(v) for k, v in windows.items()})
+    if missing or not selected:
+        return Candidate(reason="Order time is missing for orders in the period"
+                         if missing else "No valid orders in period", evidence=evidence)
+    window = (f"date.fromisoformat({plan.start.isoformat()!r}), "
+              f"date.fromisoformat({plan.end.isoformat()!r})")
+    first, last = windows[name]
+    shift_rows = select_shift(selected, first, last)
+    measure = revenue_total if plan.intent == "revenue" else order_count
+    if plan.comparison != "shift_change_percent":
+        value = revenue(shift_rows) if plan.intent == "revenue" else order_count(shift_rows)
+        function = revenue if plan.intent == "revenue" else order_count
+        evidence.update(
+            shift=name, calculation=f"{function.__name__} of valid orders placed in the shift",
+            code=_code(f"{function.__name__}(select_shift(select_valid(sales, {window}), "
+                       f"{first}, {last}))", select_valid, select_shift, function),
+            result=value)
+        return Candidate("number", value, 1.0, "", evidence)
+    base = rules.shift_base
+    if base not in windows or base == name:
+        return Candidate(reason="Split rulebook gives no base shift", evidence=evidence)
+    base_first, base_last = windows[base]
+    current = Decimal(measure(shift_rows))
+    previous = Decimal(measure(select_shift(selected, base_first, base_last)))
+    value = change_percent(current, previous)
+    evidence.update(
+        shift=name, base_shift=base, current=str(current), base=str(previous),
+        calculation="100 * (shift - base shift) / base shift; 2 decimals half up",
+        code=_code(f"change_percent(Decimal({measure.__name__}(select_shift(rows, {first}, "
+                   f"{last}))), Decimal({measure.__name__}(select_shift(rows, {base_first}, "
+                   f"{base_last}))))  # rows = select_valid(sales, {window})",
+                   select_valid, select_shift, measure, change_percent),
+        result=value)
+    if value is None:
+        return Candidate(reason="Base shift has zero; change undefined", evidence=evidence)
+    return Candidate("percent", value, 1.0, "", evidence)
+
+
 def change_percent(current: Decimal, previous: Decimal) -> float | None:
     if previous == 0:
         return None
@@ -533,6 +761,8 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
     reason = unsupported(plan)
     if reason:
         return Candidate(reason=reason)
+    if plan.intent in DEBT_INTENTS:
+        return _answer_debt_measure(cache, catalog, plan, rulebook)
     c01_rules = ()
     if plan.intent in C01_INTENTS:
         c01_rules = _c01_rules(plan, rulebook)
@@ -575,6 +805,8 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
             return Candidate(reason="No sales in period; business coverage is not established",
                              evidence=evidence)
     product_call = ""
+    if plan.filters and plan.filters[0].field == "shift":
+        return _answer_shift(plan, sales, rulebook, evidence)
     if plan.filters and plan.filters[0].field in GROUP_FIELDS:
         return _answer_group(plan, sales, evidence)
     if plan.filters:

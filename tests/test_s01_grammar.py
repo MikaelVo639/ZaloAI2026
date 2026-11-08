@@ -169,11 +169,12 @@ class TopDebtCustomersTests(unittest.TestCase):
                 self.assertIsNone(plan(text))
 
     def test_other_debt_questions_are_not_tables(self):
-        # C01 §7 intents are not in S01 yet: these keep abstaining instead of becoming a table.
-        for text in ("Tổng công nợ đến hết ngày 14/07/2026 là bao nhiêu?",
-                     "Có bao nhiêu khách còn nợ tính đến hết ngày 14/07/2026?"):
-            with self.subTest(text=text):
-                self.assertIsNone(plan(text))
+        # C01 §7 questions never become the table; the count is its own intent, and a
+        # total without "còn nợ" wording keeps abstaining.
+        self.assertIsNone(plan("Tổng công nợ đến hết ngày 14/07/2026 là bao nhiêu?"))
+        count = plan("Có bao nhiêu khách còn nợ tính đến hết ngày 14/07/2026?")
+        self.assertEqual((count.intent, count.start, count.end),
+                         ("debt_customer_count", date(2026, 7, 14), date(2026, 7, 14)))
 
     def test_rules_of_the_split_gate_the_intent(self):
         text = "3 khách nợ nhiều nhất đến hết ngày 14/07/2026 kèm số tiền còn nợ"

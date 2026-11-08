@@ -11,7 +11,7 @@ from typing import Any, Mapping
 from datamate.contracts import Catalog, Table
 from datamate.ingestion.catalog import iter_rows
 from datamate.ingestion.inventory import _sha256
-from datamate.ingestion.sales import Sale, parse_date
+from datamate.ingestion.sales import Sale, parse_date, parse_minute
 from datamate.semantics.text import fold
 
 _ADAPTER_VERSION = "joined_sales.v1"
@@ -283,6 +283,14 @@ def mapping_for_xlsx_order_detail_product(catalog: Catalog) -> MappingSpec:
         catalog, "so luong quy doi", "don vi co ban",
     )
     product_evidence = _readme_evidence(catalog, "dvt", "don vi co ban")
+    # Optional: order time for the rulebook shifts, only when the README documents it.
+    time_evidence = next((line.strip() for line in catalog.readme.splitlines()
+                          if "thoi gian tao" in fold(line) and "thoi diem dat don" in fold(line)),
+                         None)
+    order_fields = {"order_id": "Mã hóa đơn", "date": "Thời gian",
+                    "status": "Trạng thái", "total_due": "Tổng tiền hàng"}
+    if time_evidence and "Thời gian tạo" in orders.columns:
+        order_fields["time"] = "Thời gian tạo"
 
     def source(table: Table) -> str:
         return f"{table.path.name}::{table.name}"
@@ -296,12 +304,9 @@ def mapping_for_xlsx_order_detail_product(catalog: Catalog) -> MappingSpec:
         version="xlsx_order_detail_product.v1",
         orders=SourceMapping(
             source=source(orders),
-            fields={
-                "order_id": "Mã hóa đơn", "date": "Thời gian",
-                "status": "Trạng thái", "total_due": "Tổng tiền hàng",
-            },
+            fields=order_fields,
             key=("order_id",), grain="one row per invoice",
-            evidence=(order_evidence,),
+            evidence=(order_evidence,) + ((time_evidence,) if "time" in order_fields else ()),
         ),
         details=SourceMapping(
             source=source(details),
@@ -472,6 +477,8 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             header_total_parse_failures += 1
         orders[order_id] = {
             "day": day,
+            "minute": (parse_minute(raw.get(mapping.orders.fields["time"]))
+                       if "time" in mapping.orders.fields else None),
             "status": canonical_status,
             "total_due": total_due,
             "row_ordinal": row_ordinal,
@@ -624,6 +631,7 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             product_id=product_id,
             product_name=product_name,
             quantity_base=quantity_base,
+            minute=order["minute"],
         ))
         line_amounts_by_order[order_id] = line_amounts_by_order.get(order_id, Decimal(0)) + amount
         lineage.append({

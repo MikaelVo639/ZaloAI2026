@@ -2,7 +2,7 @@
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -46,6 +46,31 @@ class Sale:
     customer_name: str | None = None
     customer_group: str | None = None
     channel: str | None = None
+    # Minutes after midnight when the order was placed (rulebook shifts); None when the
+    # source records no time for the order or its lines disagree.
+    minute: int | None = None
+
+
+def parse_minute(value: Any) -> int | None:
+    """Clock time of a time or date-time cell ("14:05", "01/03/2026 14:05:09"), in minutes.
+
+    None when the cell holds no clock time; seconds are dropped (13:59:59 is 13:59).
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (datetime, time)):
+        return value.hour * 60 + value.minute
+    if isinstance(value, (int, float, Decimal)):
+        fraction = Decimal(str(value))
+        if not fraction.is_finite() or not 0 <= fraction < 1:
+            return None  # a spreadsheet time is a fraction of a day
+        # Round to the second first: 14:00 stored as 0.58333… must not become 13:59.
+        return int((fraction * 86400).to_integral_value()) // 60
+    match = re.search(r"(?<![\d:])(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?(?![\d:])", str(value))
+    if not match:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    return hour * 60 + minute if hour < 24 and minute < 60 else None
 
 
 def parse_number(value: Any) -> Decimal:
