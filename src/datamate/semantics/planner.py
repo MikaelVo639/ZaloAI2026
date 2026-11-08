@@ -19,7 +19,7 @@ _FILLERS = re.compile(
     r"\b(?:nhung mat hang nao|nhung san pham nao|mat hang nao|"
     r"cho toi biet|cho minh biet|cho minh hoi|cho hoi|cho minh|cho toi|liet ke|top|"
     r"(?:xem|coi|check) giup|"
-    r"giup minh|tinh rieng|tong cong|cua hang|cua shop|la bao nhieu|bao nhieu|bao nhiu|"
+    r"giup minh|tinh rieng|tinh|tong cong|cua hang|cua shop|la bao nhieu|bao nhieu|bao nhiu|"
     r"bnhiu|nhieu|nhiu|bn|tien|dong|trong|cua|shop|la|co|duoc|nao|nhung|gi|vay|a|nhi|ngay|"
     r"e|z|j|ta|ha|nhe|do|da)\b"
 )
@@ -651,7 +651,7 @@ def _thresholds(text: str, today: date, rules: Rules) -> Plan | None | bool:
 _AMBIGUOUS = object()
 _GROUP_PREFIX = {
     "product_group": r"(?:cua )?(?:cac |nhung )?(?:mat hang |san pham |hang )?nhom (?:hang )?",
-    "customer_group": r"(?:(?:cac )?don (?:hang )?)?(?:tu |cua )?(?:cac |nhung )?khach(?: hang)? "
+    "customer_group": r"(?:(?:cac )?don (?:hang )?)?(?:tu |cua |do )?(?:cac |nhung )?khach(?: hang)? "
                       r"(?:thuoc )?nhom ",
 }
 
@@ -664,7 +664,9 @@ def _group(text: str, vocabulary: dict[str, Iterable[str]]) -> tuple | object | 
             key = normalize_question(name)
             if not key:
                 continue
-            for match in re.finditer(rf"\b{prefix}{re.escape(key)}(?!\S)", text):
+            # "các đơn do khách nhóm X mua", "các khách thuộc nhóm X mua …"
+            suffix = "(?: mua)?" if field == "customer_group" else ""
+            for match in re.finditer(rf"\b{prefix}{re.escape(key)}{suffix}(?!\S)", text):
                 found.append((match.start(), match.end(), field, name))
     if not found:
         return None
@@ -681,7 +683,7 @@ def _group(text: str, vocabulary: dict[str, Iterable[str]]) -> tuple | object | 
 _SHARE = re.compile(r"\bphan tram\b|\bt[iy] trong\b")
 _SHARE_WORDS = re.compile(
     rf"\b(?:trong )?tong (?:{_REVENUE})(?: cua cua hang| cua shop)?\b|\bt[iy] trong\b|"
-    rf"\b(?:chiem|dong gop|bang)\b|\bphan cua\b|\b(?:la )?(?:{_AMOUNT} )?phan tram\b")
+    rf"\b(?:chiem|dong gop|bang)\b|\bphan(?: cua)?\b|\b(?:la )?(?:{_AMOUNT} )?phan tram\b")
 
 
 def _share(text: str) -> tuple[str, bool]:
@@ -689,7 +691,9 @@ def _share(text: str) -> tuple[str, bool]:
     doanh thu": the group's share of the whole shop's revenue."""
     if not (_SHARE.search(text) and re.search(rf"\b{_REVENUE}\b", text)):
         return text, False
-    text = re.sub(rf"\b(?:trong )?(?:{_REVENUE}) ca (?:cua hang|shop)\b|\btrong {_REVENUE}\b",
+    # Not the "trọng" of "tỉ trọng doanh thu".
+    text = re.sub(rf"\b(?:trong )?(?:{_REVENUE}) ca (?:cua hang|shop)\b"
+                  rf"|(?<!\bti )(?<!\bty )\btrong {_REVENUE}\b",
                   " tong doanh thu ", text)
     if not re.search(rf"\btong {_REVENUE}\b", text) and not re.search(r"\bchiem\b", text):
         return text, False

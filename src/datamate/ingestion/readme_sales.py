@@ -182,6 +182,11 @@ _KIOTVIET = (
         "Mã hàng": "mã hàng", "Tên hàng": "tên", "ĐVT": "đơn vị cơ bản",
         "Nhóm hàng(3 Cấp)": "nhóm hàng",
     }),
+    # Customer list with its group, as documented in KiotViet-export READMEs.
+    ({"Mã khách hàng", "Tên khách hàng", "Nhóm khách hàng"}, {
+        "Mã khách hàng": "mã khách", "Tên khách hàng": "tên khách",
+        "Nhóm khách hàng": "nhóm khách",
+    }),
 )
 # SQLite POS database (tables don_hang / chi_tiet_don / san_pham). The README of such a
 # shop documents the line amount (TriGia) and base quantity (SLQuyDoi) itself.
