@@ -20,7 +20,7 @@ GRAMMAR_WORDS = frozenset("""
     tu tuan ty vay ve xem xet
     cung doi giam hay hon kem ke ky liet lien ngoai tang top truong voi vs
     con huong khong luon nguoi no phai sau tuc tung xu
-    sang chieu tra bot chiu them thieu
+    sang chieu tra bot chiu them thieu nha vao
 """.split())
 # Whole-token abbreviations and misspellings seen in everyday questions.
 ABBREVIATIONS = {

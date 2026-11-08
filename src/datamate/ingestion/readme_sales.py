@@ -350,6 +350,11 @@ def parse_amount(value: Any) -> Decimal:
         multiplier = Decimal(1)
         if text.endswith("tr"):
             text, multiplier = text[:-2], Decimal(1000000)
+            # "19,782tr", "16,56tr", "1.5tr": one separator before "tr" is a decimal point
+            # (19.782 million), never thousands (19,782 million).
+            if re.fullmatch(r"-?\d+[.,]\d+", text):
+                text = text.replace(",", ".")
+                return Decimal(text) * multiplier
         elif text.endswith("k"):
             text, multiplier = text[:-1], Decimal(1000)
         result = _plain_number(text) * multiplier
@@ -835,7 +840,8 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         index = len(sales)
         parent = orders.get(key) or {}
         context = {name: _text(line.get(name) if name in line_fields else parent.get(name))
-                   for name in ("customer_id", "customer_name", "customer_group", "channel")}
+                   for name in ("customer_id", "customer_name", "customer_group", "channel",
+                                "staff_id")}
         listed = customer_groups.get(context["customer_id"] or "")
         if listed:
             context["customer_group"] = context["customer_group"] or listed["group"]

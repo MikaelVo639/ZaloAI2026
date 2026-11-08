@@ -25,7 +25,15 @@ from datamate.contracts import (
     Plan,
 )
 from datamate.ingestion.debt import DebtSourceError, _coverage_day, load_debt_ledger
+from datamate.ingestion.purchases import (
+    PurchaseLine,
+    PurchaseSourceError,
+    Receipt,
+    load_purchase_lines,
+    load_purchases,
+)
 from datamate.ingestion.sales import Sale
+from datamate.ingestion.stock import StockItem, StockSourceError, load_stock
 from datamate.semantics.rules import DEBT_TABLE_FEATURES, read_rules
 from datamate.semantics.text import fold
 
@@ -278,12 +286,17 @@ C01_INTENTS = frozenset({"revenue_increasing", "top_debt_customers"})
 # Contract C01 §7: further debt questions on the same D01 ledger.
 DEBT_INTENTS = frozenset({"debt_total", "debt_customer_count", "debt_collected", "debt_flow"})
 DEBT_MEASURE_FEATURES = ("debt_orders", "debt_at_date", "debt_excluded", "customer_identity")
-INTENTS = frozenset({"revenue", "order_count", "top_products", "average_order",
+INTENTS = (frozenset({"revenue", "order_count", "top_products", "average_order",
                      "cancel_count", "cancel_rate", "best_day",
-                     "top_customers", "count_where", "quantity"}) | C01_INTENTS | DEBT_INTENTS
+                     "top_customers", "count_where", "quantity", "top_staff", "stock",
+                     "purchase_total", "top_supplier", "avg_purchase_price"})
+           | C01_INTENTS | DEBT_INTENTS)
 # Plan filters this backend applies, and the intents each one may be combined with.
-FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity"}),
+FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock",
+                                     "avg_purchase_price"}),
               "shift": frozenset({"revenue", "order_count"}),
+              "staff": frozenset({"revenue", "order_count"}),
+              "size": frozenset({"quantity"}),
               "product_group": frozenset({"revenue"}),
               "customer_group": frozenset({"revenue"})}
 GROUP_FIELDS = ("product_group", "customer_group")
@@ -348,7 +361,12 @@ def unsupported(plan: Plan) -> str:
                 or plan.filters[0].field != "shift"):
             return "Shift comparison needs one shift filter and no comparison period"
     elif plan.comparison or plan.compare_start or plan.compare_end:
-        if (plan.comparison != "change_percent" or plan.intent != "revenue" or plan.filters
+        # Price-increase effect (rulebook §5): units of one product, N days from D against
+        # the N days just before D.
+        price_effect = (plan.intent == "quantity" and len(plan.filters) == 1
+                        and plan.filters[0].field == "product")
+        if (plan.comparison != "change_percent" or not (plan.intent == "revenue" or price_effect)
+                or (plan.filters and not price_effect)
                 or not (plan.compare_start and plan.compare_end)):
             return f"Comparison {plan.comparison!r} for {plan.intent!r} not supported"
     if plan.periods or plan.shape:
@@ -375,8 +393,16 @@ def unsupported(plan: Plan) -> str:
             return "Order thresholds must be finite nonnegative integers"
     elif plan.intent == "count_where":
         return "Customer count needs a threshold"
-    if (plan.intent == "quantity") != bool(plan.unit):
+    if (plan.intent in ("quantity", "stock", "avg_purchase_price")) != bool(plan.unit):
         return "Quantity needs the unit asked for"
+    if plan.intent == "avg_purchase_price" and (
+            len(plan.filters) != 1 or plan.filters[0].field != "product" or plan.start.day != 1
+            or plan.end != date(plan.start.year, plan.start.month,
+                                monthrange(plan.start.year, plan.start.month)[1])):
+        return "Average purchase price is one product over one full month"
+    if plan.intent == "stock" and (plan.start != plan.end or len(plan.filters) != 1
+                                   or plan.filters[0].field != "product"):
+        return "Stock is one product at the end of one day"
     if plan.rank_by and (plan.intent != "top_customers"
                          or plan.rank_by not in ("revenue", "order_count")):
         return f"Ranking by {plan.rank_by!r} not supported"
@@ -749,6 +775,226 @@ def _answer_shift(plan: Plan, sales: list[Sale], rulebook: str,
     return Candidate("percent", value, 1.0, "", evidence)
 
 
+def purchase_totals(receipts: tuple[Receipt, ...], start: date, end: date
+                    ) -> dict[str | None, Decimal]:
+    """Purchase money by supplier: receipts dated in the period, cancelled ones dropped."""
+    totals: dict[str | None, Decimal] = defaultdict(Decimal)
+    for receipt in receipts:
+        if start <= receipt.day <= end and not receipt.cancelled:
+            totals[receipt.supplier] += receipt.total
+    return totals
+
+
+def _answer_purchase(cache: dict[str, Any], catalog: Catalog, plan: Plan) -> Candidate:
+    evidence: dict[str, Any] = {"intent": plan.intent, "start": plan.start.isoformat(),
+                                "end": plan.end.isoformat(), "rules": plan.evidence}
+    key = (_catalog_key(catalog), catalog.readme)
+    if cache.get("purchases_key") != key:
+        try:
+            cache["purchases"] = load_purchases(catalog)
+        except PurchaseSourceError as exc:
+            cache["purchases"] = exc
+        cache["purchases_key"] = key
+    book = cache["purchases"]
+    if isinstance(book, PurchaseSourceError):
+        return Candidate(reason=str(book), evidence=evidence)
+    first = min(r.day for r in book.receipts)
+    last = _coverage_day(catalog.readme) or max(r.day for r in book.receipts)
+    evidence.update(purchase_source=book.source, receipts=len(book.receipts),
+                    coverage={"first_day": first.isoformat(), "last_day": last.isoformat()})
+    if plan.start < first.replace(day=1) or plan.end > last:
+        return Candidate(reason="Period outside the purchase records", evidence=evidence)
+    window = (f"date.fromisoformat({plan.start.isoformat()!r}), "
+              f"date.fromisoformat({plan.end.isoformat()!r})")
+    totals = purchase_totals(book.receipts, plan.start, plan.end)
+    if plan.intent == "purchase_total":
+        value = int(_vnd(sum(totals.values(), Decimal(0))))
+        evidence.update(code=_code(f"_vnd(sum(purchase_totals(receipts, {window}).values()))",
+                                   purchase_totals, _vnd), result=value)
+        return Candidate("number", value, 1.0, "", evidence)
+    if not book.supplier_names or None in totals or not totals:
+        return Candidate(reason="Supplier names are not recorded on every receipt",
+                         evidence=evidence)
+    best = max(totals.values())
+    leaders = sorted(name for name, amount in totals.items() if amount == best)
+    evidence["supplier_totals"] = {name: str(amount) for name, amount in totals.items()}
+    if len(leaders) != 1:
+        return Candidate(reason="Several suppliers tie for the most purchase money",
+                         evidence=evidence)
+    evidence.update(code=_code(f"max(purchase_totals(receipts, {window}).items(), key=amount)",
+                               purchase_totals), result=leaders[0])
+    return Candidate("string", leaders[0], 1.0, "", evidence)
+
+
+def purchase_lines_of(lines: tuple[PurchaseLine, ...], name: str, codes: set[str]
+                      ) -> list[PurchaseLine]:
+    """Lines of one product: by its sales code when lines carry codes, else by folded name."""
+    if any(line.product_id for line in lines):
+        if len(codes) != 1:
+            return []
+        return [line for line in lines if line.product_id in codes]
+    return [line for line in lines if line.product_name and fold(line.product_name) == fold(name)]
+
+
+def average_purchase_price(lines: list[PurchaseLine], start: date, end: date) -> Decimal | None:
+    """Rulebook §5: weighted by quantity bought, receipts dated in the period, cancelled
+    receipts dropped; in the purchase unit of the lines. None when nothing was bought."""
+    selected = [line for line in lines if start <= line.day <= end and not line.cancelled]
+    quantity = sum((line.quantity for line in selected), Decimal(0))
+    if not quantity:
+        return None
+    return sum((line.quantity * line.unit_price for line in selected), Decimal(0)) / quantity
+
+
+def _answer_avg_purchase(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                         rulebook: str) -> Candidate:
+    evidence: dict[str, Any] = {"intent": plan.intent, "start": plan.start.isoformat(),
+                                "end": plan.end.isoformat(), "rules": plan.evidence}
+    key = (_catalog_key(catalog), catalog.readme)
+    if cache.get("purchase_lines_key") != key:
+        try:
+            cache["purchase_lines"] = load_purchase_lines(catalog)
+        except PurchaseSourceError as exc:
+            cache["purchase_lines"] = exc
+        cache["purchase_lines_key"] = key
+    book = cache["purchase_lines"]
+    if isinstance(book, PurchaseSourceError):
+        return Candidate(reason=str(book), evidence=evidence)
+    first = min(line.day for line in book.lines)
+    last = _coverage_day(catalog.readme) or max(line.day for line in book.lines)
+    evidence.update(purchase_source=book.source, purchase_convention=book.convention,
+                    coverage={"first_day": first.isoformat(), "last_day": last.isoformat()})
+    if plan.start < first.replace(day=1) or plan.end > last:
+        return Candidate(reason="Month outside the purchase records", evidence=evidence)
+    name = plan.filters[0].value
+    codes: set[str] = set()
+    if prepare_sales(cache, catalog, rulebook)["ok"]:
+        codes = {s.product_id for s in select_product(cache["sales"][0], name) if s.product_id}
+    lines = purchase_lines_of(book.lines, name, codes)
+    month = [line for line in lines if plan.start <= line.day <= plan.end and not line.cancelled]
+    units = {fold(line.unit) for line in month}
+    evidence.update(product_codes=sorted(codes), product_lines=len(lines), month_lines=len(month),
+                    purchase_units=sorted(units))
+    if not month:
+        return Candidate(reason="No purchase line of this product in the month",
+                         evidence=evidence)
+    if units != {fold(plan.unit)}:
+        return Candidate(reason="The unit asked is not the purchase unit of every line",
+                         evidence=evidence)
+    value = average_purchase_price(lines, plan.start, plan.end)
+    if value is None:
+        return Candidate(reason="Nothing bought in the month", evidence=evidence)
+    result = int(_vnd(value))
+    window = (f"date.fromisoformat({plan.start.isoformat()!r}), "
+              f"date.fromisoformat({plan.end.isoformat()!r})")
+    evidence.update(code=_code(f"_vnd(average_purchase_price(purchase_lines_of(lines, {name!r}, "
+                               f"{sorted(codes)!r}), {window}))",
+                               purchase_lines_of, average_purchase_price, _vnd),
+                    result=result)
+    return Candidate("number", result, 1.0, "", evidence)
+
+
+def _answer_stock(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                  rulebook: str) -> Candidate:
+    """Stock of one product at the end of the last data day, in its base unit."""
+    evidence: dict[str, Any] = {"intent": "stock", "start": plan.start.isoformat(),
+                                "end": plan.end.isoformat(), "rules": plan.evidence}
+    key = (_catalog_key(catalog), catalog.readme)
+    if cache.get("stock_key") != key:
+        try:
+            cache["stock"] = load_stock(catalog)
+        except StockSourceError as exc:
+            cache["stock"] = exc
+        cache["stock_key"] = key
+    snapshot = cache["stock"]
+    if isinstance(snapshot, StockSourceError):
+        return Candidate(reason=str(snapshot), evidence=evidence)
+    evidence.update(stock_source=snapshot.source, stock_convention=snapshot.convention,
+                    stock_day=snapshot.day.isoformat())
+    if plan.end != snapshot.day:
+        return Candidate(reason="Stock is known only at the end of the last data day",
+                         evidence=evidence)
+    name = plan.filters[0].value
+    codes: set[str] = set()
+    if prepare_sales(cache, catalog, rulebook)["ok"]:
+        codes = {s.product_id for s in select_product(cache["sales"][0], name) if s.product_id}
+    item = stock_item(snapshot.items, name, codes)
+    if item is None:
+        return Candidate(reason="Product matches no stock row or several", evidence=evidence)
+    evidence["stock_item"] = {"product_id": item.product_id, "product_name": item.product_name,
+                              "base_unit": item.base_unit, "quantity": str(item.quantity)}
+    if item.base_unit is None or fold(item.base_unit) != fold(plan.unit):
+        return Candidate(reason="The unit asked is not the product's base unit",
+                         evidence=evidence)
+    value = (int(item.quantity) if item.quantity == item.quantity.to_integral()
+             else float(item.quantity))
+    evidence.update(code=_code(f"stock_item(stock.items, {name!r}, {sorted(codes)!r}).quantity",
+                               stock_item), result=value)
+    return Candidate("number", value, 1.0, "", evidence)
+
+
+def stock_item(items: tuple[StockItem, ...], name: str, codes: set[str]) -> StockItem | None:
+    """The one stock row of the product: by its sales code, else by its folded name."""
+    if len(codes) == 1:
+        by_code = [item for item in items if item.product_id in codes]
+        if len(by_code) == 1:
+            return by_code[0]
+    by_name = [item for item in items
+               if item.product_name and fold(item.product_name) == fold(name)]
+    return by_name[0] if len(by_name) == 1 else None
+
+
+def select_size(sales: list[Sale], size: str) -> list[Sale]:
+    """Items whose name ends with "(M)" / "(L)", case-insensitive (rulebook "Size M, size L")."""
+    suffix = f"({size.lower()})"
+    return [s for s in sales if s.product_name and s.product_name.strip().lower().endswith(suffix)]
+
+
+def select_staff(selected: list[Sale], code: str) -> list[Sale]:
+    """Sales of orders sold by the staff member with this code (case-insensitive)."""
+    return [s for s in selected if s.staff_id is not None and s.staff_id.upper() == code.upper()]
+
+
+def best_staff(selected: list[Sale]) -> tuple[str, Decimal]:
+    """Staff code with the highest revenue; ties by code ascending."""
+    totals: dict[str, Decimal] = defaultdict(Decimal)
+    for sale in selected:
+        totals[sale.staff_id] += sale.amount
+    code = min(totals, key=lambda key: (-totals[key], key))
+    return code, totals[code]
+
+
+def _answer_staff(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Candidate:
+    """Revenue / orders of one staff code, or the staff code with the most revenue."""
+    selected = select_valid(sales, plan.start, plan.end)
+    missing = sum(1 for s in selected if s.staff_id is None)
+    evidence["inputs"].update(selected_rows=len(selected), rows_without_staff=missing,
+                              selected_orders=len({s.order_id for s in selected}))
+    if missing or not selected:
+        return Candidate(reason="Seller is missing for orders in the period"
+                         if missing else "No valid orders in period", evidence=evidence)
+    window = (f"date.fromisoformat({plan.start.isoformat()!r}), "
+              f"date.fromisoformat({plan.end.isoformat()!r})")
+    if plan.intent == "top_staff":
+        code, total = best_staff(selected)
+        evidence.update(calculation="staff code with the highest revenue; ties by code",
+                        code=_code(f"best_staff(select_valid(sales, {window}))[0]",
+                                   select_valid, best_staff),
+                        staff_revenue=str(total), result=code)
+        return Candidate("string", code, 1.0, "", evidence)
+    code = plan.filters[0].value
+    rows = select_staff(selected, code)
+    if not rows:
+        return Candidate(reason="No order of this staff code in the period", evidence=evidence)
+    function = revenue if plan.intent == "revenue" else order_count
+    value = function(rows)
+    evidence.update(staff=code, calculation=f"{function.__name__} of the staff member's orders",
+                    code=_code(f"{function.__name__}(select_staff(select_valid(sales, {window}), "
+                               f"{code!r}))", select_valid, select_staff, function),
+                    result=value)
+    return Candidate("number", value, 1.0, "", evidence)
+
+
 def change_percent(current: Decimal, previous: Decimal) -> float | None:
     if previous == 0:
         return None
@@ -763,6 +1009,12 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return Candidate(reason=reason)
     if plan.intent in DEBT_INTENTS:
         return _answer_debt_measure(cache, catalog, plan, rulebook)
+    if plan.intent == "stock":
+        return _answer_stock(cache, catalog, plan, rulebook)
+    if plan.intent in ("purchase_total", "top_supplier"):
+        return _answer_purchase(cache, catalog, plan)
+    if plan.intent == "avg_purchase_price":
+        return _answer_avg_purchase(cache, catalog, plan, rulebook)
     c01_rules = ()
     if plan.intent in C01_INTENTS:
         c01_rules = _c01_rules(plan, rulebook)
@@ -807,9 +1059,18 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
     product_call = ""
     if plan.filters and plan.filters[0].field == "shift":
         return _answer_shift(plan, sales, rulebook, evidence)
+    if plan.filters and plan.filters[0].field == "staff" or plan.intent == "top_staff":
+        return _answer_staff(plan, sales, evidence)
     if plan.filters and plan.filters[0].field in GROUP_FIELDS:
         return _answer_group(plan, sales, evidence)
-    if plan.filters:
+    if plan.filters and plan.filters[0].field == "size":
+        size = plan.filters[0].value
+        sales = select_size(sales, size)
+        evidence["inputs"]["size_rows"] = len(sales)
+        if not sales:
+            return Candidate(reason=f"No item named with size ({size})", evidence=evidence)
+        product_call = f"select_size(sales, {size!r})"
+    elif plan.filters:
         value = plan.filters[0].value
         matched = select_product(sales, value)
         codes = {s.product_id for s in matched}
@@ -931,6 +1192,34 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
     return Candidate("string" if plan.top_k == 1 else "list", result, 1.0, "", evidence)
 
 
+def _answer_price_effect(plan: Plan, sales: list[Sale], evidence: dict[str, Any], window: str,
+                         source_expr: str) -> Candidate:
+    """Units of one product sold N days from the price increase against the N days before."""
+    if not sales or any(s.base_unit is None or fold(s.base_unit) != fold(plan.unit)
+                        for s in sales):
+        return Candidate(reason="The unit asked is not the product's base unit",
+                         evidence=evidence)
+    current = quantity_in_unit(select_valid(sales, plan.start, plan.end), plan.unit)
+    previous = quantity_in_unit(select_valid(sales, plan.compare_start, plan.compare_end),
+                                plan.unit)
+    if current is None or previous is None:
+        return Candidate(reason="A sold quantity is unknown", evidence=evidence)
+    value = change_percent(current, previous)
+    compare_window = (f"date.fromisoformat({plan.compare_start.isoformat()!r}), "
+                      f"date.fromisoformat({plan.compare_end.isoformat()!r})")
+    evidence.update(
+        calculation="100 * (units from D - units before D) / units before D; 2 decimals half up",
+        code=_code(f"change_percent(quantity_in_unit(select_valid({source_expr}, {window}), "
+                   f"{plan.unit!r}), quantity_in_unit(select_valid({source_expr}, "
+                   f"{compare_window}), {plan.unit!r}))",
+                   select_valid, quantity_in_unit, change_percent),
+        current_quantity=str(current), compare_quantity=str(previous), result=value)
+    if value is None:
+        return Candidate(reason="Nothing sold before the increase; change undefined",
+                         evidence=evidence)
+    return Candidate("percent", value, 1.0, "", evidence)
+
+
 def _answer_extended(plan: Plan, sales: list[Sale], full: list[Sale],
                      eligible: frozenset[int] | None, evidence: dict[str, Any], window: str,
                      source_expr: str) -> Candidate:
@@ -965,6 +1254,8 @@ def _answer_extended(plan: Plan, sales: list[Sale], full: list[Sale],
         if not any(s.base_unit and fold(s.base_unit) == fold(plan.unit) for s in full):
             return Candidate(reason=f"No product of this shop has base unit {plan.unit!r}",
                              evidence=evidence)
+        if plan.comparison == "change_percent":
+            return _answer_price_effect(plan, sales, evidence, window, source_expr)
         value = quantity_in_unit(pool, plan.unit)
         evidence.update(calculation="sum(quantity_base) of products whose base unit is the unit",
                         unit=plan.unit, code=_code(f"quantity_in_unit({selection}, {plan.unit!r})",

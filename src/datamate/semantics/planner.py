@@ -19,7 +19,7 @@ _FILLERS = re.compile(
     r"\b(?:nhung mat hang nao|nhung san pham nao|mat hang nao|"
     r"cho toi biet|cho minh biet|cho minh hoi|cho hoi|cho minh|cho toi|liet ke|top|"
     r"(?:xem|coi|check) giup|"
-    r"giup minh|tinh rieng|tinh|tong cong|cua hang|cua shop|la bao nhieu|bao nhieu|bao nhiu|"
+    r"giup minh|tinh rieng|tinh|tong cong|cong lai|cua hang|cua shop|la bao nhieu|bao nhieu|bao nhiu|"
     r"bnhiu|nhieu|nhiu|bn|tien|dong|trong|cua|shop|la|co|duoc|nao|nhung|gi|vay|a|nhi|ngay|"
     r"e|z|j|ta|ha|nhe|do|da)\b"
 )
@@ -85,6 +85,12 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     used: list[str] = []
     filters: list[Filter] = []
     share = False
+    if _PURCHASE_TOTAL.search(text) or _TOP_SUPPLIER.search(text):
+        return _purchase(text, today, rules)
+    if _AVG_PURCHASE_CUE.search(text):
+        return _avg_purchase(text, today, rules, names)
+    if _PRICE_UP.search(text):
+        return _price_effect(text, today, rules, names)
     group = _group(text, vocabulary or {})
     if group is _AMBIGUOUS:
         return None
@@ -110,6 +116,33 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
             return None
         filters.append(Filter("product", product, rules.row("product_names") or ""))
         used.append("product_names")
+    if product and _STOCK_CUE.search(text):
+        # "tồn kho <hàng> cuối ngày hôm nay là bao nhiêu <đơn vị>": stock at the end of today.
+        unit = _stock_unit(text)
+        if unit is None or not rules.until_end_of_day:
+            return None
+        return Plan("stock", today, today, 1,
+                    tuple(dict.fromkeys(row for row in (rules.row("product_names"),
+                                                        rules.row("until_end_of_day")) if row)),
+                    filters=tuple(filters), unit=unit)
+    size = re.search(r"\bsize (m|l)\b", text)
+    if size:
+        if filters or not rules.size_by_name or len(re.findall(r"\bsize\b", text)) != 1:
+            return None
+        filters.append(Filter("size", size.group(1).upper(), rules.row("size_by_name") or ""))
+        used.append("size_by_name")
+        text = text[:size.start()] + " " + text[size.end():]
+        # "cộng tất cả các món", "tính mọi loại đồ uống"; "quán" as the subject of "bán".
+        text = re.sub(r"\b(?:cong|tinh) (?:tat ca cac|tat ca|moi loai|moi|cac) (?:mon|do uong)\b",
+                      " ", text)
+        text = re.sub(r"\bquan(?= ban\b)", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+    staff = _staff(text)
+    if staff is False or (staff and filters):
+        return None  # several staff codes, or a second filter
+    if staff:
+        text, code = staff
+        filters.append(Filter("staff", code, ""))
     shift = _shift(text, rules)
     if shift is False or (shift and filters):
         return None  # shift words not understood, or a second filter
@@ -138,7 +171,7 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         return contract if contract and not (filters or group or reference) else None
     if not rules.revenue:
         return None
-    if not reference and not group and not shift:
+    if not reference and not group and not shift and not staff:
         special = (_months(text, today, rules) or _customers(text, today, rules)
                    or _thresholds(text, today, rules))
         if special is False:
@@ -148,7 +181,16 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     intent = ""
     top_k = 1
     best_day = _best_day(text)
-    if best_day is not None:
+    best_staff = _BEST_STAFF.search(text)
+    if best_staff and not filters and not reference:
+        if "gioi nhat" in best_staff.group() and not rules.best_staff:
+            return None  # "giỏi nhất" means revenue only when the rulebook says so
+        intent = "top_staff"
+        text = text[:best_staff.start()] + " " + text[best_staff.end():]
+        text = re.sub(r"\b(?:la ai|ai la)\b", " ", text)
+        if rules.best_staff:
+            used.append("best_staff")
+    elif best_day is not None:
         intent, text = "best_day", best_day
     unit = ""
     for kind, feature, pattern, extras in () if intent else _INTENTS:
@@ -188,7 +230,9 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
             leftover = again[2]
     if group and intent != "revenue":
         return None
-    if shift and intent not in ("revenue", "order_count"):
+    if (shift or staff) and intent not in ("revenue", "order_count"):
+        return None
+    if size and intent != "quantity":
         return None
     # Do not silently ignore product names, payment methods, groups, shifts, etc.
     if _FILLERS.sub(" ", leftover).strip():
@@ -741,6 +785,167 @@ _REFERENCES = (
     ("prev_month", re.compile(r"\bthang (?:lien truoc|truoc do)\b")),
     ("prev_month", re.compile(r"(?<=hon hay kem )thang (?:truoc|roi)\b")),
 )
+
+
+_PURCHASE_TOTAL = re.compile(
+    rf"\btong gia tri cac phieu nhap hang\b|\btong tien hang nhap vao\b|\btong tien nhap hang\b"
+    rf"|\bbo ra {_AMOUNT} tien nhap hang\b|\bnhap hang het {_AMOUNT} tien\b")
+_TOP_SUPPLIER = re.compile(
+    r"\bnha cung cap nao duoc cua hang nhap hang (?:nhieu|nhiu) tien nhat\b"
+    r"|\bcua hang nhap (?:nhieu|nhiu) tien hang nhat tu nha cung cap nao\b"
+    r"|\btien nhap hang tu nha cung cap nao cao nhat\b")
+
+
+def _purchase(text: str, today: date, rules: Rules) -> Plan | None:
+    """"Tổng tiền nhập hàng tháng M", "nhà cung cấp nào … nhiều tiền nhất" (rulebook §5)."""
+    total, top = _PURCHASE_TOTAL.search(text), _TOP_SUPPLIER.search(text)
+    if bool(total) == bool(top):
+        return None
+    intent, feature, match = (("purchase_total", "purchase_total", total) if total
+                              else ("top_supplier", "top_supplier", top))
+    if not getattr(rules, feature) or not rules.purchase_total:
+        return None
+    rest = text[:match.start()] + " " + text[match.end():]
+    resolved = _period(rest, today, rules)
+    if resolved is None:
+        return None
+    start, end, leftover = resolved
+    if _FILLERS.sub(" ", leftover).strip() or start > min(end, today):
+        return None
+    rows = ("purchase_total", "top_supplier") if top else ("purchase_total",)
+    return Plan(intent, start, min(end, today), 1, _rows(rules, *rows))
+
+
+_AVG_PURCHASE_CUE = re.compile(r"\bnhap\b.*\bbinh quan\b|\bbinh quan\b.*\bnhap\b")
+# The purchase unit: one word, optionally followed by a size token ("xe 4m3", "hộp 30").
+_PURCHASE_UNIT = r"(?P<unit>[a-z]+(?: \d[a-z0-9]*)?)"
+_AVG_PURCHASE = (
+    re.compile(rf"\bgia nhap binh quan (?:cua )?{_ONE} {_PURCHASE_UNIT}(?= |$)"),
+    re.compile(rf"\bnhap vao (?:voi )?gia binh quan {_ONE} {_PURCHASE_UNIT}(?= |$)"),
+    re.compile(rf"\bnhap binh quan {_AMOUNT} tien {_ONE} {_PURCHASE_UNIT}(?= |$)"),
+)
+
+
+def _avg_purchase(text: str, today: date, rules: Rules, names: Iterable[str]) -> Plan | None:
+    """"Giá nhập bình quân một <đơn vị> <hàng> tháng M/Y" (rulebook §5), in the purchase unit."""
+    if not rules.avg_purchase_price or not rules.product_names:
+        return None
+    text, product = _product(text, names)
+    if not product or product is _AMBIGUOUS:
+        return None
+    text = re.sub(r"\s+", " ", text).strip()
+    found = [m for pattern in _AVG_PURCHASE for m in pattern.finditer(text)]
+    if len(found) != 1 or found[0].group("unit") in _NOT_UNITS:
+        return None
+    match = found[0]
+    rest = text[:match.start()] + " " + text[match.end():]
+    resolved = _period(rest, today, rules)
+    if resolved is None:
+        return None
+    start, end, leftover = resolved
+    if _FILLERS.sub(" ", leftover).strip() or end > today:
+        return None
+    return Plan("avg_purchase_price", start, end, 1,
+                _rows(rules, "product_names", "avg_purchase_price"),
+                filters=(Filter("product", product, rules.row("product_names") or ""),),
+                unit=match.group("unit"))
+
+
+_PRICE = r"\d{1,3}(?: \d{3})*(?:d\b| dong/[a-z]+\b)"
+_PRICE_UP = re.compile(rf"\b(?:ngay )?(?:tang gia(?: tu {_PRICE})? len|len gia) {_PRICE}")
+_EFFECT_UNIT = re.compile(r"\bso ([a-z][a-z0-9]*) ban (?:ra|duoc)\b|\bluong ban tinh theo ([a-z][a-z0-9]*)\b")
+_EFFECT_WORDS = frozenset("""
+    tu ngay so voi vs ke truoc do thi tang hay giam thay doi bao nhieu nhiu bnhiu bn phan tram
+    ban ra duoc trong luong tinh theo cho hoi minh xem coi check giup ta e a nhi
+""".split())
+
+
+def _price_effect(text: str, today: date, rules: Rules, names: Iterable[str]) -> Plan | None:
+    """"Từ ngày D <hàng> tăng giá lên P. So N ngày kể từ D với N ngày ngay trước, số <đơn vị>
+    bán ra thay đổi bao nhiêu %" (rulebook §5 "Hiệu ứng tăng giá"). D must be written."""
+    if not (rules.price_effect and rules.change_percent and rules.product_names and rules.revenue):
+        return None
+    text, product = _product(text, names)
+    if not product or product is _AMBIGUOUS:
+        return None
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(_PRICE_UP.findall(text)) != 1:
+        return None
+    text = _PRICE_UP.sub(" ", text)
+    days = set(re.findall(_DATE, text))
+    spans = re.findall(r"\b(\d{1,3}) ngay\b", text)
+    units = {a or b for a, b in _EFFECT_UNIT.findall(text)}
+    if len(days) != 1 or len(set(spans)) != 1 or len(spans) != 2 or len(units) != 1:
+        return None
+    if not re.search(r"\b\d{1,3} ngay ke tu\b", text) or \
+            not re.search(r"\b\d{1,3} ngay (?:ngay )?truoc\b", text):
+        return None
+    unit = units.pop()
+    if unit in _NOT_UNITS - {"phan"}:  # "số phần bán ra": phần is a unit here, not a percent
+        return None
+    rest = re.sub(_DATE, " ", text)
+    rest = re.sub(r"\bngay tang gia\b", " ", rest)  # "kể từ ngày tăng giá" is D
+    rest = re.sub(r"\b\d{1,3} ngay\b", " ", rest)
+    rest = _EFFECT_UNIT.sub(" ", rest)
+    if set(rest.split()) - _EFFECT_WORDS:
+        return None
+    day, month, year = map(int, days.pop())
+    try:
+        start = date(year, month, day)
+    except ValueError:
+        return None
+    n = int(spans[0])
+    if not 1 <= n <= 90:
+        return None
+    end = start + timedelta(days=n - 1)
+    if end > today:
+        return None
+    return Plan("quantity", start, end, 1,
+                _rows(rules, "product_names", "price_effect", "change_percent"),
+                compare_start=start - timedelta(days=n), compare_end=start - timedelta(days=1),
+                comparison="change_percent",
+                filters=(Filter("product", product, rules.row("product_names") or ""),),
+                unit=unit)
+
+
+_STOCK_CUE = re.compile(r"\b(?:ton kho|kho con ton|kho con|con ton|ton cuoi)\b"
+                        r"|\bcuoi ngay hom nay\b|\bluc cuoi ngay\b")
+_STOCK_UNIT = re.compile(rf"\b{_AMOUNT} ([a-z][a-z0-9]*)\b")
+_STOCK_WORDS = frozenset("""
+    ton kho con cuoi ngay hom nay la luc trong tinh den cua duoc dc bua
+""".split())
+
+
+def _stock_unit(text: str) -> str | None:
+    """The base unit asked for today's stock; None for anything else (another day, a split
+    into big and small units, an unknown word)."""
+    if not re.search(r"\bhom nay\b|\bbua nay\b", text) or re.search(r"\b(?:chan|le)\b", text):
+        return None
+    units = [m for m in _STOCK_UNIT.finditer(text) if m.group(1) not in _NOT_UNITS]
+    if len(units) != 1:
+        return None
+    rest = text[:units[0].start()] + " " + text[units[0].end():]
+    if set(_FILLERS.sub(" ", rest).split()) - _STOCK_WORDS:
+        return None
+    return units[0].group(1)
+
+
+_STAFF = re.compile(r"\b(?:cac )?don (?:hang )?do nhan vien (?:ma )?(nv\d{1,4}) ban\b"
+                    r"|\b(?:cua )?nhan vien (?:ma )?(nv\d{1,4})\b")
+_BEST_STAFF = re.compile(
+    r"\b(?:ai la )?nhan vien ban gioi nhat(?: la ai)?\b"
+    r"|\b(?:ai la )?(?:nhan vien|nguoi ban) (?:nao )?co doanh thu cao nhat(?: la ai)?\b")
+
+
+def _staff(text: str) -> tuple[str, str] | None | bool:
+    """"nhân viên mã NV001": a staff code filter; None: no code; False: several codes."""
+    found = list(_STAFF.finditer(text))
+    if not found:
+        return None
+    codes = {match.group(1) or match.group(2) for match in found}
+    if len(codes) != 1:
+        return False
+    return _STAFF.sub(" ", text), codes.pop().upper()
 
 
 _SHIFT = re.compile(r"\b(?:rieng |trong |cua )?ca (sang|chieu)\b")

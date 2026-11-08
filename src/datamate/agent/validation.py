@@ -15,7 +15,9 @@ ANSWER_TYPES = {
     "quantity": "number", "count_where": "number",
     "revenue_increasing": "boolean", "top_debt_customers": "table",
     "debt_total": "number", "debt_customer_count": "number", "debt_collected": "number",
-    "debt_flow": "list",
+    "debt_flow": "list", "top_staff": "string", "stock": "number",
+    "purchase_total": "number", "top_supplier": "string",
+    "avg_purchase_price": "number",
 }
 
 

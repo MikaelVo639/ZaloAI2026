@@ -49,6 +49,7 @@ class Sale:
     # Minutes after midnight when the order was placed (rulebook shifts); None when the
     # source records no time for the order or its lines disagree.
     minute: int | None = None
+    staff_id: str | None = None  # "mã nhân viên bán" of the order, as written
 
 
 def parse_minute(value: Any) -> int | None:

@@ -291,6 +291,10 @@ def mapping_for_xlsx_order_detail_product(catalog: Catalog) -> MappingSpec:
                     "status": "Trạng thái", "total_due": "Tổng tiền hàng"}
     if time_evidence and "Thời gian tạo" in orders.columns:
         order_fields["time"] = "Thời gian tạo"
+    staff_evidence = next((line.strip() for line in catalog.readme.splitlines()
+                           if "nguoi ban" in fold(line) and "ma nhan vien ban" in fold(line)), None)
+    if staff_evidence and "Người bán" in orders.columns:
+        order_fields["staff_id"] = "Người bán"
 
     def source(table: Table) -> str:
         return f"{table.path.name}::{table.name}"
@@ -306,7 +310,8 @@ def mapping_for_xlsx_order_detail_product(catalog: Catalog) -> MappingSpec:
             source=source(orders),
             fields=order_fields,
             key=("order_id",), grain="one row per invoice",
-            evidence=(order_evidence,) + ((time_evidence,) if "time" in order_fields else ()),
+            evidence=(order_evidence,) + ((time_evidence,) if "time" in order_fields else ())
+            + ((staff_evidence,) if "staff_id" in order_fields else ()),
         ),
         details=SourceMapping(
             source=source(details),
@@ -479,6 +484,9 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             "day": day,
             "minute": (parse_minute(raw.get(mapping.orders.fields["time"]))
                        if "time" in mapping.orders.fields else None),
+            "staff_id": (None if "staff_id" not in mapping.orders.fields
+                         or _missing(raw.get(mapping.orders.fields["staff_id"]))
+                         else str(raw.get(mapping.orders.fields["staff_id"])).strip()),
             "status": canonical_status,
             "total_due": total_due,
             "row_ordinal": row_ordinal,
@@ -632,6 +640,7 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             product_name=product_name,
             quantity_base=quantity_base,
             minute=order["minute"],
+            staff_id=order["staff_id"],
         ))
         line_amounts_by_order[order_id] = line_amounts_by_order.get(order_id, Decimal(0)) + amount
         lineage.append({
