@@ -19,7 +19,7 @@ _FILLERS = re.compile(
     r"\b(?:nhung mat hang nao|nhung san pham nao|mat hang nao|"
     r"cho toi biet|cho minh biet|cho minh hoi|cho hoi|cho minh|cho toi|liet ke|top|"
     r"(?:xem|coi|check) giup|"
-    r"giup minh|tinh rieng|tinh|tong cong|cua hang|cua shop|la bao nhieu|bao nhieu|bao nhiu|"
+    r"giup minh|tinh rieng|tinh|tong cong|cong lai|cua hang|cua shop|la bao nhieu|bao nhieu|bao nhiu|"
     r"bnhiu|nhieu|nhiu|bn|tien|dong|trong|cua|shop|la|co|duoc|nao|nhung|gi|vay|a|nhi|ngay|"
     r"e|z|j|ta|ha|nhe|do|da)\b"
 )
@@ -110,6 +110,12 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
             return None
         filters.append(Filter("product", product, rules.row("product_names") or ""))
         used.append("product_names")
+    staff = _staff(text)
+    if staff is False or (staff and filters):
+        return None  # several staff codes, or a second filter
+    if staff:
+        text, code = staff
+        filters.append(Filter("staff", code, ""))
     shift = _shift(text, rules)
     if shift is False or (shift and filters):
         return None  # shift words not understood, or a second filter
@@ -138,7 +144,7 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         return contract if contract and not (filters or group or reference) else None
     if not rules.revenue:
         return None
-    if not reference and not group and not shift:
+    if not reference and not group and not shift and not staff:
         special = (_months(text, today, rules) or _customers(text, today, rules)
                    or _thresholds(text, today, rules))
         if special is False:
@@ -148,7 +154,16 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     intent = ""
     top_k = 1
     best_day = _best_day(text)
-    if best_day is not None:
+    best_staff = _BEST_STAFF.search(text)
+    if best_staff and not filters and not reference:
+        if "gioi nhat" in best_staff.group() and not rules.best_staff:
+            return None  # "giỏi nhất" means revenue only when the rulebook says so
+        intent = "top_staff"
+        text = text[:best_staff.start()] + " " + text[best_staff.end():]
+        text = re.sub(r"\b(?:la ai|ai la)\b", " ", text)
+        if rules.best_staff:
+            used.append("best_staff")
+    elif best_day is not None:
         intent, text = "best_day", best_day
     unit = ""
     for kind, feature, pattern, extras in () if intent else _INTENTS:
@@ -188,7 +203,7 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
             leftover = again[2]
     if group and intent != "revenue":
         return None
-    if shift and intent not in ("revenue", "order_count"):
+    if (shift or staff) and intent not in ("revenue", "order_count"):
         return None
     # Do not silently ignore product names, payment methods, groups, shifts, etc.
     if _FILLERS.sub(" ", leftover).strip():
@@ -741,6 +756,24 @@ _REFERENCES = (
     ("prev_month", re.compile(r"\bthang (?:lien truoc|truoc do)\b")),
     ("prev_month", re.compile(r"(?<=hon hay kem )thang (?:truoc|roi)\b")),
 )
+
+
+_STAFF = re.compile(r"\b(?:cac )?don (?:hang )?do nhan vien (?:ma )?(nv\d{1,4}) ban\b"
+                    r"|\b(?:cua )?nhan vien (?:ma )?(nv\d{1,4})\b")
+_BEST_STAFF = re.compile(
+    r"\b(?:ai la )?nhan vien ban gioi nhat(?: la ai)?\b"
+    r"|\b(?:ai la )?(?:nhan vien|nguoi ban) (?:nao )?co doanh thu cao nhat(?: la ai)?\b")
+
+
+def _staff(text: str) -> tuple[str, str] | None | bool:
+    """"nhân viên mã NV001": a staff code filter; None: no code; False: several codes."""
+    found = list(_STAFF.finditer(text))
+    if not found:
+        return None
+    codes = {match.group(1) or match.group(2) for match in found}
+    if len(codes) != 1:
+        return False
+    return _STAFF.sub(" ", text), codes.pop().upper()
 
 
 _SHIFT = re.compile(r"\b(?:rieng |trong |cua )?ca (sang|chieu)\b")

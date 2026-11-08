@@ -278,12 +278,14 @@ C01_INTENTS = frozenset({"revenue_increasing", "top_debt_customers"})
 # Contract C01 §7: further debt questions on the same D01 ledger.
 DEBT_INTENTS = frozenset({"debt_total", "debt_customer_count", "debt_collected", "debt_flow"})
 DEBT_MEASURE_FEATURES = ("debt_orders", "debt_at_date", "debt_excluded", "customer_identity")
-INTENTS = frozenset({"revenue", "order_count", "top_products", "average_order",
+INTENTS = (frozenset({"revenue", "order_count", "top_products", "average_order",
                      "cancel_count", "cancel_rate", "best_day",
-                     "top_customers", "count_where", "quantity"}) | C01_INTENTS | DEBT_INTENTS
+                     "top_customers", "count_where", "quantity", "top_staff"})
+           | C01_INTENTS | DEBT_INTENTS)
 # Plan filters this backend applies, and the intents each one may be combined with.
 FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity"}),
               "shift": frozenset({"revenue", "order_count"}),
+              "staff": frozenset({"revenue", "order_count"}),
               "product_group": frozenset({"revenue"}),
               "customer_group": frozenset({"revenue"})}
 GROUP_FIELDS = ("product_group", "customer_group")
@@ -749,6 +751,51 @@ def _answer_shift(plan: Plan, sales: list[Sale], rulebook: str,
     return Candidate("percent", value, 1.0, "", evidence)
 
 
+def select_staff(selected: list[Sale], code: str) -> list[Sale]:
+    """Sales of orders sold by the staff member with this code (case-insensitive)."""
+    return [s for s in selected if s.staff_id is not None and s.staff_id.upper() == code.upper()]
+
+
+def best_staff(selected: list[Sale]) -> tuple[str, Decimal]:
+    """Staff code with the highest revenue; ties by code ascending."""
+    totals: dict[str, Decimal] = defaultdict(Decimal)
+    for sale in selected:
+        totals[sale.staff_id] += sale.amount
+    code = min(totals, key=lambda key: (-totals[key], key))
+    return code, totals[code]
+
+
+def _answer_staff(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Candidate:
+    """Revenue / orders of one staff code, or the staff code with the most revenue."""
+    selected = select_valid(sales, plan.start, plan.end)
+    missing = sum(1 for s in selected if s.staff_id is None)
+    evidence["inputs"].update(selected_rows=len(selected), rows_without_staff=missing,
+                              selected_orders=len({s.order_id for s in selected}))
+    if missing or not selected:
+        return Candidate(reason="Seller is missing for orders in the period"
+                         if missing else "No valid orders in period", evidence=evidence)
+    window = (f"date.fromisoformat({plan.start.isoformat()!r}), "
+              f"date.fromisoformat({plan.end.isoformat()!r})")
+    if plan.intent == "top_staff":
+        code, total = best_staff(selected)
+        evidence.update(calculation="staff code with the highest revenue; ties by code",
+                        code=_code(f"best_staff(select_valid(sales, {window}))[0]",
+                                   select_valid, best_staff),
+                        staff_revenue=str(total), result=code)
+        return Candidate("string", code, 1.0, "", evidence)
+    code = plan.filters[0].value
+    rows = select_staff(selected, code)
+    if not rows:
+        return Candidate(reason="No order of this staff code in the period", evidence=evidence)
+    function = revenue if plan.intent == "revenue" else order_count
+    value = function(rows)
+    evidence.update(staff=code, calculation=f"{function.__name__} of the staff member's orders",
+                    code=_code(f"{function.__name__}(select_staff(select_valid(sales, {window}), "
+                               f"{code!r}))", select_valid, select_staff, function),
+                    result=value)
+    return Candidate("number", value, 1.0, "", evidence)
+
+
 def change_percent(current: Decimal, previous: Decimal) -> float | None:
     if previous == 0:
         return None
@@ -807,6 +854,8 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
     product_call = ""
     if plan.filters and plan.filters[0].field == "shift":
         return _answer_shift(plan, sales, rulebook, evidence)
+    if plan.filters and plan.filters[0].field == "staff" or plan.intent == "top_staff":
+        return _answer_staff(plan, sales, evidence)
     if plan.filters and plan.filters[0].field in GROUP_FIELDS:
         return _answer_group(plan, sales, evidence)
     if plan.filters:

@@ -835,7 +835,8 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         index = len(sales)
         parent = orders.get(key) or {}
         context = {name: _text(line.get(name) if name in line_fields else parent.get(name))
-                   for name in ("customer_id", "customer_name", "customer_group", "channel")}
+                   for name in ("customer_id", "customer_name", "customer_group", "channel",
+                                "staff_id")}
         listed = customer_groups.get(context["customer_id"] or "")
         if listed:
             context["customer_group"] = context["customer_group"] or listed["group"]
