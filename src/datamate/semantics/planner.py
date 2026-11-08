@@ -174,6 +174,9 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         if special is False:
             return None
         if special:
+            if filters and (special.intent == "top_customers" or (
+                    special.threshold is not None and special.threshold.subject == "customer")):
+                return None
             return special
     intent = ""
     top_k = 1
@@ -569,7 +572,7 @@ def _debt_measure(text: str, today: date, rules: Rules) -> Plan | None | bool:
 # ---------------------------------------------------------------- SEM-02: customers
 _CUSTOMER = r"(?:khach hang|khach)"
 _TOP_CUSTOMERS = re.compile(
-    rf"\b(?:ai la )?(?:top )?(?:(\d+) )?{_CUSTOMER}(?: nao)? "
+    rf"(?<![/\d])\b(?:ai la )?(?:top )?(?:(\d+) )?{_CUSTOMER}(?: nao)? "
     r"(?P<what>co tong tien mua cao nhat|mua (?:nhieu|nhiu) tien nhat|chi tieu (?:nhieu|nhiu) nhat"
     r"|chi (?:nhieu|nhiu) tien nhat|mua (?:nhieu|nhiu) don(?: hang)? nhat"
     r"|co so don mua (?:nhieu|nhiu) nhat"
@@ -577,7 +580,7 @@ _TOP_CUSTOMERS = re.compile(
 _WHO_BY_REVENUE = re.compile(r"\bai mua hang (?:nhieu|nhiu) tien nhat\b")
 _CUSTOMER_PERCENT = re.compile(rf"\bphan tram {_CUSTOMER}\b")
 _BOUGHT_CUSTOMERS = re.compile(rf"\b(?:trong )?so {_CUSTOMER} (?:da|co) mua(?: hang)?\b")
-_AT_LEAST = re.compile(r"\b(?:mua )?(?:tu (\d+) don(?: hang)? tro len|it nhat (\d+) don(?: hang)?)\b")
+_AT_LEAST = re.compile(r"\b(?:mua )?(?:tu (\d+) don(?: hang)? tro (?:len|leen)|it nhat (\d+) don(?: hang)?)\b")
 _CUSTOMER_WORDS = re.compile(
     rf"\b(?:trong so {_CUSTOMER} (?:da|co) mua(?: hang)?|so {_CUSTOMER} da mua(?: hang)?|"
     rf"so {_CUSTOMER}|{_CUSTOMER}|chiem|t[iy] le|(?:{_AMOUNT} )?phan tram|la (?:nhung )?ai|ai|"

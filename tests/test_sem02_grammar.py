@@ -99,6 +99,8 @@ class CustomerGrammarTests(unittest.TestCase):
     def test_customer_ranking_in_everyday_questions(self):
         for text, count, rank in (
             ("Tháng 4/2025 ai mua hàng nhiều tiền nhất vậy?", 1, "revenue"),
+            ("Tháng 6/2025 khách nào mua nhiều tiền nhất?", 1, "revenue"),
+            ("Tháng 8/2026 khách nào mua nhiều đơn nhất?", 1, "order_count"),
             ("Tháng 1/2026 ai là khách mua nhiều lần nhất, tính theo số đơn?", 1, "order_count"),
             ("Cho hỏi ai là khách có số đơn mua nhiều nhất tháng 1/2026?", 1, "order_count"),
             ("Liệt kê 5 khách chi tiêu nhiều nhất tháng 1/2026.", 5, "revenue"),
@@ -129,6 +131,9 @@ class CustomerGrammarTests(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self.assertIsNone(plan(text))
+        self.assertIsNone(plan("Khách nào mua nhiều tiền nhất tháng 1/2026 size M?"))
+        count = plan("Tháng 8/2025 có nhiêu khách mua từ 12 đơn trở leen?")
+        self.assertEqual(count.threshold.value, 12)
         self.assertIsNone(plan("Tháng 1/2026 ai mua hàng nhiều tiền nhất?",
                                book=rulebook("customers")))
 
