@@ -26,6 +26,7 @@ from datamate.contracts import (
 )
 from datamate.ingestion.debt import DebtSourceError, _coverage_day, load_debt_ledger
 from datamate.ingestion.sales import Sale
+from datamate.ingestion.stock import StockItem, StockSourceError, load_stock
 from datamate.semantics.rules import DEBT_TABLE_FEATURES, read_rules
 from datamate.semantics.text import fold
 
@@ -280,10 +281,10 @@ DEBT_INTENTS = frozenset({"debt_total", "debt_customer_count", "debt_collected",
 DEBT_MEASURE_FEATURES = ("debt_orders", "debt_at_date", "debt_excluded", "customer_identity")
 INTENTS = (frozenset({"revenue", "order_count", "top_products", "average_order",
                      "cancel_count", "cancel_rate", "best_day",
-                     "top_customers", "count_where", "quantity", "top_staff"})
+                     "top_customers", "count_where", "quantity", "top_staff", "stock"})
            | C01_INTENTS | DEBT_INTENTS)
 # Plan filters this backend applies, and the intents each one may be combined with.
-FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity"}),
+FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock"}),
               "shift": frozenset({"revenue", "order_count"}),
               "staff": frozenset({"revenue", "order_count"}),
               "size": frozenset({"quantity"}),
@@ -378,8 +379,11 @@ def unsupported(plan: Plan) -> str:
             return "Order thresholds must be finite nonnegative integers"
     elif plan.intent == "count_where":
         return "Customer count needs a threshold"
-    if (plan.intent == "quantity") != bool(plan.unit):
+    if (plan.intent in ("quantity", "stock")) != bool(plan.unit):
         return "Quantity needs the unit asked for"
+    if plan.intent == "stock" and (plan.start != plan.end or len(plan.filters) != 1
+                                   or plan.filters[0].field != "product"):
+        return "Stock is one product at the end of one day"
     if plan.rank_by and (plan.intent != "top_customers"
                          or plan.rank_by not in ("revenue", "order_count")):
         return f"Ranking by {plan.rank_by!r} not supported"
@@ -752,6 +756,56 @@ def _answer_shift(plan: Plan, sales: list[Sale], rulebook: str,
     return Candidate("percent", value, 1.0, "", evidence)
 
 
+def _answer_stock(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                  rulebook: str) -> Candidate:
+    """Stock of one product at the end of the last data day, in its base unit."""
+    evidence: dict[str, Any] = {"intent": "stock", "start": plan.start.isoformat(),
+                                "end": plan.end.isoformat(), "rules": plan.evidence}
+    key = (_catalog_key(catalog), catalog.readme)
+    if cache.get("stock_key") != key:
+        try:
+            cache["stock"] = load_stock(catalog)
+        except StockSourceError as exc:
+            cache["stock"] = exc
+        cache["stock_key"] = key
+    snapshot = cache["stock"]
+    if isinstance(snapshot, StockSourceError):
+        return Candidate(reason=str(snapshot), evidence=evidence)
+    evidence.update(stock_source=snapshot.source, stock_convention=snapshot.convention,
+                    stock_day=snapshot.day.isoformat())
+    if plan.end != snapshot.day:
+        return Candidate(reason="Stock is known only at the end of the last data day",
+                         evidence=evidence)
+    name = plan.filters[0].value
+    codes: set[str] = set()
+    if prepare_sales(cache, catalog, rulebook)["ok"]:
+        codes = {s.product_id for s in select_product(cache["sales"][0], name) if s.product_id}
+    item = stock_item(snapshot.items, name, codes)
+    if item is None:
+        return Candidate(reason="Product matches no stock row or several", evidence=evidence)
+    evidence["stock_item"] = {"product_id": item.product_id, "product_name": item.product_name,
+                              "base_unit": item.base_unit, "quantity": str(item.quantity)}
+    if item.base_unit is None or fold(item.base_unit) != fold(plan.unit):
+        return Candidate(reason="The unit asked is not the product's base unit",
+                         evidence=evidence)
+    value = (int(item.quantity) if item.quantity == item.quantity.to_integral()
+             else float(item.quantity))
+    evidence.update(code=_code(f"stock_item(stock.items, {name!r}, {sorted(codes)!r}).quantity",
+                               stock_item), result=value)
+    return Candidate("number", value, 1.0, "", evidence)
+
+
+def stock_item(items: tuple[StockItem, ...], name: str, codes: set[str]) -> StockItem | None:
+    """The one stock row of the product: by its sales code, else by its folded name."""
+    if len(codes) == 1:
+        by_code = [item for item in items if item.product_id in codes]
+        if len(by_code) == 1:
+            return by_code[0]
+    by_name = [item for item in items
+               if item.product_name and fold(item.product_name) == fold(name)]
+    return by_name[0] if len(by_name) == 1 else None
+
+
 def select_size(sales: list[Sale], size: str) -> list[Sale]:
     """Items whose name ends with "(M)" / "(L)", case-insensitive (rulebook "Size M, size L")."""
     suffix = f"({size.lower()})"
@@ -817,6 +871,8 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return Candidate(reason=reason)
     if plan.intent in DEBT_INTENTS:
         return _answer_debt_measure(cache, catalog, plan, rulebook)
+    if plan.intent == "stock":
+        return _answer_stock(cache, catalog, plan, rulebook)
     c01_rules = ()
     if plan.intent in C01_INTENTS:
         c01_rules = _c01_rules(plan, rulebook)

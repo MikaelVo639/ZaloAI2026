@@ -110,6 +110,15 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
             return None
         filters.append(Filter("product", product, rules.row("product_names") or ""))
         used.append("product_names")
+    if product and _STOCK_CUE.search(text):
+        # "tồn kho <hàng> cuối ngày hôm nay là bao nhiêu <đơn vị>": stock at the end of today.
+        unit = _stock_unit(text)
+        if unit is None or not rules.until_end_of_day:
+            return None
+        return Plan("stock", today, today, 1,
+                    tuple(dict.fromkeys(row for row in (rules.row("product_names"),
+                                                        rules.row("until_end_of_day")) if row)),
+                    filters=tuple(filters), unit=unit)
     size = re.search(r"\bsize (m|l)\b", text)
     if size:
         if filters or not rules.size_by_name or len(re.findall(r"\bsize\b", text)) != 1:
@@ -770,6 +779,28 @@ _REFERENCES = (
     ("prev_month", re.compile(r"\bthang (?:lien truoc|truoc do)\b")),
     ("prev_month", re.compile(r"(?<=hon hay kem )thang (?:truoc|roi)\b")),
 )
+
+
+_STOCK_CUE = re.compile(r"\b(?:ton kho|kho con ton|kho con|con ton|ton cuoi)\b"
+                        r"|\bcuoi ngay hom nay\b|\bluc cuoi ngay\b")
+_STOCK_UNIT = re.compile(rf"\b{_AMOUNT} ([a-z][a-z0-9]*)\b")
+_STOCK_WORDS = frozenset("""
+    ton kho con cuoi ngay hom nay la luc trong tinh den cua duoc dc bua
+""".split())
+
+
+def _stock_unit(text: str) -> str | None:
+    """The base unit asked for today's stock; None for anything else (another day, a split
+    into big and small units, an unknown word)."""
+    if not re.search(r"\bhom nay\b|\bbua nay\b", text) or re.search(r"\b(?:chan|le)\b", text):
+        return None
+    units = [m for m in _STOCK_UNIT.finditer(text) if m.group(1) not in _NOT_UNITS]
+    if len(units) != 1:
+        return None
+    rest = text[:units[0].start()] + " " + text[units[0].end():]
+    if set(_FILLERS.sub(" ", rest).split()) - _STOCK_WORDS:
+        return None
+    return units[0].group(1)
 
 
 _STAFF = re.compile(r"\b(?:cac )?don (?:hang )?do nhan vien (?:ma )?(nv\d{1,4}) ban\b"
