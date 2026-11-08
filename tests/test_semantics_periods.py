@@ -44,6 +44,11 @@ class PeriodTests(unittest.TestCase):
         self.assertEqual(normalize_question("bữa qua có bao nhiu ddown"), "hom qua co bao nhiu don")
         self.assertEqual(normalize_question("Tháng 8 năm 2025, quý 2 năm 2026"),
                          "thang 8/2025 quy 2/2026")
+        # "lên", "thuốc"/"thuộc" and the closing "nhỉ" typed in Telex decode like any other
+        # grammar word, so no wording needs its own typo pattern.
+        self.assertEqual(normalize_question("đơn từ 2 món trở leen ở nhà thuoocs nhir"),
+                         "don tu 2 mon tro len o nha thuoc")
+        self.assertEqual(normalize_question("khách thuoocj nhóm sỉ"), "khach thuoc nhom si")
         # Names that merely look like Telex keystrokes stay as written.
         self.assertEqual(normalize_question("Bột giặt Max, van gas, Panadol Plus"),
                          "bot giat max van gas panadol plus")

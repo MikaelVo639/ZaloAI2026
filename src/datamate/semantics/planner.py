@@ -74,7 +74,9 @@ def _best_day(text: str) -> str | None:
 
 
 def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
-                  vocabulary: dict[str, Iterable[str]] | None = None) -> Plan | None:
+                  vocabulary: dict[str, Iterable[str]] | None = None, *,
+                  price_increases: dict[tuple[str, Decimal], date] | None = None,
+                  price_source: str = "") -> Plan | None:
     """Closed grammar: leftover filters/comparisons cause abstention.
 
     `names` are product names/codes of the business (from the Agent's data); a question
@@ -90,7 +92,7 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     if _AVG_PURCHASE_CUE.search(text):
         return _avg_purchase(text, today, rules, names)
     if _PRICE_UP.search(text):
-        return _price_effect(text, today, rules, names)
+        return _price_effect(text, today, rules, names, price_increases or {}, price_source)
     if _DRUG_CUE.search(text):
         return _drug_revenue(question, rules)
     group = _group(text, vocabulary or {})
@@ -119,14 +121,7 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         filters.append(Filter("product", product, rules.row("product_names") or ""))
         used.append("product_names")
     if product and _STOCK_CUE.search(text):
-        # "tồn kho <hàng> cuối ngày hôm nay là bao nhiêu <đơn vị>": stock at the end of today.
-        unit = _stock_unit(text)
-        if unit is None or not rules.until_end_of_day:
-            return None
-        return Plan("stock", today, today, 1,
-                    tuple(dict.fromkeys(row for row in (rules.row("product_names"),
-                                                        rules.row("until_end_of_day")) if row)),
-                    filters=tuple(filters), unit=unit)
+        return _stock_plan(text, today, rules, filters)
     size = re.search(r"\bsize (m|l)\b", text)
     if size:
         if filters or not rules.size_by_name or len(re.findall(r"\bsize\b", text)) != 1:
@@ -853,6 +848,13 @@ def _avg_purchase(text: str, today: date, rules: Rules, names: Iterable[str]) ->
                 unit=match.group("unit"))
 
 
+_PRICE_VALUE = r"(?:\d{1,3}(?: \d{3})+|\d+)"
+_PRICE_SUFFIX = r"(?: ?d| dong)"
+_PRICE_UP = re.compile(
+    rf"\b(?:ngay )?(?:(?:tang|doi) gia(?: tu (?P<old>{_PRICE_VALUE}){_PRICE_SUFFIX})? len"
+    rf"|len gia) (?P<new>{_PRICE_VALUE}){_PRICE_SUFFIX}(?:/(?P<unit>[a-z][a-z0-9]*))?\b")
+_EFFECT_UNIT = re.compile(
+    r"\bso ([a-z][a-z0-9]*) ban (?:ra|duoc)\b|\b(?:luong ban )?tinh theo (?:so )?([a-z][a-z0-9]*)\b")
 _DRUG_CUE = re.compile(r"\b(?:hoat chat|ke don)\b")
 _DRUG_NAME = r"(?:cac )?(?:thuoc|hang|mat hang|san pham)"
 _INGREDIENT = rf"{_DRUG_NAME} (?:co )?hoat chat (?P<ingredient>[a-z0-9]+(?: [a-z0-9+]+)*?)"
@@ -927,75 +929,124 @@ def _drug_revenue(question: Question, rules: Rules) -> Plan | None:
                 comparison="share" if share else "")
 
 
-_PRICE = r"\d{1,3}(?: \d{3})*(?:d\b| dong/[a-z]+\b)"
-_PRICE_UP = re.compile(rf"\b(?:ngay )?(?:tang gia(?: tu {_PRICE})? len|len gia) {_PRICE}")
-_EFFECT_UNIT = re.compile(r"\bso ([a-z][a-z0-9]*) ban (?:ra|duoc)\b|\bluong ban tinh theo ([a-z][a-z0-9]*)\b")
 _EFFECT_WORDS = frozenset("""
-    tu ngay so voi vs ke truoc do thi tang hay giam thay doi bao nhieu nhiu bnhiu bn phan tram
-    ban ra duoc trong luong tinh theo cho hoi minh xem coi check giup ta e a nhi
+    tu ngay so voi vs ke truoc do thi tang hay giam thay doi bao nhieu nhiu bnhiu bn may phan tram
+    ban ra duoc trong luong tinh theo cho hoi minh xem coi check giup ta e a nhi vao
 """.split())
+_EFFECT_FROM = re.compile(rf"\b(\d{{1,3}}) ngay (?:ke tu (?:ngay )?(?:{_DATE}|do|(?:tang|doi) gia|tang)|dau)\b")
+_EFFECT_BEFORE = re.compile(r"\b(\d{1,3}) ngay (?:ngay |lien )?truoc(?: ngay do| do)?\b")
+_EFFECT_PERCENT = re.compile(rf"\b{_AMOUNT} phan tram\b")
 
 
-def _price_effect(text: str, today: date, rules: Rules, names: Iterable[str]) -> Plan | None:
-    """"Từ ngày D <hàng> tăng giá lên P. So N ngày kể từ D với N ngày ngay trước, số <đơn vị>
-    bán ra thay đổi bao nhiêu %" (rulebook §5 "Hiệu ứng tăng giá"). D must be written."""
+def price_history_question(question: Question, rules: Rules) -> bool:
+    text = normalize_question(question.question)
+    return rules.price_effect_lookup and bool(_PRICE_UP.search(text)) and not re.search(_DATE, text)
+
+
+def _price_effect(text: str, today: date, rules: Rules, names: Iterable[str],
+                  price_increases: dict[tuple[str, Decimal], date], price_source: str) -> Plan | None:
+    """Compare equal windows of base units; look up D only from a documented price history."""
     if not (rules.price_effect and rules.change_percent and rules.product_names and rules.revenue):
         return None
     text, product = _product(text, names)
     if not product or product is _AMBIGUOUS:
         return None
     text = re.sub(r"\s+", " ", text).strip()
-    if len(_PRICE_UP.findall(text)) != 1:
+    changes = list(_PRICE_UP.finditer(text))
+    if len(changes) != 1:
+        return None
+    change = changes[0]
+    new_price = Decimal(change["new"].replace(" ", ""))
+    if change["old"] and Decimal(change["old"].replace(" ", "")) >= new_price:
         return None
     text = _PRICE_UP.sub(" ", text)
     days = set(re.findall(_DATE, text))
-    spans = re.findall(r"\b(\d{1,3}) ngay\b", text)
+    after, before = list(_EFFECT_FROM.finditer(text)), list(_EFFECT_BEFORE.finditer(text))
     units = {a or b for a, b in _EFFECT_UNIT.findall(text)}
-    if len(days) != 1 or len(set(spans)) != 1 or len(spans) != 2 or len(units) != 1:
-        return None
-    if not re.search(r"\b\d{1,3} ngay ke tu\b", text) or \
-            not re.search(r"\b\d{1,3} ngay (?:ngay )?truoc\b", text):
+    if (len(days) > 1 or len(after) != 1 or len(before) != 1
+            or after[0][1] != before[0][1] or len(units) != 1
+            or not _EFFECT_PERCENT.search(text)):
         return None
     unit = units.pop()
-    if unit in _NOT_UNITS - {"phan"}:  # "số phần bán ra": phần is a unit here, not a percent
+    if unit in _NOT_UNITS - {"phan"} or change["unit"] not in (None, unit):
         return None
-    rest = re.sub(_DATE, " ", text)
-    rest = re.sub(r"\bngay tang gia\b", " ", rest)  # "kể từ ngày tăng giá" is D
-    rest = re.sub(r"\b\d{1,3} ngay\b", " ", rest)
+    rest = _EFFECT_FROM.sub(" ", text)
+    rest = _EFFECT_BEFORE.sub(" ", rest)
+    rest = re.sub(_DATE, " ", rest)
     rest = _EFFECT_UNIT.sub(" ", rest)
+    rest = re.sub(r"\b(?:trung binh moi ngay|nhieu hay it hon|nhiu hay it hon|"
+                  r"tu hoi|ke tu khi)\b", " ", rest)
     if set(rest.split()) - _EFFECT_WORDS:
         return None
-    day, month, year = map(int, days.pop())
-    try:
-        start = date(year, month, day)
-    except ValueError:
-        return None
-    n = int(spans[0])
+    n = int(after[0][1])
     if not 1 <= n <= 90:
         return None
-    end = start + timedelta(days=n - 1)
+    evidence = _rows(rules, "product_names", "price_effect", "change_percent")
+    try:
+        if days:
+            day, month, year = map(int, days.pop())
+            start = date(year, month, day)
+        else:
+            if not rules.price_effect_lookup or change["old"] or not price_source:
+                return None
+            start = price_increases.get((product, new_price))
+            if start is None:
+                return None
+            evidence += (price_source,)
+        end = start + timedelta(days=n - 1)
+        previous_start = start - timedelta(days=n)
+    except (ValueError, OverflowError):
+        return None
     if end > today:
         return None
-    return Plan("quantity", start, end, 1,
-                _rows(rules, "product_names", "price_effect", "change_percent"),
-                compare_start=start - timedelta(days=n), compare_end=start - timedelta(days=1),
+    return Plan("quantity", start, end, 1, evidence,
+                compare_start=previous_start, compare_end=start - timedelta(days=1),
                 comparison="change_percent",
                 filters=(Filter("product", product, rules.row("product_names") or ""),),
                 unit=unit)
 
 
 _STOCK_CUE = re.compile(r"\b(?:ton kho|kho con ton|kho con|con ton|ton cuoi)\b"
-                        r"|\bcuoi ngay hom nay\b|\bluc cuoi ngay\b")
+                        r"|\bcuoi (?:ngay )?hom nay\b|\bluc cuoi ngay\b|\bhet hom nay\b")
 _STOCK_UNIT = re.compile(rf"\b{_AMOUNT} ([a-z][a-z0-9]*)\b")
+_STOCK_PAIR = re.compile(
+    rf"\b{_AMOUNT} (?P<big>[a-z][a-z0-9]*(?: \d+[a-z][a-z0-9]*)?) (?:chan|nguyen) "
+    rf"(?:va )?(?:{_AMOUNT} (?P<base>[a-z][a-z0-9]*) le|le {_AMOUNT} (?P<base2>[a-z][a-z0-9]*))\b")
 _STOCK_WORDS = frozenset("""
-    ton kho con cuoi ngay hom nay la luc trong tinh den cua duoc dc bua
+    ton kho con cuoi ngay hom nay la luc trong tinh den cua duoc dc bua het
 """.split())
+
+
+def stock_question(question: Question) -> bool:
+    text = normalize_question(question.question)
+    return bool(_STOCK_CUE.search(text) and re.search(r"\bhom nay\b", text))
+
+
+def _stock_plan(text: str, today: date, rules: Rules, filters: list[Filter]) -> Plan | None:
+    if not rules.until_end_of_day or not re.search(r"\bhom nay\b", text):
+        return None
+    pair = _STOCK_PAIR.search(text)
+    features = ("product_names", "until_end_of_day")
+    if pair:
+        rest = text[:pair.start()] + " " + text[pair.end():]
+        if not rules.stock_split or set(_FILLERS.sub(" ", rest).split()) - _STOCK_WORDS:
+            return None
+        big, base = pair["big"], pair["base"] or pair["base2"]
+        if big == base or base in _NOT_UNITS - {"phan"} or big in _NOT_UNITS:
+            return None
+        return Plan("stock_split", today, today, evidence=_rows(rules, *features, "stock_split"),
+                    filters=tuple(filters), unit=f"{big}|{base}")
+    unit = _stock_unit(text)
+    if unit is None:
+        return None
+    return Plan("stock", today, today, evidence=_rows(rules, *features),
+                filters=tuple(filters), unit=unit)
 
 
 def _stock_unit(text: str) -> str | None:
     """The base unit asked for today's stock; None for anything else (another day, a split
     into big and small units, an unknown word)."""
-    if not re.search(r"\bhom nay\b|\bbua nay\b", text) or re.search(r"\b(?:chan|le)\b", text):
+    if re.search(r"\b(?:chan|nguyen|le)\b", text):
         return None
     units = [m for m in _STOCK_UNIT.finditer(text) if m.group(1) not in _NOT_UNITS]
     if len(units) != 1:

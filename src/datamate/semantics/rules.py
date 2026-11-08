@@ -48,6 +48,7 @@ class Rules:
     trend_rule: bool = False            # the rulebook defines "tăng liên tục" / "xu hướng" itself
     table_answer: bool = False          # format table: {"columns", "rows"}, ô số là JSON number
     until_end_of_day: bool = False      # "đến hết ngày X": tình trạng lúc hết ngày, từ đầu dữ liệu
+    stock_split: bool = False          # tồn: đơn vị lớn nguyên và phần lẻ theo đơn vị cơ bản
     debt_orders: bool = False           # đơn tính vào nợ: không huỷ, đơn trả hàng vẫn tính
     debt_at_date: bool = False          # nợ một đơn tại X: tổng đơn (gồm phí giao) trừ khoản trả đến X
     debt_by_customer: bool = False      # nợ theo khách: khách lẻ vào tổng nợ, không có dòng
@@ -61,6 +62,7 @@ class Rules:
     top_supplier: bool = False          # nhà cung cấp nhập nhiều nhất = tiền nhập cao nhất
     avg_purchase_price: bool = False    # giá nhập bình quân trong tháng: theo số lượng nhập
     price_effect: bool = False          # hiệu ứng tăng giá: N ngày kể từ D với N ngày trước D
+    price_effect_lookup: bool = False   # look up the first increase to the requested price
     ingredient_revenue: bool = False   # exact active ingredient, combinations are separate
     prescription_revenue: bool = False # prescription status comes from the drug catalog
     # Shifts by order time: (name, first minute, last minute) and the base of "ca chiều so
@@ -241,6 +243,13 @@ def read_rules(rulebook: str) -> Rules:
         price_effect=enable("price_effect", _find(rows, "hieu ung tang gia"),
                             "so luong don vi co ban", "n ngay ke tu d", "tinh ca d",
                             "n ngay ngay truoc d", "bo don huy va don tra"),
+        price_effect_lookup=enable("price_effect_lookup", _find(rows, "hieu ung tang gia"),
+                                   "gia moi cao hon gia lien truoc", "theo bang gia",
+                                   "tang len cung mot gia nhieu lan thi lay lan dau"),
+        stock_split=enable("stock_split", _find(rows, "ton theo don vi lon"),
+                           "list 2 so", "so don vi lon nguyen", "so don vi co ban le",
+                           "khong co phan le thi so thu hai la 0",
+                           "phan le van tinh bang don vi co ban"),
         ingredient_revenue=enable("ingredient_revenue", _find(rows, "doanh thu theo hoat chat"),
                                   "doanh thu", "hoat chat ghi dung nhu vay trong danh muc thuoc",
                                   "mot loai rieng", "khong tinh vao tung hoat chat"),
