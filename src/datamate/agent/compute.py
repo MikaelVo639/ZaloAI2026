@@ -25,6 +25,7 @@ from datamate.contracts import (
     Plan,
 )
 from datamate.ingestion.debt import DebtSourceError, _coverage_day, load_debt_ledger
+from datamate.ingestion.drugs import Drug, ingredient_key, load_drugs
 from datamate.ingestion.purchases import (
     PurchaseLine,
     PurchaseSourceError,
@@ -329,8 +330,11 @@ FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock
               "staff": frozenset({"revenue", "order_count"}),
               "size": frozenset({"quantity"}),
               "product_group": frozenset({"revenue"}),
-              "customer_group": frozenset({"revenue"})}
+              "customer_group": frozenset({"revenue"}),
+              "ingredient": frozenset({"revenue"}),
+              "prescription": frozenset({"revenue"})}
 GROUP_FIELDS = ("product_group", "customer_group")
+DRUG_FIELDS = ("ingredient", "prescription")
 SHAPES = {"series": "revenue", "best_period": "revenue"}  # shape -> the one intent it supports
 COVERAGE = re.compile(r"Khoảng dữ liệu:\s*(\d{4}-\d{2}-\d{2})\s+đến\s+(\d{4}-\d{2}-\d{2})")
 
@@ -383,7 +387,7 @@ def unsupported(plan: Plan) -> str:
         if plan.compare_start is not None or plan.compare_end is not None:
             return "Share does not support comparison periods"
         group_share = (plan.intent == "revenue" and len(plan.filters) == 1
-                       and plan.filters[0].field in GROUP_FIELDS)
+                       and plan.filters[0].field in GROUP_FIELDS + DRUG_FIELDS)
         if not group_share and (plan.intent != "count_where" or plan.threshold is None):
             return f"Comparison 'share' for {plan.intent!r} not supported"
     elif plan.comparison == "shift_change_percent":
@@ -453,6 +457,8 @@ def unsupported(plan: Plan) -> str:
     for item in plan.filters:
         if plan.intent not in FILTERABLE.get(item.field, ()):
             return f"Filter {item.field!r} for {plan.intent!r} not supported"
+        if item.field == "prescription" and item.value not in ("rx", "non_rx"):
+            return "Unknown prescription class"
     return ""
 
 
@@ -1157,6 +1163,8 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return _answer_staff(plan, sales, evidence)
     if plan.filters and plan.filters[0].field in GROUP_FIELDS:
         return _answer_group(plan, sales, evidence)
+    if plan.filters and plan.filters[0].field in DRUG_FIELDS:
+        return _answer_drug_revenue(cache, catalog, rulebook, plan, sales, evidence)
     if plan.filters and plan.filters[0].field == "size":
         size = plan.filters[0].value
         sales = select_size(sales, size)
@@ -1406,6 +1414,66 @@ def _answer_extended(plan: Plan, sales: list[Sale], full: list[Sale],
                                                              rounding=ROUND_HALF_UP))
     evidence["result"] = value
     return Candidate("percent", value, 1.0, "", evidence)
+
+
+def select_drugs(rows: list[Sale], products: dict[str, Drug], field: str,
+                 value: str) -> list[Sale]:
+    if any(not row.product_id for row in rows):
+        raise ValueError("A valid sales line has no product identity for the drug join")
+    if field == "ingredient":
+        labels = {d.ingredient for d in products.values()
+                  if d.ingredient and ingredient_key(d.ingredient) == ingredient_key(value)}
+        if len(labels) != 1:
+            raise ValueError("Ingredient does not match exactly one drug catalog label")
+        label = labels.pop()
+        codes = {code for code, drug in products.items() if drug.ingredient == label}
+        return [row for row in rows if row.product_id in codes]
+    codes = {code for code, drug in products.items() if drug.prescription}
+    return [row for row in rows if (row.product_id in codes) == (value == "rx")]
+
+
+def _answer_drug_revenue(cache: dict[str, Any], catalog: Catalog, rulebook: str, plan: Plan,
+                         sales: list[Sale], evidence: dict[str, Any]) -> Candidate:
+    field, value = plan.filters[0].field, plan.filters[0].value
+    rules = read_rules(rulebook)
+    if not rules.revenue or not getattr(rules, f"{field}_revenue"):
+        return Candidate(reason="Split rulebook does not support the drug filter", evidence=evidence)
+    key = (_catalog_key(catalog), catalog.readme)
+    if cache.get("drugs_key") != key:
+        try:
+            cache["drugs"] = load_drugs(catalog)
+        except ValueError as exc:
+            cache["drugs"] = exc
+        cache["drugs_key"] = key
+    drugs = cache["drugs"]
+    if isinstance(drugs, ValueError):
+        return Candidate(reason=str(drugs), evidence=evidence)
+    if not any(row.product_id in drugs.products for row in sales):
+        return Candidate(reason="Sales identities do not join to the drug catalog", evidence=evidence)
+    rows = select_valid(sales, plan.start, plan.end)
+    try:
+        selected = select_drugs(rows, drugs.products, field, value)
+    except ValueError as exc:
+        return Candidate(reason=str(exc), evidence=evidence)
+    evidence.update(drug_source=drugs.source, drug_convention=drugs.convention,
+                    matching_sales_lines=len(selected), valid_sales_lines=len(rows))
+    window = f"date.fromisoformat({plan.start.isoformat()!r}), date.fromisoformat({plan.end.isoformat()!r})"
+    all_rows = f"select_valid(sales, {window})"
+    subset = f"select_drugs({all_rows}, drugs.products, {field!r}, {value!r})"
+    if plan.comparison == "share":
+        part, total = revenue_total(selected), revenue_total(rows)
+        result = share_percent(part, total)
+        evidence.update(drug_revenue=str(part), total_revenue=str(total), result=result,
+                        code=_code(f"share_percent(revenue_total({subset}), revenue_total({all_rows}))",
+                                   select_valid, select_drugs, ingredient_key, revenue_total, share_percent))
+        if result is None:
+            return Candidate(reason="Total revenue is zero; drug revenue share is undefined",
+                             evidence=evidence)
+        return Candidate("percent", result, 1.0, "", evidence)
+    result = revenue(selected)
+    evidence.update(result=result, code=_code(f"revenue({subset})", select_valid, select_drugs,
+                                             ingredient_key, revenue))
+    return Candidate("number", result, 1.0, "", evidence)
 
 
 def _answer_group(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Candidate:
