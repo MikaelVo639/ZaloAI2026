@@ -31,6 +31,9 @@ RULEBOOK = """# Synthetic split rules
 | Trạng thái đơn | mỗi đơn có đúng một trong bốn trạng thái: hoàn thành, huỷ, trả hàng, đang giao |
 | Hai dòng của cùng một đơn giống nhau ở mọi ô | lỗi xuất file, tính một lần |
 """
+RULEBOOK_WITH_NOTES = RULEBOOK + """
+| Sổ không có cột trạng thái | trạng thái đơn ghi ở cột Ghi chú. Ghi chú không nhắc trạng thái là đơn hoàn thành |
+"""
 
 FLAT_README = """# Dữ liệu shop
 
@@ -260,6 +263,23 @@ class ConversionListTests(_Shop):
 
 
 class ReportReadmeTests(_Shop):
+    def test_documented_month_year_filename_template_unions_only_matching_files(self):
+        readme = REPORT_README.replace("`DonHang.xlsx`", "`BanHang_T<tháng>_<năm>.xlsx`")
+        header = REPORT_HEADER
+        files = {
+            "BanHang_T1_2026.xlsx": {"DonHang_ChiTiet": [header, header,
+                ["O1", "05/01/2026", "Xong", "Bia", 1, "10,000", "lon"]]},
+            "BanHang_T2_2026.xlsx": {"DonHang_ChiTiet": [header,
+                ["O2", "05/02/2026", "Xong", "Muối", 1, "6,000", "gói"]]},
+            "QuyDoi.xlsx": {"Sheet1": [["Tên sản phẩm", "Đơn vị quy đổi",
+                                           "Tỉ lệ quy đổi", "Đơn vị cơ bản"]]},
+        }
+        sales, evidence, _ = load_readme_sales(self.shop(readme, files), RULEBOOK)
+        self.assertEqual({sale.order_id for sale in sales}, {"O1", "O2"})
+        self.assertEqual(len(evidence["sources"]["lines"]), 1)
+        self.assertEqual(len(evidence["tables"]), 3)
+        self.assertEqual(evidence["counts"]["repeated_headers_skipped"], 1)
+
     def test_title_rows_monthly_sheets_blank_cells_and_conversions(self):
         orders = {
             "01.2026": [["Trạng thái đơn hàng", "Đặt hàng (Đã duyệt)"], [], REPORT_HEADER,
@@ -371,6 +391,19 @@ class JoinedReadmeTests(_Shop):
             load_readme_sales(self.shop(JOINED_README, self.files(orders=orders)), RULEBOOK)
         self.assertEqual(caught.exception.code, "DUPLICATE_PARENT_KEY")
 
+    def test_exact_duplicate_parent_and_dated_summary_rows_are_ignored(self):
+        orders = [["C1", "2026-01-05", "completed", "70000"],
+                  ["C1", "2026-01-05", "completed", "70000"],
+                  ["Tổng 05/01", "", "", "70000"]]
+        lines = [["C1", "1", "SP1", "2", "70000", "2"],
+                 ["Tổng 05/01", "", "", "", "70000", ""]]
+        sales, evidence, _ = load_readme_sales(
+            self.shop(JOINED_README, self.files(orders=orders, lines=lines, lots=[])), RULEBOOK)
+        self.assertEqual([sale.order_id for sale in sales], ["C1"])
+        self.assertEqual(evidence["counts"]["duplicate_rows_dropped"], 1)
+        self.assertEqual(evidence["counts"]["summary_rows"], 1)
+        self.assertEqual(evidence["counts"]["summary_rows_skipped"], 1)
+
     def test_header_total_mismatch_is_reported(self):
         orders = [["C1", "2026-01-05", "completed", "99000"],
                   ["C2", "2026-01-05", "completed", "10000"],
@@ -408,6 +441,149 @@ class InvoiceListTests(_Shop):
                           ("B2", "returned", Decimal(10000), None)])
         self.assertEqual(evidence["summary_rows_skipped"], 1)
         self.assertEqual(eligible, frozenset())
+
+    def test_exact_duplicate_invoice_is_counted_once_but_conflict_still_raises(self):
+        duplicate = ["B1", "01/01/2026", "Hoàn thành", "32,000"]
+        rows = [["Mã bill", "Ngày GD", "Status", "Tien hang"], duplicate, duplicate]
+        sales, evidence, _ = load_readme_sales(
+            self.shop(INVOICE_README, {"hoa_don.csv": rows}), RULEBOOK)
+        self.assertEqual([sale.order_id for sale in sales], ["B1"])
+        self.assertEqual(evidence["summary_rows_skipped"], 1)
+
+        conflicting = rows + [["B1", "02/01/2026", "Hoàn thành", "32,000"]]
+        with self.assertRaises(ReadmeSalesError) as caught:
+            load_readme_sales(self.shop(INVOICE_README, {"hoa_don.csv": conflicting},
+                                        business="conflict"), RULEBOOK)
+        self.assertEqual(caught.exception.code, "DUPLICATE_PARENT_KEY")
+
+
+class HandwrittenLedgerTests(_Shop):
+    def test_monthly_sheet_order_codes_remain_global_for_later_return_rows(self):
+        readme = """# Sổ bán hàng
+Sổ bán hàng ghi tay chuyển sang Excel, mỗi tháng một sheet.
+## Cột trong `SoBanHang.xlsx`
+- **Mã**: mã đơn
+- **Ngày**: ngày bán
+- **Trạng thái**: trạng thái đơn
+- **Hàng**: tên hàng
+- **SL**: số lượng
+- **Tiền**: thành tiền sau giảm
+## Quy ước
+- **Trả hàng**: hàng trả ghi số lượng âm, cùng mã đơn với đơn đã bán: đơn có dòng số lượng âm là đơn có trả hàng.
+"""
+        header = ["Mã", "Ngày", "Trạng thái", "Hàng", "SL", "Tiền"]
+        rows = {"T1-2026": [header, ["HD1", "01/01/2026", "Xong", "A", 1, 100]],
+                "T2-2026": [header, ["HD1", "01/02/2026", "trả lại", "A", -1, -100]]}
+        sales, evidence, _ = load_readme_sales(
+            self.shop(readme, {"SoBanHang.xlsx": rows}), RULEBOOK)
+        self.assertEqual({sale.order_id for sale in sales}, {"HD1"})
+        self.assertEqual({sale.status for sale in sales}, {"returned"})
+        self.assertEqual(evidence["counts"]["orders_in_lines"], 1)
+
+    def test_combined_sales_software_export_is_recognised_by_documented_shape(self):
+        readme = """# Dữ liệu
+File Excel xuất từ phần mềm bán hàng; hóa đơn và chi tiết hóa đơn gộp chung sheet BanHang.
+## File
+- `BanHang_TongHop_2026.xlsx` (xlsx)
+"""
+        header = ["Đơn số", "Ngày HĐ", "Trạng thái giao", "Hàng hóa", "S.L", "ĐV",
+                  "Giá 1 đv", "Thành tiền (đ)", "SL (ĐV cơ bản)", "Khách hàng (tên)",
+                  "Mã khách", "Nguồn", "Mã NV bán", "Giờ tạo đơn", "Hình thức thanh toán"]
+        rows = {"BanHang": [header,
+                             ["HD1", "01/01/2026", "Khách trả", "Máy A", 1, "cái",
+                              100, 100, 1, "An", "K1", "Quầy", "NV1", "09:00", "cash"]]}
+        sales, evidence, _ = load_readme_sales(
+            self.shop(readme, {"BanHang_TongHop_2026.xlsx": rows}), RULEBOOK)
+        self.assertEqual([(sale.order_id, sale.status) for sale in sales],
+                         [("HD1", "returned")])
+        self.assertIn("sales_export_combined.v1", evidence["column_meanings"])
+
+    def test_phone_monthly_ledger_uses_conventions_and_scopes_stt_by_sheet(self):
+        readme = """# Sổ điện thoại
+Sổ bán hàng, mỗi tháng một sheet.
+
+## File
+- `SoBanHang.xlsx` (xlsx)
+
+## Quy ước
+- Đơn: các dòng cùng **STT** là một đơn; ghi chú lặp ở mọi dòng.
+- Tiền khách trả: **Khách trả** là số tiền khách trả cho cả đơn.
+- Đơn khách trả lại: **Ghi chú** của đơn ghi khách trả lại.
+"""
+        header = ["Ngày", "STT", "Khách", "Hàng", "SL", "Giá", "Thành tiền", "Ghi chú"]
+        sheets = {
+            "T1-2026": [[], header,
+                         ["01/01/2026", 1, "An", "Máy A", 1, 100, 100, ""],
+                         ["01/01/2026", 1, "An", "Ốp", 1, 10, 10, ""],
+                         ["Tổng cộng", None, None, None, None, None, 110, None]],
+            "T2-2026": [[], header,
+                         ["01/02/2026", 1, "Bình", "Máy B", 1, 200, 200,
+                          "khách trả lại"]],
+        }
+        sales, evidence, _ = load_readme_sales(
+            self.shop(readme, {"SoBanHang.xlsx": sheets}), RULEBOOK_WITH_NOTES)
+        self.assertEqual({sale.order_id for sale in sales}, {"T1-2026::1", "T2-2026::1"})
+        self.assertEqual(evidence["status_counts"], {"returned": 1, "valid": 1})
+        self.assertEqual(evidence["counts"]["summary_rows_skipped"], 1)
+
+    def test_phone_profile_rejects_an_incomplete_header(self):
+        readme = """# Sổ điện thoại
+## Quy ước
+- Đơn: các dòng cùng **STT** là một đơn.
+- Tiền khách trả: **Khách trả** là số tiền khách trả cho cả đơn.
+- Đơn khách trả lại: **Ghi chú** của đơn ghi khách trả lại.
+"""
+        rows = {"T1-2026": [[], ["Ngày", "STT", "Khách", "Hàng", "SL", "Giá", "Ghi chú"]]}
+        with self.assertRaises(ReadmeSalesError) as caught:
+            load_readme_sales(self.shop(readme, {"SoBanHang.xlsx": rows}),
+                              RULEBOOK_WITH_NOTES)
+        self.assertEqual(caught.exception.code, "README_COLUMNS_MISSING")
+
+    def test_repair_rows_are_revenue_records_but_not_rankable_products(self):
+        readme = """# Sổ sửa xe
+Sổ sửa xe, mỗi tháng một sheet; mỗi dòng một phiếu, không có mã phiếu.
+## Cột trong `SoSuaXe.xlsx`
+- **Ngày**: ngày sửa
+- **Làm gì**: các việc đã làm cho xe
+- **Thợ**: thợ làm phiếu
+- **Tiền**: tổng tiền cả phiếu
+- **Ghi chú**: ghi chú
+"""
+        rows = {"T7-2025": [[], ["Ngày", "Làm gì", "Thợ", "Tiền", "Ghi chú"],
+                              ["1 thg 7 2025", "thay nhớt + bugi", "Đức", 150000,
+                               "kiểm tra lại tuần sau"]]}
+        sales, _, eligible = load_readme_sales(
+            self.shop(readme, {"SoSuaXe.xlsx": rows}), RULEBOOK_WITH_NOTES)
+        self.assertEqual([(sale.status, sale.amount, sale.staff_id) for sale in sales],
+                         [("valid", Decimal(150000), "Đức")])
+        self.assertEqual(eligible, frozenset())
+
+    def test_merged_header_skips_documented_non_product_adjustments(self):
+        readme = """# Sổ mẹ và bé
+`BanHang_<năm>.xlsx`: mỗi tháng một sheet, header gộp 2 dòng. Dòng không phải hàng có Voucher, Dùng điểm và Phí ship.
+## Cột trong `BanHang_2026.xlsx`
+- **ĐG**: đơn giá
+- **TT**: thành tiền của dòng
+- **SL**: số lượng
+- **ĐVT**: đơn vị tính
+- **Tên hàng**: tên hàng
+- **HĐ**: số hóa đơn
+- **Ngày**: ngày bán
+- **Khách**: tên khách
+- **Kênh**: kênh bán
+- **Ghi chú**: ghi chú của đơn
+"""
+        rows = {"T01-2026": [
+            ["Tiền", None, "Hàng hoá", None, None, "Hoá đơn", None, None, None, None],
+            ["ĐG", "TT", "SL", "ĐVT", "Tên hàng", "HĐ", "Ngày", "Khách", "Kênh", "Ghi chú"],
+            [100000, 100000, 1, "cái", "Hàng A", "HD1", "01/01/2026", "An", "Tại tiệm", ""],
+            [None, -10000, None, None, "Voucher", "HD1", None, None, None, None],
+            [None, 20000, None, None, "Phí ship", "HD1", None, None, None, None],
+        ]}
+        sales, evidence, _ = load_readme_sales(
+            self.shop(readme, {"BanHang_2026.xlsx": rows}), RULEBOOK_WITH_NOTES)
+        self.assertEqual([sale.amount for sale in sales], [Decimal(100000)])
+        self.assertEqual(evidence["counts"]["non_product_adjustments_skipped"], 2)
 
 
 class AdapterSelectionTests(_Shop):

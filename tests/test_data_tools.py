@@ -55,6 +55,22 @@ class DataToolTests(unittest.TestCase):
         with self.assertRaises(sqlite3.OperationalError):
             connection.execute("INSERT INTO example VALUES (1)")
 
+    def test_catalog_preserves_xlsx_sheet_with_blank_first_row(self):
+        from openpyxl import Workbook
+
+        business = self.root / "data" / "shop"
+        business.mkdir(parents=True)
+        book = Workbook()
+        sheet = book.active
+        sheet.append([])
+        sheet.append(["Ngày", "Tiền"])
+        sheet.append(["01/01/2026", 1000])
+        book.save(business / "ledger.xlsx")
+
+        catalog = build_catalog(self.root / "data", "shop")
+        self.assertEqual(len(catalog.tables), 1)
+        self.assertEqual(catalog.tables[0].columns, ("_empty_0", "_empty_1"))
+
     def test_shared_metadata_is_identical_in_different_checkout_paths(self):
         original = self.root / "checkout one" / "data" / "train"
         copied = self.root / "another checkout" / "data" / "train"

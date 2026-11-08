@@ -62,7 +62,7 @@ class StatusTests(unittest.TestCase):
             "Đã hoàn hàng": "tra hang", "hàng trả về": "tra hang",
             "Đang giao hàng": "dang giao", "Đang vận chuyển": "dang giao",
             "completed": "hoan thanh", "cancelled": "huy", "returned": "tra hang",
-            "shipping": "dang giao",
+            "Đang ship": "dang giao", "shipping": "dang giao",
         }
         for label, state in cases.items():
             with self.subTest(label=label):
