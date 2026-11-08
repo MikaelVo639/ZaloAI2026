@@ -85,6 +85,8 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     used: list[str] = []
     filters: list[Filter] = []
     share = False
+    if _PURCHASE_TOTAL.search(text) or _TOP_SUPPLIER.search(text):
+        return _purchase(text, today, rules)
     group = _group(text, vocabulary or {})
     if group is _AMBIGUOUS:
         return None
@@ -779,6 +781,35 @@ _REFERENCES = (
     ("prev_month", re.compile(r"\bthang (?:lien truoc|truoc do)\b")),
     ("prev_month", re.compile(r"(?<=hon hay kem )thang (?:truoc|roi)\b")),
 )
+
+
+_PURCHASE_TOTAL = re.compile(
+    rf"\btong gia tri cac phieu nhap hang\b|\btong tien hang nhap vao\b|\btong tien nhap hang\b"
+    rf"|\bbo ra {_AMOUNT} tien nhap hang\b|\bnhap hang het {_AMOUNT} tien\b")
+_TOP_SUPPLIER = re.compile(
+    r"\bnha cung cap nao duoc cua hang nhap hang (?:nhieu|nhiu) tien nhat\b"
+    r"|\bcua hang nhap (?:nhieu|nhiu) tien hang nhat tu nha cung cap nao\b"
+    r"|\btien nhap hang tu nha cung cap nao cao nhat\b")
+
+
+def _purchase(text: str, today: date, rules: Rules) -> Plan | None:
+    """"Tổng tiền nhập hàng tháng M", "nhà cung cấp nào … nhiều tiền nhất" (rulebook §5)."""
+    total, top = _PURCHASE_TOTAL.search(text), _TOP_SUPPLIER.search(text)
+    if bool(total) == bool(top):
+        return None
+    intent, feature, match = (("purchase_total", "purchase_total", total) if total
+                              else ("top_supplier", "top_supplier", top))
+    if not getattr(rules, feature) or not rules.purchase_total:
+        return None
+    rest = text[:match.start()] + " " + text[match.end():]
+    resolved = _period(rest, today, rules)
+    if resolved is None:
+        return None
+    start, end, leftover = resolved
+    if _FILLERS.sub(" ", leftover).strip() or start > min(end, today):
+        return None
+    rows = ("purchase_total", "top_supplier") if top else ("purchase_total",)
+    return Plan(intent, start, min(end, today), 1, _rows(rules, *rows))
 
 
 _STOCK_CUE = re.compile(r"\b(?:ton kho|kho con ton|kho con|con ton|ton cuoi)\b"

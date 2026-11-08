@@ -25,6 +25,7 @@ from datamate.contracts import (
     Plan,
 )
 from datamate.ingestion.debt import DebtSourceError, _coverage_day, load_debt_ledger
+from datamate.ingestion.purchases import PurchaseSourceError, Receipt, load_purchases
 from datamate.ingestion.sales import Sale
 from datamate.ingestion.stock import StockItem, StockSourceError, load_stock
 from datamate.semantics.rules import DEBT_TABLE_FEATURES, read_rules
@@ -281,7 +282,8 @@ DEBT_INTENTS = frozenset({"debt_total", "debt_customer_count", "debt_collected",
 DEBT_MEASURE_FEATURES = ("debt_orders", "debt_at_date", "debt_excluded", "customer_identity")
 INTENTS = (frozenset({"revenue", "order_count", "top_products", "average_order",
                      "cancel_count", "cancel_rate", "best_day",
-                     "top_customers", "count_where", "quantity", "top_staff", "stock"})
+                     "top_customers", "count_where", "quantity", "top_staff", "stock",
+                     "purchase_total", "top_supplier"})
            | C01_INTENTS | DEBT_INTENTS)
 # Plan filters this backend applies, and the intents each one may be combined with.
 FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock"}),
@@ -756,6 +758,57 @@ def _answer_shift(plan: Plan, sales: list[Sale], rulebook: str,
     return Candidate("percent", value, 1.0, "", evidence)
 
 
+def purchase_totals(receipts: tuple[Receipt, ...], start: date, end: date
+                    ) -> dict[str | None, Decimal]:
+    """Purchase money by supplier: receipts dated in the period, cancelled ones dropped."""
+    totals: dict[str | None, Decimal] = defaultdict(Decimal)
+    for receipt in receipts:
+        if start <= receipt.day <= end and not receipt.cancelled:
+            totals[receipt.supplier] += receipt.total
+    return totals
+
+
+def _answer_purchase(cache: dict[str, Any], catalog: Catalog, plan: Plan) -> Candidate:
+    evidence: dict[str, Any] = {"intent": plan.intent, "start": plan.start.isoformat(),
+                                "end": plan.end.isoformat(), "rules": plan.evidence}
+    key = (_catalog_key(catalog), catalog.readme)
+    if cache.get("purchases_key") != key:
+        try:
+            cache["purchases"] = load_purchases(catalog)
+        except PurchaseSourceError as exc:
+            cache["purchases"] = exc
+        cache["purchases_key"] = key
+    book = cache["purchases"]
+    if isinstance(book, PurchaseSourceError):
+        return Candidate(reason=str(book), evidence=evidence)
+    first = min(r.day for r in book.receipts)
+    last = _coverage_day(catalog.readme) or max(r.day for r in book.receipts)
+    evidence.update(purchase_source=book.source, receipts=len(book.receipts),
+                    coverage={"first_day": first.isoformat(), "last_day": last.isoformat()})
+    if plan.start < first.replace(day=1) or plan.end > last:
+        return Candidate(reason="Period outside the purchase records", evidence=evidence)
+    window = (f"date.fromisoformat({plan.start.isoformat()!r}), "
+              f"date.fromisoformat({plan.end.isoformat()!r})")
+    totals = purchase_totals(book.receipts, plan.start, plan.end)
+    if plan.intent == "purchase_total":
+        value = int(_vnd(sum(totals.values(), Decimal(0))))
+        evidence.update(code=_code(f"_vnd(sum(purchase_totals(receipts, {window}).values()))",
+                                   purchase_totals, _vnd), result=value)
+        return Candidate("number", value, 1.0, "", evidence)
+    if not book.supplier_names or None in totals or not totals:
+        return Candidate(reason="Supplier names are not recorded on every receipt",
+                         evidence=evidence)
+    best = max(totals.values())
+    leaders = sorted(name for name, amount in totals.items() if amount == best)
+    evidence["supplier_totals"] = {name: str(amount) for name, amount in totals.items()}
+    if len(leaders) != 1:
+        return Candidate(reason="Several suppliers tie for the most purchase money",
+                         evidence=evidence)
+    evidence.update(code=_code(f"max(purchase_totals(receipts, {window}).items(), key=amount)",
+                               purchase_totals), result=leaders[0])
+    return Candidate("string", leaders[0], 1.0, "", evidence)
+
+
 def _answer_stock(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                   rulebook: str) -> Candidate:
     """Stock of one product at the end of the last data day, in its base unit."""
@@ -873,6 +926,8 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return _answer_debt_measure(cache, catalog, plan, rulebook)
     if plan.intent == "stock":
         return _answer_stock(cache, catalog, plan, rulebook)
+    if plan.intent in ("purchase_total", "top_supplier"):
+        return _answer_purchase(cache, catalog, plan)
     c01_rules = ()
     if plan.intent in C01_INTENTS:
         c01_rules = _c01_rules(plan, rulebook)

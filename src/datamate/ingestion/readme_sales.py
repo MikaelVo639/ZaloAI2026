@@ -350,6 +350,11 @@ def parse_amount(value: Any) -> Decimal:
         multiplier = Decimal(1)
         if text.endswith("tr"):
             text, multiplier = text[:-2], Decimal(1000000)
+            # "19,782tr", "16,56tr", "1.5tr": one separator before "tr" is a decimal point
+            # (19.782 million), never thousands (19,782 million).
+            if re.fullmatch(r"-?\d+[.,]\d+", text):
+                text = text.replace(",", ".")
+                return Decimal(text) * multiplier
         elif text.endswith("k"):
             text, multiplier = text[:-1], Decimal(1000)
         result = _plain_number(text) * multiplier
