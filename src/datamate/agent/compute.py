@@ -25,7 +25,13 @@ from datamate.contracts import (
     Plan,
 )
 from datamate.ingestion.debt import DebtSourceError, _coverage_day, load_debt_ledger
-from datamate.ingestion.purchases import PurchaseSourceError, Receipt, load_purchases
+from datamate.ingestion.purchases import (
+    PurchaseLine,
+    PurchaseSourceError,
+    Receipt,
+    load_purchase_lines,
+    load_purchases,
+)
 from datamate.ingestion.sales import Sale
 from datamate.ingestion.stock import StockItem, StockSourceError, load_stock
 from datamate.semantics.rules import DEBT_TABLE_FEATURES, read_rules
@@ -283,10 +289,11 @@ DEBT_MEASURE_FEATURES = ("debt_orders", "debt_at_date", "debt_excluded", "custom
 INTENTS = (frozenset({"revenue", "order_count", "top_products", "average_order",
                      "cancel_count", "cancel_rate", "best_day",
                      "top_customers", "count_where", "quantity", "top_staff", "stock",
-                     "purchase_total", "top_supplier"})
+                     "purchase_total", "top_supplier", "avg_purchase_price"})
            | C01_INTENTS | DEBT_INTENTS)
 # Plan filters this backend applies, and the intents each one may be combined with.
-FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock"}),
+FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock",
+                                     "avg_purchase_price"}),
               "shift": frozenset({"revenue", "order_count"}),
               "staff": frozenset({"revenue", "order_count"}),
               "size": frozenset({"quantity"}),
@@ -381,8 +388,13 @@ def unsupported(plan: Plan) -> str:
             return "Order thresholds must be finite nonnegative integers"
     elif plan.intent == "count_where":
         return "Customer count needs a threshold"
-    if (plan.intent in ("quantity", "stock")) != bool(plan.unit):
+    if (plan.intent in ("quantity", "stock", "avg_purchase_price")) != bool(plan.unit):
         return "Quantity needs the unit asked for"
+    if plan.intent == "avg_purchase_price" and (
+            len(plan.filters) != 1 or plan.filters[0].field != "product" or plan.start.day != 1
+            or plan.end != date(plan.start.year, plan.start.month,
+                                monthrange(plan.start.year, plan.start.month)[1])):
+        return "Average purchase price is one product over one full month"
     if plan.intent == "stock" and (plan.start != plan.end or len(plan.filters) != 1
                                    or plan.filters[0].field != "product"):
         return "Stock is one product at the end of one day"
@@ -809,6 +821,74 @@ def _answer_purchase(cache: dict[str, Any], catalog: Catalog, plan: Plan) -> Can
     return Candidate("string", leaders[0], 1.0, "", evidence)
 
 
+def purchase_lines_of(lines: tuple[PurchaseLine, ...], name: str, codes: set[str]
+                      ) -> list[PurchaseLine]:
+    """Lines of one product: by its sales code when lines carry codes, else by folded name."""
+    if any(line.product_id for line in lines):
+        if len(codes) != 1:
+            return []
+        return [line for line in lines if line.product_id in codes]
+    return [line for line in lines if line.product_name and fold(line.product_name) == fold(name)]
+
+
+def average_purchase_price(lines: list[PurchaseLine], start: date, end: date) -> Decimal | None:
+    """Rulebook §5: weighted by quantity bought, receipts dated in the period, cancelled
+    receipts dropped; in the purchase unit of the lines. None when nothing was bought."""
+    selected = [line for line in lines if start <= line.day <= end and not line.cancelled]
+    quantity = sum((line.quantity for line in selected), Decimal(0))
+    if not quantity:
+        return None
+    return sum((line.quantity * line.unit_price for line in selected), Decimal(0)) / quantity
+
+
+def _answer_avg_purchase(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                         rulebook: str) -> Candidate:
+    evidence: dict[str, Any] = {"intent": plan.intent, "start": plan.start.isoformat(),
+                                "end": plan.end.isoformat(), "rules": plan.evidence}
+    key = (_catalog_key(catalog), catalog.readme)
+    if cache.get("purchase_lines_key") != key:
+        try:
+            cache["purchase_lines"] = load_purchase_lines(catalog)
+        except PurchaseSourceError as exc:
+            cache["purchase_lines"] = exc
+        cache["purchase_lines_key"] = key
+    book = cache["purchase_lines"]
+    if isinstance(book, PurchaseSourceError):
+        return Candidate(reason=str(book), evidence=evidence)
+    first = min(line.day for line in book.lines)
+    last = _coverage_day(catalog.readme) or max(line.day for line in book.lines)
+    evidence.update(purchase_source=book.source, purchase_convention=book.convention,
+                    coverage={"first_day": first.isoformat(), "last_day": last.isoformat()})
+    if plan.start < first.replace(day=1) or plan.end > last:
+        return Candidate(reason="Month outside the purchase records", evidence=evidence)
+    name = plan.filters[0].value
+    codes: set[str] = set()
+    if prepare_sales(cache, catalog, rulebook)["ok"]:
+        codes = {s.product_id for s in select_product(cache["sales"][0], name) if s.product_id}
+    lines = purchase_lines_of(book.lines, name, codes)
+    month = [line for line in lines if plan.start <= line.day <= plan.end and not line.cancelled]
+    units = {fold(line.unit) for line in month}
+    evidence.update(product_codes=sorted(codes), product_lines=len(lines), month_lines=len(month),
+                    purchase_units=sorted(units))
+    if not month:
+        return Candidate(reason="No purchase line of this product in the month",
+                         evidence=evidence)
+    if units != {fold(plan.unit)}:
+        return Candidate(reason="The unit asked is not the purchase unit of every line",
+                         evidence=evidence)
+    value = average_purchase_price(lines, plan.start, plan.end)
+    if value is None:
+        return Candidate(reason="Nothing bought in the month", evidence=evidence)
+    result = int(_vnd(value))
+    window = (f"date.fromisoformat({plan.start.isoformat()!r}), "
+              f"date.fromisoformat({plan.end.isoformat()!r})")
+    evidence.update(code=_code(f"_vnd(average_purchase_price(purchase_lines_of(lines, {name!r}, "
+                               f"{sorted(codes)!r}), {window}))",
+                               purchase_lines_of, average_purchase_price, _vnd),
+                    result=result)
+    return Candidate("number", result, 1.0, "", evidence)
+
+
 def _answer_stock(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                   rulebook: str) -> Candidate:
     """Stock of one product at the end of the last data day, in its base unit."""
@@ -928,6 +1008,8 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return _answer_stock(cache, catalog, plan, rulebook)
     if plan.intent in ("purchase_total", "top_supplier"):
         return _answer_purchase(cache, catalog, plan)
+    if plan.intent == "avg_purchase_price":
+        return _answer_avg_purchase(cache, catalog, plan, rulebook)
     c01_rules = ()
     if plan.intent in C01_INTENTS:
         c01_rules = _c01_rules(plan, rulebook)

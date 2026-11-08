@@ -87,6 +87,8 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     share = False
     if _PURCHASE_TOTAL.search(text) or _TOP_SUPPLIER.search(text):
         return _purchase(text, today, rules)
+    if _AVG_PURCHASE_CUE.search(text):
+        return _avg_purchase(text, today, rules, names)
     group = _group(text, vocabulary or {})
     if group is _AMBIGUOUS:
         return None
@@ -810,6 +812,41 @@ def _purchase(text: str, today: date, rules: Rules) -> Plan | None:
         return None
     rows = ("purchase_total", "top_supplier") if top else ("purchase_total",)
     return Plan(intent, start, min(end, today), 1, _rows(rules, *rows))
+
+
+_AVG_PURCHASE_CUE = re.compile(r"\bnhap\b.*\bbinh quan\b|\bbinh quan\b.*\bnhap\b")
+# The purchase unit: one word, optionally followed by a size token ("xe 4m3", "hộp 30").
+_PURCHASE_UNIT = r"(?P<unit>[a-z]+(?: \d[a-z0-9]*)?)"
+_AVG_PURCHASE = (
+    re.compile(rf"\bgia nhap binh quan (?:cua )?{_ONE} {_PURCHASE_UNIT}(?= |$)"),
+    re.compile(rf"\bnhap vao (?:voi )?gia binh quan {_ONE} {_PURCHASE_UNIT}(?= |$)"),
+    re.compile(rf"\bnhap binh quan {_AMOUNT} tien {_ONE} {_PURCHASE_UNIT}(?= |$)"),
+)
+
+
+def _avg_purchase(text: str, today: date, rules: Rules, names: Iterable[str]) -> Plan | None:
+    """"Giá nhập bình quân một <đơn vị> <hàng> tháng M/Y" (rulebook §5), in the purchase unit."""
+    if not rules.avg_purchase_price or not rules.product_names:
+        return None
+    text, product = _product(text, names)
+    if not product or product is _AMBIGUOUS:
+        return None
+    text = re.sub(r"\s+", " ", text).strip()
+    found = [m for pattern in _AVG_PURCHASE for m in pattern.finditer(text)]
+    if len(found) != 1 or found[0].group("unit") in _NOT_UNITS:
+        return None
+    match = found[0]
+    rest = text[:match.start()] + " " + text[match.end():]
+    resolved = _period(rest, today, rules)
+    if resolved is None:
+        return None
+    start, end, leftover = resolved
+    if _FILLERS.sub(" ", leftover).strip() or end > today:
+        return None
+    return Plan("avg_purchase_price", start, end, 1,
+                _rows(rules, "product_names", "avg_purchase_price"),
+                filters=(Filter("product", product, rules.row("product_names") or ""),),
+                unit=match.group("unit"))
 
 
 _STOCK_CUE = re.compile(r"\b(?:ton kho|kho con ton|kho con|con ton|ton cuoi)\b"

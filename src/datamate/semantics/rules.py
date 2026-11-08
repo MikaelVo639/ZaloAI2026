@@ -59,6 +59,8 @@ class Rules:
     size_by_name: bool = False          # size M / L: tên món kết thúc bằng (M) / (L)
     purchase_total: bool = False        # tiền nhập hàng: tổng tiền phiếu theo ngày phiếu, bỏ phiếu huỷ
     top_supplier: bool = False          # nhà cung cấp nhập nhiều nhất = tiền nhập cao nhất
+    avg_purchase_price: bool = False    # giá nhập bình quân trong tháng: theo số lượng nhập
+    price_effect: bool = False          # hiệu ứng tăng giá: N ngày kể từ D với N ngày trước D
     # Shifts by order time: (name, first minute, last minute) and the base of "ca chiều so
     # với ca sáng", read from the split's "Ca sáng, ca chiều" row; () when absent or unclear.
     shifts: tuple[tuple[str, int, int], ...] = ()
@@ -234,6 +236,10 @@ def read_rules(rulebook: str) -> Rules:
                               "tong tien cac phieu nhap", "ngay phieu", "bo phieu huy"),
         top_supplier=enable("top_supplier", _find(rows, "tien nhap hang trong ky"),
                             "nha cung cap nhap nhieu nhat", "tien nhap cao nhat"),
+        avg_purchase_price=enable(
+            "avg_purchase_price", _find(rows, "gia nhap binh quan", "trong thang"),
+            "theo so luong nhap", "khong phai trung binh cong", "theo don vi nhap",
+            "ngay phieu trong thang", "bo phieu huy"),
         size_by_name=enable("size_by_name", _find(rows, "size m", "size l"), "ten ket thuc bang",
                             "khong phan biet hoa thuong"),
         best_staff=enable("best_staff", _find(rows, "nhan vien ban gioi nhat"), "theo doanh thu",
