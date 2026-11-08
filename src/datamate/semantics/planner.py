@@ -7,7 +7,7 @@ from decimal import Decimal
 
 from datamate.contracts import Filter, Plan, Question, Threshold
 from datamate.semantics.rules import DEBT_TABLE_FEATURES, Rules
-from datamate.semantics.text import normalize_question
+from datamate.semantics.text import fold, normalize_question
 
 _AMOUNT = r"(?:bao nhieu|bao nhiu|bnhiu|bn|nhieu|nhiu|may)"
 _DATE = r"(\d{1,2})/(\d{1,2})/(\d{4})"
@@ -91,6 +91,8 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         return _avg_purchase(text, today, rules, names)
     if _PRICE_UP.search(text):
         return _price_effect(text, today, rules, names)
+    if _DRUG_CUE.search(text):
+        return _drug_revenue(question, rules)
     group = _group(text, vocabulary or {})
     if group is _AMBIGUOUS:
         return None
@@ -849,6 +851,80 @@ def _avg_purchase(text: str, today: date, rules: Rules, names: Iterable[str]) ->
                 _rows(rules, "product_names", "avg_purchase_price"),
                 filters=(Filter("product", product, rules.row("product_names") or ""),),
                 unit=match.group("unit"))
+
+
+_DRUG_CUE = re.compile(r"\b(?:hoat chat|ke don)\b")
+_DRUG_NAME = r"(?:cac )?(?:thuoc|hang|mat hang|san pham)"
+_INGREDIENT = rf"{_DRUG_NAME} (?:co )?hoat chat (?P<ingredient>[a-z0-9]+(?: [a-z0-9+]+)*?)"
+_RX = rf"{_DRUG_NAME} (?P<rx>khong |phai )?ke don"
+_DRUG_FILTER = rf"(?:{_INGREDIENT}|{_RX})"
+_DRUG_AMOUNT = rf"(?:tong cong )?{_AMOUNT} tien"
+_DRUG_SELL = rf"ban(?: ra)?(?: duoc)? {_DRUG_AMOUNT}"
+_DRUG_TOTAL = rf"(?:tong )?{_REVENUE}(?: cua nha thuoc)?"
+_DRUG_PERCENT = rf"{_AMOUNT} phan tram"
+_DRUG_SHARE_PATTERNS = (
+    rf"(?:(?:tien ban|{_REVENUE}) )?{_DRUG_FILTER} (?:chiem|bang) {_DRUG_PERCENT} {_DRUG_TOTAL}",
+    rf"trong {_DRUG_TOTAL} phan cua {_DRUG_FILTER} la {_DRUG_PERCENT}",
+    rf"t[iy] le (?:{_REVENUE} )?{_DRUG_FILTER} tren {_DRUG_TOTAL} la {_DRUG_PERCENT}",
+)
+_DRUG_REVENUE_PATTERNS = (
+    rf"(?:tong )?(?:{_REVENUE}|tien ban) {_DRUG_FILTER}(?: (?:la )?{_AMOUNT})?",
+    rf"(?:nha thuoc )?(?:ban )?{_DRUG_FILTER} {_DRUG_SELL}",
+    rf"(?:nha thuoc )?ban {_DRUG_FILTER} (?:duoc )?{_DRUG_AMOUNT}",
+    rf"(?:nha thuoc )?thu (?:duoc |ve )?{_DRUG_AMOUNT} tu {_DRUG_FILTER}",
+)
+
+
+def _drug_revenue(question: Question, rules: Rules) -> Plan | None:
+    """Closed medication-revenue wording, with the entire ingredient label retained."""
+    marker = "dmtplusseparator"  # normalize_question otherwise drops the combination separator.
+    if marker in fold(question.question) or not rules.revenue:
+        return None
+    text = normalize_question(question.question.replace("+", f" {marker} ")).replace(marker, "+")
+    text = re.sub(r"\b(?:k|ko|hok|hong) (?=ke don\b)", "khong ", text)
+    text = re.sub(r"\bnha thuoocs\b", "nha thuoc", text)
+    used: list[str] = []
+    period = _period(text, question.as_of_date, rules, used)
+    if period is None:
+        return None
+    start, end, text = period
+    if end > question.as_of_date:
+        return None
+    text = " ".join(text.split())
+    text = re.sub(r"^(?:cho (?:minh |toi )?(?:hoi|biet)|(?:xem|coi|check) giup|tinh giup) ", "", text)
+    text = re.sub(r" (?:ta|do|nhir)$", "", text)
+
+    field, value = "", ""
+    share = False
+    for patterns, is_share in ((_DRUG_SHARE_PATTERNS, True), (_DRUG_REVENUE_PATTERNS, False)):
+        match = next((m for pattern in patterns if (m := re.fullmatch(pattern, text))), None)
+        if match:
+            share = is_share
+            if match["ingredient"]:
+                field, value = "ingredient", match["ingredient"]
+                if (any(not part.strip() for part in value.split("+"))
+                        or re.search(rf"\b(?:{_AMOUNT}|chi nhanh|thang|ngay)\b", value)):
+                    return None
+            else:
+                field, value = "prescription", "non_rx" if match["rx"] == "khong " else "rx"
+            break
+    if not field and re.fullmatch(
+            rf"tru (?:cac )?thuoc ke don ra (?:cac )?mat hang con lai {_DRUG_SELL}", text):
+        field, value = "prescription", "non_rx"
+    if not field or not getattr(rules, f"{field}_revenue"):
+        return None
+    if re.search(r"\btien ban\b", text):
+        if not rules.goods_money_is_revenue:
+            return None
+        used.append("goods_money_is_revenue")
+    elif not share and not re.search(rf"\b{_REVENUE}\b", text):
+        if not rules.money_is_revenue:
+            return None
+        used.append("money_is_revenue")
+    feature = f"{field}_revenue"
+    return Plan("revenue", start, end, evidence=_rows(rules, *used, feature),
+                filters=(Filter(field, value, rules.row(feature) or ""),),
+                comparison="share" if share else "")
 
 
 _PRICE = r"\d{1,3}(?: \d{3})*(?:d\b| dong/[a-z]+\b)"

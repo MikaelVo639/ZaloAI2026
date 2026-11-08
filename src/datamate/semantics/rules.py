@@ -61,6 +61,8 @@ class Rules:
     top_supplier: bool = False          # nhà cung cấp nhập nhiều nhất = tiền nhập cao nhất
     avg_purchase_price: bool = False    # giá nhập bình quân trong tháng: theo số lượng nhập
     price_effect: bool = False          # hiệu ứng tăng giá: N ngày kể từ D với N ngày trước D
+    ingredient_revenue: bool = False   # exact active ingredient, combinations are separate
+    prescription_revenue: bool = False # prescription status comes from the drug catalog
     # Shifts by order time: (name, first minute, last minute) and the base of "ca chiều so
     # với ca sáng", read from the split's "Ca sáng, ca chiều" row; () when absent or unclear.
     shifts: tuple[tuple[str, int, int], ...] = ()
@@ -239,6 +241,13 @@ def read_rules(rulebook: str) -> Rules:
         price_effect=enable("price_effect", _find(rows, "hieu ung tang gia"),
                             "so luong don vi co ban", "n ngay ke tu d", "tinh ca d",
                             "n ngay ngay truoc d", "bo don huy va don tra"),
+        ingredient_revenue=enable("ingredient_revenue", _find(rows, "doanh thu theo hoat chat"),
+                                  "doanh thu", "hoat chat ghi dung nhu vay trong danh muc thuoc",
+                                  "mot loai rieng", "khong tinh vao tung hoat chat"),
+        prescription_revenue=enable("prescription_revenue", _find(rows, "thuoc ke don"),
+                                    "san pham ghi ke don trong danh muc thuoc",
+                                    "moi san pham con lai la hang khong ke don",
+                                    "ti le ke don tinh theo doanh thu"),
         avg_purchase_price=enable(
             "avg_purchase_price", _find(rows, "gia nhap binh quan", "trong thang"),
             "theo so luong nhap", "khong phai trung binh cong", "theo don vi nhap",
