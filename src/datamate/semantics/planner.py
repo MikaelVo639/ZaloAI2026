@@ -856,7 +856,7 @@ def _avg_purchase(text: str, today: date, rules: Rules, names: Iterable[str]) ->
 _PRICE_VALUE = r"(?:\d{1,3}(?: \d{3})+|\d+)"
 _PRICE_SUFFIX = r"(?: ?d| dong)"
 _PRICE_UP = re.compile(
-    rf"\b(?:ngay )?(?:(?:tang|doi) gia(?: tu (?P<old>{_PRICE_VALUE}){_PRICE_SUFFIX})? le(?:e)?n"
+    rf"\b(?:ngay )?(?:(?:tang|doi) gia(?: tu (?P<old>{_PRICE_VALUE}){_PRICE_SUFFIX})? len"
     rf"|len gia) (?P<new>{_PRICE_VALUE}){_PRICE_SUFFIX}(?:/(?P<unit>[a-z][a-z0-9]*))?\b")
 _EFFECT_UNIT = re.compile(
     r"\bso ([a-z][a-z0-9]*) ban (?:ra|duoc)\b|\b(?:luong ban )?tinh theo (?:so )?([a-z][a-z0-9]*)\b")
