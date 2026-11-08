@@ -294,7 +294,7 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
     return []
 
 
-def parse_conventions(readme: str) -> Conventions:
+def parse_conventions(readme: str, *, strict: bool = False) -> Conventions:
     conversions: dict[tuple[str, str], tuple[Decimal, str]] = {}
     evidence: list[str] = []
     returns = False
@@ -314,8 +314,11 @@ def parse_conventions(readme: str) -> Conventions:
         item = re.match(r"\s+-\s+(.+?):\s*1\s+(.+?)\s*=\s*([\d.,]+)\s+(.+?)\s*$", line)
         if in_conversion and item:
             factor = Decimal(item.group(3).replace(",", "."))
-            conversions[(_name_key(item.group(1)), _name_key(item.group(2)))] = (
-                factor, _name_key(item.group(4)))
+            key = (_name_key(item.group(1)), _name_key(item.group(2)))
+            value = (factor, _name_key(item.group(4)))
+            if strict and key in conversions and conversions[key] != value:
+                raise ValueError("Conflicting README conversion factors")
+            conversions[key] = value
     return Conventions(conversions, listed, returns, tuple(evidence))
 
 

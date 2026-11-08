@@ -15,7 +15,7 @@ ANSWER_TYPES = {
     "quantity": "number", "count_where": "number",
     "revenue_increasing": "boolean", "top_debt_customers": "table",
     "debt_total": "number", "debt_customer_count": "number", "debt_collected": "number",
-    "debt_flow": "list", "top_staff": "string", "stock": "number",
+    "debt_flow": "list", "top_staff": "string", "stock": "number", "stock_split": "list",
     "purchase_total": "number", "top_supplier": "string",
     "avg_purchase_price": "number",
 }
@@ -174,7 +174,12 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
                 elif not plan.start <= date.fromisoformat(candidate.answer) <= plan.end:
                     raise ValueError("Date outside requested period")
             if candidate.type == "list":
-                if plan.intent == "debt_flow":
+                if plan.intent == "stock_split":
+                    if (len(candidate.answer) != 2 or type(candidate.answer[0]) is not int
+                            or candidate.answer[0] < 0 or not is_number(candidate.answer[1])
+                            or candidate.answer[1] < 0):
+                        raise ValueError("Stock split requires two nonnegative quantities")
+                elif plan.intent == "debt_flow":
                     if (len(candidate.answer) != 2 or not all(
                             type(x) is int and x >= 0 for x in candidate.answer)):
                         raise ValueError("Debt flow is [nợ thêm, trả được] in whole VND")
