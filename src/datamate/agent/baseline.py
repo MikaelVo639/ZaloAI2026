@@ -68,13 +68,13 @@ class BaselineAgent:
                      as_of_date: date | None = None) -> Candidate:
         planned = {"intent": plan.intent, "start": plan.start.isoformat(),
                    "end": plan.end.isoformat(), "rules": plan.evidence}
-        if plan.intent in tasks.C01_INTENTS:
+        if plan.intent in tasks.C01_INTENTS | tasks.DEBT_INTENTS:
             reason = tasks.unsupported(plan)
             if reason or (as_of_date is not None and plan.end > as_of_date):
                 return Candidate(reason=reason or "Requested date is after as_of_date",
                                  evidence=planned)
-        failure = self._prepare(context, debt=True) if plan.intent == "top_debt_customers" else (
-            self._prepare(context))
+        debt = plan.intent == "top_debt_customers" or plan.intent in tasks.DEBT_INTENTS
+        failure = self._prepare(context, debt=True) if debt else self._prepare(context)
         if failure is not None:
             failure.evidence = {**planned, **failure.evidence}
             return failure

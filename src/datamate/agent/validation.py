@@ -14,6 +14,8 @@ ANSWER_TYPES = {
     "cancel_count": "number", "cancel_rate": "percent", "best_day": "date",
     "quantity": "number", "count_where": "number",
     "revenue_increasing": "boolean", "top_debt_customers": "table",
+    "debt_total": "number", "debt_customer_count": "number", "debt_collected": "number",
+    "debt_flow": "list",
 }
 
 
@@ -170,7 +172,11 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
                 elif not plan.start <= date.fromisoformat(candidate.answer) <= plan.end:
                     raise ValueError("Date outside requested period")
             if candidate.type == "list":
-                if plan.shape == "series":
+                if plan.intent == "debt_flow":
+                    if (len(candidate.answer) != 2 or not all(
+                            type(x) is int and x >= 0 for x in candidate.answer)):
+                        raise ValueError("Debt flow is [nợ thêm, trả được] in whole VND")
+                elif plan.shape == "series":
                     if (len(candidate.answer) != len(plan.periods)
                             or not all(is_number(x) for x in candidate.answer)):
                         raise ValueError("Revenue series disagrees with requested periods")

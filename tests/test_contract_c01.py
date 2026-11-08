@@ -302,11 +302,10 @@ class RealAdapterLedgerTest(_Shop):
 
 
 class ContractBackendsTest(unittest.TestCase):
-    def test_baseline_enables_only_the_two_implemented_c01_intents(self):
+    def test_baseline_implements_every_contract_intent(self):
+        # §4-§5 (boolean, table) and the four §7 debt intents on the same D01 ledger.
         for name, plan in contract_plans().items():
-            self.assertEqual(bool(compute.unsupported(plan)), name not in {
-                "revenue_increasing", "top_debt_customers",
-            }, name)
+            self.assertEqual(compute.unsupported(plan), "", name)
 
     def test_answer_plan_abstains_before_reading_data(self):
         catalog = Catalog("biz_demo", "", ())

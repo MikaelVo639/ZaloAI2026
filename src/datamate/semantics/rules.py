@@ -52,6 +52,9 @@ class Rules:
     debt_at_date: bool = False          # nợ một đơn tại X: tổng đơn (gồm phí giao) trừ khoản trả đến X
     debt_by_customer: bool = False      # nợ theo khách: khách lẻ vào tổng nợ, không có dòng
     debt_excluded: bool = False         # đơn COD / sàn: không phải khách nợ
+    # C01 §7: "nợ thêm / trả nợ / thu nợ trong kỳ" and "tuổi nợ" rows.
+    debt_flow_rule: bool = False        # nợ thêm = chưa trả trong ngày mua; trả nợ = sau ngày mua
+    debt_age: bool = False              # tuổi nợ tính từ ngày đặt, đơn đặt hôm nay 0 ngày
     # Shifts by order time: (name, first minute, last minute) and the base of "ca chiều so
     # với ca sáng", read from the split's "Ca sáng, ca chiều" row; () when absent or unclear.
     shifts: tuple[tuple[str, int, int], ...] = ()
@@ -193,12 +196,10 @@ def read_rules(rulebook: str) -> Rules:
         or any(re.search(r"\b(?:tang lien tuc|giam lien tuc|xu huong)\b", v) for v in rows.values())
         or any(defines_trend(folded) for folded, _ in lines),
         table_answer=exact("table_answer", "table", "columns rows o so la json number"),
-        until_end_of_day=exact(
+        # Read by its meaning: splits list other examples ("còn nợ, còn tồn, chưa giao…").
+        until_end_of_day=_find(rows, "den het ngay x") not in conflicts and enable(
             "until_end_of_day", _find(rows, "den het ngay x"),
-            "tinh trang luc het ngay do tinh moi phat sinh tu dau du lieu",
-            "hoi so con lai con no con ton con hang tinh trang luc het ngay do tinh moi phat "
-            "sinh tu dau du lieu den het ngay do khong phai ky thang nay",
-        ),
+            "tinh trang luc het ngay do", "tinh moi phat sinh tu dau du lieu"),
         debt_orders=exact("debt_orders", "don duoc tinh vao no",
                           "don khong huy don tra hang van tinh neu con no"),
         debt_at_date=exact(
@@ -220,6 +221,11 @@ def read_rules(rulebook: str) -> Rules:
         ),
         shifts=shifts,
         shift_base=shift_base,
+        debt_flow_rule=_find(rows, "no them", "thu no") not in conflicts and enable(
+            "debt_flow_rule", _find(rows, "no them", "thu no"), "chi don ghi no",
+            "chua tra ngay trong ngay mua", "sau ngay mua", "tien tra cung ngay mua la tra luc mua"),
+        debt_age=_find(rows, "tuoi no") not in conflicts and enable(
+            "debt_age", _find(rows, "tuoi no"), "tu ngay dat", "dat hom nay co tuoi no 0 ngay"),
         rule_rows=tuple(features.items()),
     )
 

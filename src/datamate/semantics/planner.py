@@ -118,6 +118,7 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         text, name, shift_compare = shift
         filters.append(Filter("shift", name, rules.row("shift") or ""))
         used.append("shift")
+    before_synonyms = text  # "thu được bao nhiêu tiền khách trả nợ" is not revenue
     text = re.sub(r"\s+", " ", _rule_synonyms(text, rules, used)).strip()
     comparison = _comparison(text)
     if comparison is False:
@@ -130,6 +131,8 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     contract = _increasing(text, today, rules)
     if contract is None:
         contract = _debt_table(text, today, rules)
+    if contract is None:
+        contract = _debt_measure(before_synonyms, today, rules)
     if contract is not None:
         # C01 intents take no filter, group, share or comparison: anything else abstains.
         return contract if contract and not (filters or group or reference) else None
@@ -423,6 +426,103 @@ def _debt_table(text: str, today: date, rules: Rules) -> Plan | None | bool:
     if not 1 <= top_k <= 50 or day > today:
         return False
     return Plan("top_debt_customers", day, day, top_k, _rows(rules, *features))
+
+
+# ---------------------------------------------------------------- C01 §7: debt measures
+# "Tổng nợ đến hết ngày X", "số khách còn nợ", "thu nợ trong kỳ", "khách A nợ thêm / trả
+# được". The intent comes from required phrases; every other word must belong to a closed
+# vocabulary of that intent, so a condition the grammar does not read makes it abstain.
+_DEBT_SNAPSHOT = re.compile(rf"\b(?:tinh )?(?:den|toi) het (?:ngay )?{_DATE}\b"
+                            r"|\b(?:tinh )?(?:den|toi) het hom nay\b")
+_DEBT_FLOW = re.compile(r"\b(?:ghi no|mua chiu|no) them\b")
+_DEBT_REPAID = re.compile(r"\b(?:tra (?:bot )?(?:no )?duoc|tra (?:bot )?no|thu hoi|thu no)\b")
+_DEBT_COUNT = re.compile(r"\b(?:bao nhieu|bao nhiu|bnhiu|bn|may|so) khach\b")
+_DEBT_OWED = re.compile(r"\b(?:con no|con cong no|con thieu|chua thu|chua tra het)\b"
+                        rf"|\bkhoan no\b.*\bcon {_AMOUNT} tien\b")
+_DEBT_AGE = re.compile(r"\b(?:qua|hon|tren) (\d{1,4}) ngay\b|\btu (\d{1,4}) ngay tro len\b")
+_DEBT_COMMON = frozenset("""
+    tinh cho hoi minh toi biet xem coi giup e ta do la cua hang khach tong cong so tien bao
+    nhieu nhiu bnhiu bn may duoc no cac nhung don voi o co ma trong
+""".split())
+_DEBT_VOCABULARY = {
+    "debt_total": _DEBT_COMMON | frozenset(
+        "con thieu chua thu tra het da dat khoan tuoi cach".split()),
+    "debt_customer_count": _DEBT_COMMON | frozenset("con thieu chua tra het dang".split()),
+    "debt_collected": _DEBT_COMMON | frozenset("thu hoi tra bot mua chiu da tu".split()),
+    "debt_flow": _DEBT_COMMON | frozenset(
+        "ghi them mua chiu va tra bot da hai theo thu tu loi".split()),
+}
+_DEBT_FLOW_NAME = re.compile(
+    r"^(?:(?:cho (?:minh |toi )?(?:hoi|biet)|xem giup|coi giup|e|trong)\s+)*"
+    r"(?:khach (?:hang )?)?(?P<name>[a-z]+(?: [a-z]+){1,4}?) (?:ghi no|mua chiu|no) them\b")
+
+
+def _debt_measure(text: str, today: date, rules: Rules) -> Plan | None | bool:
+    """None: not one of these debt questions; False: one this grammar must not answer."""
+    text = re.sub(r"\s+", " ", text).strip()
+    if not re.search(r"\b(?:no|cong no|mua chiu|thieu)\b", text):
+        return None
+    if _DEBT_FLOW.search(text) and _DEBT_REPAID.search(text):
+        intent = "debt_flow"
+    elif _DEBT_REPAID.search(text) and not _DEBT_OWED.search(text):
+        intent = "debt_collected"
+    elif _DEBT_OWED.search(text) and _DEBT_COUNT.search(text):
+        intent = "debt_customer_count"
+    elif _DEBT_OWED.search(text):
+        intent = "debt_total"
+    else:
+        return None
+    features = ["debt_orders", "debt_at_date", "debt_excluded", "customer_identity"]
+    if intent in ("debt_total", "debt_customer_count"):
+        features.append("until_end_of_day")
+    if intent in ("debt_customer_count", "debt_flow"):
+        features.append("debt_by_customer")
+    if intent in ("debt_collected", "debt_flow"):
+        features.append("debt_flow_rule")
+    threshold = None
+    if intent in ("debt_total", "debt_customer_count"):
+        moment = _DEBT_SNAPSHOT.search(text)
+        if not moment:
+            return False  # the snapshot day is unknown
+        try:
+            day = (date(int(moment.group(3)), int(moment.group(2)), int(moment.group(1)))
+                   if moment.group(1) else today)
+        except ValueError:
+            return False
+        start = end = day
+        rest = text[:moment.start()] + " " + text[moment.end():]
+        age = _DEBT_AGE.search(rest)
+        if age:
+            if intent != "debt_total":
+                return False
+            features.append("debt_age")
+            threshold = Threshold("order", "age_days", ">" if age.group(1) else ">=",
+                                  Decimal(age.group(1) or age.group(2)),
+                                  rules.row("debt_age") or "")
+            rest = rest[:age.start()] + " " + rest[age.end():]
+        elif re.search(r"\b(?:qua|hon|tren|tuoi|nhom)\b", rest):
+            return False  # an age condition or buckets this grammar does not read
+    else:
+        resolved = _period(text, today, rules)
+        if resolved is None:
+            return False
+        start, end, rest = resolved
+    if not all(getattr(rules, feature) for feature in features):
+        return False
+    filters: tuple[Filter, ...] = ()
+    rest = re.sub(r"\s+", " ", rest).strip()
+    if intent == "debt_flow":
+        named = _DEBT_FLOW_NAME.search(rest)
+        if not named:
+            return False
+        filters = (Filter("customer", named.group("name"), rules.row("customer_identity") or ""),)
+        rest = rest[named.end("name"):]
+    if set(rest.split()) - _DEBT_VOCABULARY[intent] - {"tro", "len"}:
+        return False
+    if end > today or start > end:
+        return False
+    return Plan(intent, start, end, 1, _rows(rules, *features), filters=filters,
+                threshold=threshold)
 
 
 # ---------------------------------------------------------------- SEM-02: customers
