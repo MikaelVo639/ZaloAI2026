@@ -361,7 +361,12 @@ def unsupported(plan: Plan) -> str:
                 or plan.filters[0].field != "shift"):
             return "Shift comparison needs one shift filter and no comparison period"
     elif plan.comparison or plan.compare_start or plan.compare_end:
-        if (plan.comparison != "change_percent" or plan.intent != "revenue" or plan.filters
+        # Price-increase effect (rulebook §5): units of one product, N days from D against
+        # the N days just before D.
+        price_effect = (plan.intent == "quantity" and len(plan.filters) == 1
+                        and plan.filters[0].field == "product")
+        if (plan.comparison != "change_percent" or not (plan.intent == "revenue" or price_effect)
+                or (plan.filters and not price_effect)
                 or not (plan.compare_start and plan.compare_end)):
             return f"Comparison {plan.comparison!r} for {plan.intent!r} not supported"
     if plan.periods or plan.shape:
@@ -1187,6 +1192,34 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
     return Candidate("string" if plan.top_k == 1 else "list", result, 1.0, "", evidence)
 
 
+def _answer_price_effect(plan: Plan, sales: list[Sale], evidence: dict[str, Any], window: str,
+                         source_expr: str) -> Candidate:
+    """Units of one product sold N days from the price increase against the N days before."""
+    if not sales or any(s.base_unit is None or fold(s.base_unit) != fold(plan.unit)
+                        for s in sales):
+        return Candidate(reason="The unit asked is not the product's base unit",
+                         evidence=evidence)
+    current = quantity_in_unit(select_valid(sales, plan.start, plan.end), plan.unit)
+    previous = quantity_in_unit(select_valid(sales, plan.compare_start, plan.compare_end),
+                                plan.unit)
+    if current is None or previous is None:
+        return Candidate(reason="A sold quantity is unknown", evidence=evidence)
+    value = change_percent(current, previous)
+    compare_window = (f"date.fromisoformat({plan.compare_start.isoformat()!r}), "
+                      f"date.fromisoformat({plan.compare_end.isoformat()!r})")
+    evidence.update(
+        calculation="100 * (units from D - units before D) / units before D; 2 decimals half up",
+        code=_code(f"change_percent(quantity_in_unit(select_valid({source_expr}, {window}), "
+                   f"{plan.unit!r}), quantity_in_unit(select_valid({source_expr}, "
+                   f"{compare_window}), {plan.unit!r}))",
+                   select_valid, quantity_in_unit, change_percent),
+        current_quantity=str(current), compare_quantity=str(previous), result=value)
+    if value is None:
+        return Candidate(reason="Nothing sold before the increase; change undefined",
+                         evidence=evidence)
+    return Candidate("percent", value, 1.0, "", evidence)
+
+
 def _answer_extended(plan: Plan, sales: list[Sale], full: list[Sale],
                      eligible: frozenset[int] | None, evidence: dict[str, Any], window: str,
                      source_expr: str) -> Candidate:
@@ -1221,6 +1254,8 @@ def _answer_extended(plan: Plan, sales: list[Sale], full: list[Sale],
         if not any(s.base_unit and fold(s.base_unit) == fold(plan.unit) for s in full):
             return Candidate(reason=f"No product of this shop has base unit {plan.unit!r}",
                              evidence=evidence)
+        if plan.comparison == "change_percent":
+            return _answer_price_effect(plan, sales, evidence, window, source_expr)
         value = quantity_in_unit(pool, plan.unit)
         evidence.update(calculation="sum(quantity_base) of products whose base unit is the unit",
                         unit=plan.unit, code=_code(f"quantity_in_unit({selection}, {plan.unit!r})",

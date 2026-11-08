@@ -89,6 +89,8 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         return _purchase(text, today, rules)
     if _AVG_PURCHASE_CUE.search(text):
         return _avg_purchase(text, today, rules, names)
+    if _PRICE_UP.search(text):
+        return _price_effect(text, today, rules, names)
     group = _group(text, vocabulary or {})
     if group is _AMBIGUOUS:
         return None
@@ -847,6 +849,63 @@ def _avg_purchase(text: str, today: date, rules: Rules, names: Iterable[str]) ->
                 _rows(rules, "product_names", "avg_purchase_price"),
                 filters=(Filter("product", product, rules.row("product_names") or ""),),
                 unit=match.group("unit"))
+
+
+_PRICE = r"\d{1,3}(?: \d{3})*(?:d\b| dong/[a-z]+\b)"
+_PRICE_UP = re.compile(rf"\b(?:ngay )?(?:tang gia(?: tu {_PRICE})? len|len gia) {_PRICE}")
+_EFFECT_UNIT = re.compile(r"\bso ([a-z][a-z0-9]*) ban (?:ra|duoc)\b|\bluong ban tinh theo ([a-z][a-z0-9]*)\b")
+_EFFECT_WORDS = frozenset("""
+    tu ngay so voi vs ke truoc do thi tang hay giam thay doi bao nhieu nhiu bnhiu bn phan tram
+    ban ra duoc trong luong tinh theo cho hoi minh xem coi check giup ta e a nhi
+""".split())
+
+
+def _price_effect(text: str, today: date, rules: Rules, names: Iterable[str]) -> Plan | None:
+    """"Từ ngày D <hàng> tăng giá lên P. So N ngày kể từ D với N ngày ngay trước, số <đơn vị>
+    bán ra thay đổi bao nhiêu %" (rulebook §5 "Hiệu ứng tăng giá"). D must be written."""
+    if not (rules.price_effect and rules.change_percent and rules.product_names and rules.revenue):
+        return None
+    text, product = _product(text, names)
+    if not product or product is _AMBIGUOUS:
+        return None
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(_PRICE_UP.findall(text)) != 1:
+        return None
+    text = _PRICE_UP.sub(" ", text)
+    days = set(re.findall(_DATE, text))
+    spans = re.findall(r"\b(\d{1,3}) ngay\b", text)
+    units = {a or b for a, b in _EFFECT_UNIT.findall(text)}
+    if len(days) != 1 or len(set(spans)) != 1 or len(spans) != 2 or len(units) != 1:
+        return None
+    if not re.search(r"\b\d{1,3} ngay ke tu\b", text) or \
+            not re.search(r"\b\d{1,3} ngay (?:ngay )?truoc\b", text):
+        return None
+    unit = units.pop()
+    if unit in _NOT_UNITS - {"phan"}:  # "số phần bán ra": phần is a unit here, not a percent
+        return None
+    rest = re.sub(_DATE, " ", text)
+    rest = re.sub(r"\bngay tang gia\b", " ", rest)  # "kể từ ngày tăng giá" is D
+    rest = re.sub(r"\b\d{1,3} ngay\b", " ", rest)
+    rest = _EFFECT_UNIT.sub(" ", rest)
+    if set(rest.split()) - _EFFECT_WORDS:
+        return None
+    day, month, year = map(int, days.pop())
+    try:
+        start = date(year, month, day)
+    except ValueError:
+        return None
+    n = int(spans[0])
+    if not 1 <= n <= 90:
+        return None
+    end = start + timedelta(days=n - 1)
+    if end > today:
+        return None
+    return Plan("quantity", start, end, 1,
+                _rows(rules, "product_names", "price_effect", "change_percent"),
+                compare_start=start - timedelta(days=n), compare_end=start - timedelta(days=1),
+                comparison="change_percent",
+                filters=(Filter("product", product, rules.row("product_names") or ""),),
+                unit=unit)
 
 
 _STOCK_CUE = re.compile(r"\b(?:ton kho|kho con ton|kho con|con ton|ton cuoi)\b"

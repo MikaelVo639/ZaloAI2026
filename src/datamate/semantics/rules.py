@@ -236,6 +236,9 @@ def read_rules(rulebook: str) -> Rules:
                               "tong tien cac phieu nhap", "ngay phieu", "bo phieu huy"),
         top_supplier=enable("top_supplier", _find(rows, "tien nhap hang trong ky"),
                             "nha cung cap nhap nhieu nhat", "tien nhap cao nhat"),
+        price_effect=enable("price_effect", _find(rows, "hieu ung tang gia"),
+                            "so luong don vi co ban", "n ngay ke tu d", "tinh ca d",
+                            "n ngay ngay truoc d", "bo don huy va don tra"),
         avg_purchase_price=enable(
             "avg_purchase_price", _find(rows, "gia nhap binh quan", "trong thang"),
             "theo so luong nhap", "khong phai trung binh cong", "theo don vi nhap",
