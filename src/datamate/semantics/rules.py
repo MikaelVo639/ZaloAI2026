@@ -62,6 +62,7 @@ class Rules:
     top_supplier: bool = False          # nhà cung cấp nhập nhiều nhất = tiền nhập cao nhất
     avg_purchase_price: bool = False    # giá nhập bình quân trong tháng: theo số lượng nhập
     price_effect: bool = False          # hiệu ứng tăng giá: N ngày kể từ D với N ngày trước D
+    price_effect_lookup: bool = False   # look up the first increase to the requested price
     # Shifts by order time: (name, first minute, last minute) and the base of "ca chiều so
     # với ca sáng", read from the split's "Ca sáng, ca chiều" row; () when absent or unclear.
     shifts: tuple[tuple[str, int, int], ...] = ()
@@ -240,6 +241,9 @@ def read_rules(rulebook: str) -> Rules:
         price_effect=enable("price_effect", _find(rows, "hieu ung tang gia"),
                             "so luong don vi co ban", "n ngay ke tu d", "tinh ca d",
                             "n ngay ngay truoc d", "bo don huy va don tra"),
+        price_effect_lookup=enable("price_effect_lookup", _find(rows, "hieu ung tang gia"),
+                                   "gia moi cao hon gia lien truoc", "theo bang gia",
+                                   "tang len cung mot gia nhieu lan thi lay lan dau"),
         stock_split=enable("stock_split", _find(rows, "ton theo don vi lon"),
                            "list 2 so", "so don vi lon nguyen", "so don vi co ban le",
                            "khong co phan le thi so thu hai la 0",

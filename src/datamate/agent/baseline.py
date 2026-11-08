@@ -6,7 +6,7 @@ from datamate.agent import compute as tasks
 from datamate.agent.validation import check_executed
 from datamate.agent.worker import Worker, WorkerResult
 from datamate.contracts import BusinessContext, Candidate, Plan, Question
-from datamate.semantics.planner import plan_question, stock_question
+from datamate.semantics.planner import plan_question, price_history_question, stock_question
 from datamate.semantics.rules import read_rules
 
 QUESTION_TIMEOUT_SECONDS = 30.0
@@ -71,6 +71,15 @@ class BaselineAgent:
             if names:
                 vocabulary = self._vocabulary(context)
                 plan = plan_question(question, rules, names, vocabulary)
+                if plan is None and price_history_question(question, rules):
+                    if "price_history" not in context.cache:
+                        result = self.worker.run(tasks.price_history, self.question_timeout,
+                                                 catalog=context.catalog,
+                                                 rulebook=context.split.rulebook)
+                        context.cache["price_history"] = result.value if result.ok else ({}, "")
+                    increases, source = context.cache["price_history"]
+                    plan = plan_question(question, rules, names, vocabulary,
+                                         price_increases=increases, price_source=source)
         return plan
 
     def _answer_plan(self, plan: Plan, context: BusinessContext, *,
