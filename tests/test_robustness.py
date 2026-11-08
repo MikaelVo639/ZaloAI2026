@@ -16,8 +16,17 @@ class PerturbationTests(unittest.TestCase):
                 rewritten = perturb(name, question, f"{name}:q1")
                 self.assertIsNotNone(rewritten)
                 self.assertNotEqual(rewritten, question)
-                for number in ("3", "2025"):
+                year = "/25" if name == "short_year" else "2025"
+                for number in ("3", year):
                     self.assertIn(number, rewritten)
+
+    def test_short_year_and_chat_style(self):
+        self.assertRegex(perturb("short_year", "Doanh thu tháng 3/2025?", "k"),
+                         r"^Doanh thu (th 3/25|3/25|T3/25)\?$")
+        self.assertIsNone(perturb("short_year", "Doanh thu tháng 3/2019?", "k"))
+        rewritten = perturb("chat_style", "Cho mình hỏi doanh thu của cửa hàng?", "k")
+        self.assertRegex(rewritten, r"^(em ơi|ad ơi|shop ơi|ủa) cho mik hỏi doanh thu kua "
+                                    r"cửa hàng rồi\?$")
 
     def test_month_abbreviation_styles(self):
         rewritten = perturb("month_abbreviation", "Doanh thu tháng 8 năm 2025?", "k")

@@ -25,6 +25,35 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(normalize_question("doanh thu ngày 15-03-2026"),
                          "doanh thu ngay 15/03/2026")
 
+    def test_two_digit_years(self):
+        for text in ("th 3/25", "T3/25", "tháng 3/25", "3/25"):
+            with self.subTest(text=text):
+                self.assertEqual(normalize_question(f"doanh thu {text}"),
+                                 "doanh thu thang 3/2025")
+        self.assertEqual(normalize_question("từ 12/25 đến 2/26"),
+                         "tu thang 12/2025 den thang 2/2026")
+        # Day/month and dates are not years: "1/3", "15/3", "15/3/2026".
+        for text in ("ngày 1/3", "15/3", "ngày 15/3/2026", "13/25"):
+            with self.subTest(text=text):
+                self.assertNotIn("thang", normalize_question(text))
+
+    def test_chat_spellings_and_calls(self):
+        self.assertEqual(normalize_question("em ơi check jum dthu kua shop mik"),
+                         "check giup dthu cua cua hang")
+        for word in ("giùm", "dùm", "jum", "giúp"):
+            with self.subTest(word=word):
+                self.assertEqual(normalize_question(f"xem {word} doanh thu"),
+                                 "xem giup doanh thu")
+        self.assertEqual(normalize_question("ad oi hom qua co bnhiu dh roi"),
+                         "hom qua co bnhiu don hang")
+        self.assertEqual(normalize_question("ủa tuần rồi"), "tuan truoc")
+        self.assertEqual(normalize_question("hôm nay tiệm bán được bao nhiêu"),
+                         "hom nay cua hang ban duoc bao nhieu")
+        # "bán" at the start is not a call; names ending in "đỏ", "lươn" keep their word.
+        self.assertEqual(normalize_question("bán được bao nhiêu"), "ban duoc bao nhieu")
+        self.assertEqual(normalize_question("doanh thu áo đỏ"), "doanh thu ao do")
+        self.assertEqual(normalize_question("doanh thu lẩu lươn"), "doanh thu lau luon")
+
     def test_bare_month_rewrite_keeps_dates_quarters_and_lists(self):
         self.assertEqual(normalize_question("ngày 15/3/2026"), "ngay 15/3/2026")
         self.assertEqual(normalize_question("doanh thu 15/3/2026"), "doanh thu 15/3/2026")

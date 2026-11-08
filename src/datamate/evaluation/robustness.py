@@ -19,7 +19,8 @@ import unicodedata
 from pathlib import Path
 from typing import Callable
 
-PERTURBATIONS = ("unaccented", "month_abbreviation", "particle", "synonym", "transposition")
+PERTURBATIONS = ("unaccented", "month_abbreviation", "particle", "synonym", "transposition",
+                 "short_year", "chat_style")
 
 
 def _choice(key: str, options: tuple[str, ...]) -> str:
@@ -108,12 +109,50 @@ def _transposition(text: str, key: str) -> str | None:
     return plain[:word.start()] + swapped + plain[word.end():]
 
 
+_SHORT_STYLES = ("th {m}/{yy}", "{m}/{yy}", "T{m}/{yy}")
+
+
+def _short_year(text: str, key: str) -> str | None:
+    """"tháng 3/2025" -> "th 3/25": a two-digit year after the month."""
+    style = _choice(key, _SHORT_STYLES)
+
+    def replace(match: re.Match[str]) -> str:
+        month = match.group(1) or match.group(3)
+        year = match.group(2) or match.group(4)
+        return style.format(m=month, yy=year[2:]) if "2020" <= year <= "2039" else match.group()
+
+    result = _MONTH_YEAR.sub(replace, text)
+    return result if result != text else None
+
+
+_CALLS = ("em ơi", "ad ơi", "shop ơi", "ủa")
+_CHAT_WORDS = (
+    (re.compile(r"\bcủa\b"), "kua"),
+    (re.compile(r"\bmình\b"), "mik"),
+    (re.compile(r"\bđơn hàng\b"), "đh"),
+    (re.compile(r"\bgiùm\b|\bgiúp\b"), "jum"),
+)
+
+
+def _chat_style(text: str, key: str) -> str | None:
+    """Chat typing: a call at the start, chat spellings, "rồi" at the end."""
+    result = text
+    for pattern, replacement in _CHAT_WORDS:
+        result = pattern.sub(replacement, result)
+    body = _END.sub("", result)
+    ending = _END.search(result).group(1)
+    first = body[:1].lower() + body[1:]
+    return f"{_choice(key, _CALLS)} {first} rồi{ending}"
+
+
 _FUNCTIONS: dict[str, Callable[[str, str], str | None]] = {
     "unaccented": _unaccented,
     "month_abbreviation": _month_abbreviation,
     "particle": _particle,
     "synonym": _synonym,
     "transposition": _transposition,
+    "short_year": _short_year,
+    "chat_style": _chat_style,
 }
 
 

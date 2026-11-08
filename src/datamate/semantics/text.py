@@ -25,6 +25,10 @@ GRAMMAR_WORDS = frozenset("""
 ABBREVIATIONS = {
     "hnay": "hom nay", "hqua": "hom qua", "dc": "duoc", "sp": "san pham", "trc": "truoc",
     "revenue": "doanh thu", "total": "tong cong",
+    # Chat spellings: "mik", "kua", "jum", "đh" (đơn hàng).
+    "mik": "minh", "mk": "minh", "kua": "cua", "dh": "don hang",
+    # "giùm", "dùm", "jum" = "giúp".
+    "gium": "giup", "dum": "giup", "jum": "giup",
 }
 _TONE_KEYS = "sfrxj"
 
@@ -48,8 +52,15 @@ _TRANSPOSABLE = frozenset("""
     nhieu nhat doanh thang tong trung binh khach duoc truoc giam tang hang ngay chay
 """.split())
 # Closing particles that never carry a condition; removed only at the end of a question.
+# Not "do", "luon", "rua", "ta": at the end they may be part of a name ("áo đỏ", "lươn",
+# "nước rửa") or a unit ("tạ").
 _CLOSING = re.compile(
-    r"(?:\s+(?:vay|day|dzay|zay|z|v|a|ak|ah|ha|nhi|nha|nhe|nhen|hen|ne|ta|di|the nhi))+$")
+    r"(?:\s+(?:vay|day|dzay|zay|zi|z|v|a|ak|ah|ha|nhi|nha|nhe|nhen|hen|ne|di|the nhi|roi))+$")
+# Calling someone at the start of a question: "em ơi", "ad ơi", "ủa".
+_CALLING = re.compile(r"^(?:(?:(?:e|em|a|anh|chi|ad|admin|ban|be|shop) )?oi |(?:ui|ua) )+")
+# Month/year with a two-digit year: "12/25", "th 3/26". The data years 2020-2039 are all
+# above 12, so "1/26" cannot be a day and a month.
+_SHORT_YEAR = re.compile(r"(?<![\d/])(?:\b(?:thang|thg|th|t) ?)?(\d{1,2})/([23]\d)\b(?![\d/])")
 
 
 def _untranspose(token: str) -> str:
@@ -79,6 +90,10 @@ def normalize_question(value: object) -> str:
     text = re.sub(r"\bth (truoc|roi|nay|lien truoc)\b", r"thang \1", text)  # "th trước"
     text = re.sub(r"\b(thang|tuan) vua (?:roi|qua)\b", r"\1 truoc", text)
     text = re.sub(r"\bthang roi\b", "thang truoc", text)
+    # "tuần rồi" = "tuần trước", also when "rồi" would close the question.
+    text = re.sub(r"\btuan roi\b", "tuan truoc", text)
+    text = _SHORT_YEAR.sub(lambda m: f"thang {int(m.group(1))}/20{m.group(2)}"
+                           if 1 <= int(m.group(1)) <= 12 else m.group(), text)
     # "tháng 8 năm 2025" / "quý 2 năm 2026" -> "tháng 8/2025" / "quý 2/2026"
     text = re.sub(r"\b(thang|quy) (\d{1,2}) nam (\d{4})\b", r"\1 \2/\3", text)
     # Month and quarter abbreviations: "T3/2025", "th3/2025", "thg 3/2025", "Q2/2026".
@@ -97,7 +112,9 @@ def normalize_question(value: object) -> str:
     text = re.sub(r"\bcua (?:quan|tiem)\b", "cua cua hang", text)
     text = re.sub(r"\b(?:cua hang|quan|tiem|shop) (?:minh|nha minh|em|toi|ta)\b", "cua hang",
                   text)
-    return _CLOSING.sub("", text)
+    # "tiệm" as the subject: "hôm nay tiệm bán được…".
+    text = re.sub(r"\btiem(?= (?:ban|co|dat|nhan|len|thu)\b)", "cua hang", text)
+    return _CLOSING.sub("", _CALLING.sub("", text))
 
 
 def normalize_answer(value: str) -> str:

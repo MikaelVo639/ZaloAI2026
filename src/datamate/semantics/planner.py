@@ -18,7 +18,7 @@ _NOT_UNITS = frozenset({"tien", "don", "dong", "phan", "khach", "ngay", "lan", "
 _FILLERS = re.compile(
     r"\b(?:nhung mat hang nao|nhung san pham nao|mat hang nao|"
     r"cho toi biet|cho minh biet|cho minh hoi|cho hoi|cho minh|cho toi|liet ke|top|"
-    r"xem giup|coi gium|check gium|"
+    r"(?:xem|coi|check) giup|"
     r"giup minh|tinh rieng|tong cong|cua hang|cua shop|la bao nhieu|bao nhieu|bao nhiu|"
     r"bnhiu|nhieu|nhiu|bn|tien|dong|trong|cua|shop|la|co|duoc|nao|nhung|gi|vay|a|nhi|ngay|"
     r"e|z|j|ta|ha|nhe|do|da)\b"
