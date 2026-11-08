@@ -272,6 +272,7 @@ INTENTS = frozenset({"revenue", "order_count", "top_products", "average_order",
                      "top_customers", "count_where", "quantity"}) | C01_INTENTS
 # Plan filters this backend applies, and the intents each one may be combined with.
 FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity"}),
+              "shift": frozenset({"revenue", "order_count"}),
               "product_group": frozenset({"revenue"}),
               "customer_group": frozenset({"revenue"})}
 GROUP_FIELDS = ("product_group", "customer_group")
@@ -311,6 +312,11 @@ def unsupported(plan: Plan) -> str:
                        and plan.filters[0].field in GROUP_FIELDS)
         if not group_share and (plan.intent != "count_where" or plan.threshold is None):
             return f"Comparison 'share' for {plan.intent!r} not supported"
+    elif plan.comparison == "shift_change_percent":
+        if (plan.intent not in ("revenue", "order_count") or plan.compare_start is not None
+                or plan.compare_end is not None or len(plan.filters) != 1
+                or plan.filters[0].field != "shift"):
+            return "Shift comparison needs one shift filter and no comparison period"
     elif plan.comparison or plan.compare_start or plan.compare_end:
         if (plan.comparison != "change_percent" or plan.intent != "revenue" or plan.filters
                 or not (plan.compare_start and plan.compare_end)):
@@ -521,6 +527,61 @@ def _answer_revenue_trend(sales: list[Sale], readme: str, plan: Plan,
     return Candidate("boolean", result, 1.0, "", evidence)
 
 
+def select_shift(selected: list[Sale], first: int, last: int) -> list[Sale]:
+    """Sales whose order was placed from minute ``first`` to minute ``last`` of the day."""
+    return [s for s in selected if s.minute is not None and first <= s.minute <= last]
+
+
+def _answer_shift(plan: Plan, sales: list[Sale], rulebook: str,
+                  evidence: dict[str, Any]) -> Candidate:
+    """Revenue or orders of a rulebook shift, or its % change against the base shift."""
+    rules = read_rules(rulebook)
+    windows = {name: (first, last) for name, first, last in rules.shifts}
+    name = plan.filters[0].value
+    if name not in windows:
+        return Candidate(reason="Split rulebook defines no such shift", evidence=evidence)
+    selected = select_valid(sales, plan.start, plan.end)
+    missing = sum(1 for s in selected if s.minute is None)
+    evidence["inputs"].update(selected_rows=len(selected), rows_without_time=missing,
+                              selected_orders=len({s.order_id for s in selected}),
+                              shifts={k: list(v) for k, v in windows.items()})
+    if missing or not selected:
+        return Candidate(reason="Order time is missing for orders in the period"
+                         if missing else "No valid orders in period", evidence=evidence)
+    window = (f"date.fromisoformat({plan.start.isoformat()!r}), "
+              f"date.fromisoformat({plan.end.isoformat()!r})")
+    first, last = windows[name]
+    shift_rows = select_shift(selected, first, last)
+    measure = revenue_total if plan.intent == "revenue" else order_count
+    if plan.comparison != "shift_change_percent":
+        value = revenue(shift_rows) if plan.intent == "revenue" else order_count(shift_rows)
+        function = revenue if plan.intent == "revenue" else order_count
+        evidence.update(
+            shift=name, calculation=f"{function.__name__} of valid orders placed in the shift",
+            code=_code(f"{function.__name__}(select_shift(select_valid(sales, {window}), "
+                       f"{first}, {last}))", select_valid, select_shift, function),
+            result=value)
+        return Candidate("number", value, 1.0, "", evidence)
+    base = rules.shift_base
+    if base not in windows or base == name:
+        return Candidate(reason="Split rulebook gives no base shift", evidence=evidence)
+    base_first, base_last = windows[base]
+    current = Decimal(measure(shift_rows))
+    previous = Decimal(measure(select_shift(selected, base_first, base_last)))
+    value = change_percent(current, previous)
+    evidence.update(
+        shift=name, base_shift=base, current=str(current), base=str(previous),
+        calculation="100 * (shift - base shift) / base shift; 2 decimals half up",
+        code=_code(f"change_percent(Decimal({measure.__name__}(select_shift(rows, {first}, "
+                   f"{last}))), Decimal({measure.__name__}(select_shift(rows, {base_first}, "
+                   f"{base_last}))))  # rows = select_valid(sales, {window})",
+                   select_valid, select_shift, measure, change_percent),
+        result=value)
+    if value is None:
+        return Candidate(reason="Base shift has zero; change undefined", evidence=evidence)
+    return Candidate("percent", value, 1.0, "", evidence)
+
+
 def change_percent(current: Decimal, previous: Decimal) -> float | None:
     if previous == 0:
         return None
@@ -575,6 +636,8 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
             return Candidate(reason="No sales in period; business coverage is not established",
                              evidence=evidence)
     product_call = ""
+    if plan.filters and plan.filters[0].field == "shift":
+        return _answer_shift(plan, sales, rulebook, evidence)
     if plan.filters and plan.filters[0].field in GROUP_FIELDS:
         return _answer_group(plan, sales, evidence)
     if plan.filters:

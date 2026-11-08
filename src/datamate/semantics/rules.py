@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from dataclasses import dataclass
 
 from datamate.semantics.text import fold
@@ -51,6 +52,10 @@ class Rules:
     debt_at_date: bool = False          # nợ một đơn tại X: tổng đơn (gồm phí giao) trừ khoản trả đến X
     debt_by_customer: bool = False      # nợ theo khách: khách lẻ vào tổng nợ, không có dòng
     debt_excluded: bool = False         # đơn COD / sàn: không phải khách nợ
+    # Shifts by order time: (name, first minute, last minute) and the base of "ca chiều so
+    # với ca sáng", read from the split's "Ca sáng, ca chiều" row; () when absent or unclear.
+    shifts: tuple[tuple[str, int, int], ...] = ()
+    shift_base: str = ""
     rule_rows: tuple[tuple[str, str], ...] = ()  # (feature, original rulebook line) used as evidence
 
     def row(self, feature: str) -> str | None:
@@ -119,6 +124,9 @@ def read_rules(rulebook: str) -> Rules:
                     and ("tang dan" in folded or "giam dan" in folded)))
 
     money = _find(rows, "ban duoc bao nhieu tien", "thu ve bao nhieu tien")
+    shifts, shift_base = _shifts(rows, originals, conflicts)
+    if shifts:
+        features["shift"] = originals[_find(rows, "ca sang", "ca chieu")]
     return Rules(
         revenue=all(token in validity for token in ("khong huy", "khong tra", "ca don"))
         and all(token in amount for token in (
@@ -210,5 +218,40 @@ def read_rules(rulebook: str) -> Rules:
             "khong phai khach no bo khoi cong no",
             "khong phai khach no ke ca khi chua thu duoc tien bo khoi cong no va tuoi no",
         ),
+        shifts=shifts,
+        shift_base=shift_base,
         rule_rows=tuple(features.items()),
     )
+
+
+_SHIFT_WINDOW = re.compile(r"\bca (sang|chieu)\s+(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})")
+
+
+def _shifts(rows: dict[str, str], originals: dict[str, str], conflicts: set[str]
+            ) -> tuple[tuple[tuple[str, int, int], ...], str]:
+    """"Ca sáng, ca chiều | theo giờ tạo đơn: ca sáng 06:00–13:59, ca chiều 14:00–21:59. So ca
+    chiều với ca sáng: mốc là ca sáng" -> (("sang", 360, 839), ("chieu", 840, 1319)), "sang".
+
+    Both windows, by order time, must be written and must not overlap; otherwise shift
+    questions stay unsupported for this split.
+    """
+    key = _find(rows, "ca sang", "ca chieu")
+    if key is None or key in conflicts or "theo gio tao don" not in rows[key]:
+        return (), ""
+    cell = originals[key].strip().strip("|").split("|", 1)[1]
+    plain = "".join(c for c in unicodedata.normalize("NFD", cell.lower().replace("đ", "d"))
+                    if unicodedata.category(c) != "Mn")
+    windows = {}
+    for name, h1, m1, h2, m2 in _SHIFT_WINDOW.findall(plain):
+        first, last = int(h1) * 60 + int(m1), int(h2) * 60 + int(m2)
+        if name in windows or not (int(h1) < 24 and int(h2) < 24 and int(m1) < 60
+                                   and int(m2) < 60 and first <= last):
+            return (), ""
+        windows[name] = (first, last)
+    if set(windows) != {"sang", "chieu"}:
+        return (), ""
+    (a1, a2), (b1, b2) = windows["sang"], windows["chieu"]
+    if not (a2 < b1 or b2 < a1):
+        return (), ""
+    base = re.search(r"\bmoc la ca (sang|chieu)\b", rows[key])
+    return (("sang", a1, a2), ("chieu", b1, b2)), base.group(1) if base else ""

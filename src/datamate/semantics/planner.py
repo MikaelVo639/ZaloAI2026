@@ -51,7 +51,8 @@ _INTENTS = (
      ()),
     ("revenue", None, rf"(?:tong )?{_REVENUE}", ()),
     ("order_count", None,
-     rf"(?:tong )?so (?:luong )?{_ORDER}|(?:ban duoc |ban |co )?(?:tong cong )?{_AMOUNT} {_ORDER}",
+     rf"(?:dem )?(?:tong )?so (?:luong )?{_ORDER}(?: ban)?"
+     rf"|(?:ban duoc |ban |co )?(?:tong cong )?{_AMOUNT} {_ORDER}",
      ()),
 )
 
@@ -109,7 +110,15 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
             return None
         filters.append(Filter("product", product, rules.row("product_names") or ""))
         used.append("product_names")
-    text = _rule_synonyms(text, rules, used)
+    shift = _shift(text, rules)
+    if shift is False or (shift and filters):
+        return None  # shift words not understood, or a second filter
+    shift_compare = False
+    if shift:
+        text, name, shift_compare = shift
+        filters.append(Filter("shift", name, rules.row("shift") or ""))
+        used.append("shift")
+    text = re.sub(r"\s+", " ", _rule_synonyms(text, rules, used)).strip()
     comparison = _comparison(text)
     if comparison is False:
         return None
@@ -126,7 +135,7 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         return contract if contract and not (filters or group or reference) else None
     if not rules.revenue:
         return None
-    if not reference and not group:
+    if not reference and not group and not shift:
         special = (_months(text, today, rules) or _customers(text, today, rules)
                    or _thresholds(text, today, rules))
         if special is False:
@@ -176,6 +185,8 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
             leftover = again[2]
     if group and intent != "revenue":
         return None
+    if shift and intent not in ("revenue", "order_count"):
+        return None
     # Do not silently ignore product names, payment methods, groups, shifts, etc.
     if _FILLERS.sub(" ", leftover).strip():
         return None
@@ -192,7 +203,9 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         row for row in dict.fromkeys(rules.row(feature) for feature in used) if row)
     # Explicit periods are capped at the as-of date: future events have not happened.
     return Plan(intent, start, min(end, today), top_k, evidence, compare_start, compare_end,
-                "change_percent" if reference else ("share" if share else ""), tuple(filters),
+                "change_percent" if reference else ("shift_change_percent" if shift_compare
+                                                    else ("share" if share else "")),
+                tuple(filters),
                 unit=unit)
 
 
@@ -626,6 +639,43 @@ _REFERENCES = (
 )
 
 
+_SHIFT = re.compile(r"\b(?:rieng |trong |cua )?ca (sang|chieu)\b")
+_SHIFT_CHANGE = re.compile(r"\b(?:so voi|so vs|chenh lech|chenh|hon hay kem|tang hay giam)\b")
+
+
+def _shift(text: str, rules: Rules) -> tuple[str, str, bool] | None | bool:
+    """Rulebook shifts: "riêng ca chiều …", "doanh thu ca chiều chênh ca sáng bao nhiêu %".
+
+    None: no shift; False: shift words not understood or not defined by this split;
+    else (text without the shift words, shift asked about, whether it is compared with
+    the rulebook's base shift).
+    """
+    found = list(_SHIFT.finditer(text))
+    if not found:
+        return None
+    if not rules.shifts:
+        return False
+    names = [match.group(1) for match in found]
+    if len(found) == 1:
+        if _SHIFT_CHANGE.search(text) or re.search(r"\bphan tram\b", text):
+            return False  # compared with something else, or a share of the day
+        return text[:found[0].start()] + " " + text[found[0].end():], names[0], False
+    if len(found) != 2 or names[0] == names[1]:
+        return False
+    # The base is the shift after "so với" ("so với ca sáng, ca chiều …"), else the second.
+    before = text[:found[0].start()].rstrip()
+    subject, base = (names[1], names[0]) if re.search(r"\bso (?:voi|vs)$", before) else names
+    if base != rules.shift_base:
+        return False  # only "<other shift> so với <base shift>" is defined by the rulebook
+    rest = _SHIFT.sub(" ", text)
+    if not _SHIFT_CHANGE.search(rest) or not re.search(rf"\b(?:{_AMOUNT} )?phan tram\b", rest):
+        return False  # "chênh bao nhiêu tiền / đơn" is not a percentage
+    rest = _SHIFT_CHANGE.sub(" ", rest)
+    rest = re.sub(rf"\b(?:{_AMOUNT} )?phan tram\b", " ", rest, count=1)
+    rest = re.sub(r"\bthi\b", " ", rest)
+    return rest, subject, True
+
+
 def _comparison(text: str) -> tuple[str, tuple] | None | bool:
     """None: no comparison; False: comparison words not understood; else (text, reference)."""
     if not _COMPARE_WORDS.search(text):
@@ -678,7 +728,7 @@ def _rule_synonyms(text: str, rules: Rules, used: list[str]) -> str:
     replacements = (
         ("money_is_revenue", rules.money_is_revenue,
          rf"\b(?:ban(?: ra)?|thu ve|thu)(?: duoc)?(?: tong cong)? {_AMOUNT} tien\b"),
-        ("goods_money_is_revenue", rules.goods_money_is_revenue, r"\btien (?:hang|ban)\b"),
+        ("goods_money_is_revenue", rules.goods_money_is_revenue, r"\btien (?:hang|ban(?: hang)?)\b"),
     )
     if rules.hot_is_best_seller and re.search(r"\bhot nhat\b", text):
         # The ranking row lists "hot nhất" as a synonym of "bán chạy nhất".

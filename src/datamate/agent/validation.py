@@ -133,7 +133,7 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
                 expected = "list"
             elif plan.shape == "best_period":
                 expected = "date"
-            elif plan.comparison in {"change_percent", "share"}:
+            elif plan.comparison in {"change_percent", "share", "shift_change_percent"}:
                 expected = "percent"
             elif plan.intent in {"top_products", "top_customers"}:
                 expected = "string" if plan.top_k == 1 else "list"
@@ -156,7 +156,7 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
                 elif (type(candidate.answer) is not int or candidate.answer < 0
                       or type(bound) is not int or candidate.answer > bound):
                     raise ValueError("Threshold count outside executed input bounds")
-            if plan.intent in {"order_count", "cancel_count"}:
+            if plan.intent in {"order_count", "cancel_count"} and not plan.comparison:
                 count = candidate.answer
                 bound_key = "period_orders" if plan.intent == "cancel_count" else "selected_orders"
                 bound = evidence.get("inputs", {}).get(bound_key)
