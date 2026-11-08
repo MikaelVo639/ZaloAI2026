@@ -96,6 +96,42 @@ class CustomerGrammarTests(unittest.TestCase):
                 self.assertEqual((result.intent, result.top_k, result.rank_by),
                                  ("top_customers", k, by))
 
+    def test_customer_ranking_in_everyday_questions(self):
+        for text, count, rank in (
+            ("Tháng 4/2025 ai mua hàng nhiều tiền nhất vậy?", 1, "revenue"),
+            ("Tháng 1/2026 ai là khách mua nhiều lần nhất, tính theo số đơn?", 1, "order_count"),
+            ("Cho hỏi ai là khách có số đơn mua nhiều nhất tháng 1/2026?", 1, "order_count"),
+            ("Liệt kê 5 khách chi tiêu nhiều nhất tháng 1/2026.", 5, "revenue"),
+        ):
+            with self.subTest(text=text):
+                result = plan(text)
+                self.assertIsNotNone(result)
+                self.assertEqual((result.intent, result.top_k, result.rank_by),
+                                 ("top_customers", count, rank))
+
+    def test_customer_percentage_keeps_the_denominator(self):
+        for text, minimum in (
+            ("Trong số khách có mua tháng 1/2026, tỉ lệ khách mua ít nhất 4 đơn là bao nhiêu %?", 4),
+            ("Bao nhiêu % khách trong tháng 1/2026 mua từ 6 đơn trở lên?", 6),
+        ):
+            with self.subTest(text=text):
+                result = plan(text)
+                self.assertIsNotNone(result)
+                self.assertEqual((result.intent, result.comparison), ("count_where", "share"))
+                self.assertEqual(result.threshold.value, minimum)
+
+    def test_new_customer_phrasings_preserve_scope_and_required_rules(self):
+        for text in (
+            "Tháng 1/2026 ai mua hàng nhiều tiền nhất, chỉ tính khách sỉ?",
+            "Ai là khách mua nhiều lần nhất tháng 1/2026?",
+            "Ai mua hàng nhiều tiền nhất tháng 1/2026 và tháng 2/2026?",
+            "Khách mua ít nhất 3 đơn chiếm bao nhiêu % doanh thu tháng 1/2026?",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(plan(text))
+        self.assertIsNone(plan("Tháng 1/2026 ai mua hàng nhiều tiền nhất?",
+                               book=rulebook("customers")))
+
     def test_customers_with_at_least_n_orders(self):
         count = plan("tháng 1/2026 có mấy khách mua từ 5 đơn trở lên")
         self.assertEqual((count.intent, count.comparison), ("count_where", ""))
