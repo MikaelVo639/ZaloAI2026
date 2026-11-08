@@ -56,6 +56,7 @@ class Rules:
     debt_flow_rule: bool = False        # nợ thêm = chưa trả trong ngày mua; trả nợ = sau ngày mua
     debt_age: bool = False              # tuổi nợ tính từ ngày đặt, đơn đặt hôm nay 0 ngày
     best_staff: bool = False            # nhân viên bán giỏi nhất: theo doanh thu, không theo số đơn
+    size_by_name: bool = False          # size M / L: tên món kết thúc bằng (M) / (L)
     # Shifts by order time: (name, first minute, last minute) and the base of "ca chiều so
     # với ca sáng", read from the split's "Ca sáng, ca chiều" row; () when absent or unclear.
     shifts: tuple[tuple[str, int, int], ...] = ()
@@ -227,6 +228,8 @@ def read_rules(rulebook: str) -> Rules:
             "chua tra ngay trong ngay mua", "sau ngay mua", "tien tra cung ngay mua la tra luc mua"),
         debt_age=_find(rows, "tuoi no") not in conflicts and enable(
             "debt_age", _find(rows, "tuoi no"), "tu ngay dat", "dat hom nay co tuoi no 0 ngay"),
+        size_by_name=enable("size_by_name", _find(rows, "size m", "size l"), "ten ket thuc bang",
+                            "khong phan biet hoa thuong"),
         best_staff=enable("best_staff", _find(rows, "nhan vien ban gioi nhat"), "theo doanh thu",
                           "khong theo so don"),
         rule_rows=tuple(features.items()),

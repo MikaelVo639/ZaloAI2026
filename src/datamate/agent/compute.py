@@ -286,6 +286,7 @@ INTENTS = (frozenset({"revenue", "order_count", "top_products", "average_order",
 FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity"}),
               "shift": frozenset({"revenue", "order_count"}),
               "staff": frozenset({"revenue", "order_count"}),
+              "size": frozenset({"quantity"}),
               "product_group": frozenset({"revenue"}),
               "customer_group": frozenset({"revenue"})}
 GROUP_FIELDS = ("product_group", "customer_group")
@@ -751,6 +752,12 @@ def _answer_shift(plan: Plan, sales: list[Sale], rulebook: str,
     return Candidate("percent", value, 1.0, "", evidence)
 
 
+def select_size(sales: list[Sale], size: str) -> list[Sale]:
+    """Items whose name ends with "(M)" / "(L)", case-insensitive (rulebook "Size M, size L")."""
+    suffix = f"({size.lower()})"
+    return [s for s in sales if s.product_name and s.product_name.strip().lower().endswith(suffix)]
+
+
 def select_staff(selected: list[Sale], code: str) -> list[Sale]:
     """Sales of orders sold by the staff member with this code (case-insensitive)."""
     return [s for s in selected if s.staff_id is not None and s.staff_id.upper() == code.upper()]
@@ -858,7 +865,14 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return _answer_staff(plan, sales, evidence)
     if plan.filters and plan.filters[0].field in GROUP_FIELDS:
         return _answer_group(plan, sales, evidence)
-    if plan.filters:
+    if plan.filters and plan.filters[0].field == "size":
+        size = plan.filters[0].value
+        sales = select_size(sales, size)
+        evidence["inputs"]["size_rows"] = len(sales)
+        if not sales:
+            return Candidate(reason=f"No item named with size ({size})", evidence=evidence)
+        product_call = f"select_size(sales, {size!r})"
+    elif plan.filters:
         value = plan.filters[0].value
         matched = select_product(sales, value)
         codes = {s.product_id for s in matched}

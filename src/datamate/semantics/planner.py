@@ -110,6 +110,18 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
             return None
         filters.append(Filter("product", product, rules.row("product_names") or ""))
         used.append("product_names")
+    size = re.search(r"\bsize (m|l)\b", text)
+    if size:
+        if filters or not rules.size_by_name or len(re.findall(r"\bsize\b", text)) != 1:
+            return None
+        filters.append(Filter("size", size.group(1).upper(), rules.row("size_by_name") or ""))
+        used.append("size_by_name")
+        text = text[:size.start()] + " " + text[size.end():]
+        # "cộng tất cả các món", "tính mọi loại đồ uống"; "quán" as the subject of "bán".
+        text = re.sub(r"\b(?:cong|tinh) (?:tat ca cac|tat ca|moi loai|moi|cac) (?:mon|do uong)\b",
+                      " ", text)
+        text = re.sub(r"\bquan(?= ban\b)", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
     staff = _staff(text)
     if staff is False or (staff and filters):
         return None  # several staff codes, or a second filter
@@ -204,6 +216,8 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     if group and intent != "revenue":
         return None
     if (shift or staff) and intent not in ("revenue", "order_count"):
+        return None
+    if size and intent != "quantity":
         return None
     # Do not silently ignore product names, payment methods, groups, shifts, etc.
     if _FILLERS.sub(" ", leftover).strip():
