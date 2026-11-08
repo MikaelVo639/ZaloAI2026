@@ -977,8 +977,10 @@ def _answer_stock(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return Candidate(reason="Stock is known only at the end of the last data day",
                          evidence=evidence)
     name = plan.filters[0].value
+    # Always load (or reuse) this business's sales so the codes used for matching never
+    # depend on which question the worker answered before; a failed load means no codes.
     codes: set[str] = set()
-    if (cache.get("sales_key") == _catalog_key(catalog) and isinstance(cache.get("sales"), tuple)):
+    if prepare_sales(cache, catalog, rulebook)["ok"]:
         codes = {s.product_id for s in select_product(cache["sales"][0], name) if s.product_id}
     item = stock_item(snapshot.items, name, codes)
     if item is None:

@@ -1,7 +1,9 @@
 """End-of-data stock of one product (README "Tồn kho" convention). Shops are synthetic."""
 import tempfile
 import unittest
+from unittest import mock
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 from test_semantics_periods import rulebook
@@ -10,6 +12,7 @@ from datamate.agent import compute
 from datamate.agent.validation import check_executed
 from datamate.contracts import Question
 from datamate.ingestion import build_catalog
+from datamate.ingestion.sales import Sale
 from datamate.ingestion.stock import StockSourceError, load_stock
 from datamate.semantics.planner import plan_question
 from datamate.semantics.rules import read_rules
@@ -91,6 +94,30 @@ class StockTests(unittest.TestCase):
         _, candidate = self.answer("Tồn kho Bia Tiger lon cuối ngày hôm nay là bao nhiêu lon?",
                                    today="2026-07-10")
         self.assertEqual(candidate.type, "abstain")  # stock only known at the end of 14/07
+
+    def test_bua_nay_reads_as_hom_nay(self):
+        result = plan("Tồn kho Bia Tiger lon cuối ngày bữa nay là bao nhiêu lon?")
+        self.assertEqual((result.intent, result.start), ("stock", date(2026, 7, 14)))
+
+    def test_sales_codes_match_on_a_cold_cache(self):
+        # The stock file names the product differently from sales; only the sales code links
+        # them. A fresh worker cache must load sales itself, so the answer never depends on
+        # which question the worker happened to answer before.
+        stock = STOCK.replace("SP1,Bia Tiger lon,", "SP1,Bia Tiger,")
+        sale = Sale("O1", date(2026, 7, 1), "valid", Decimal(1), "SP1", "Bia Tiger lon",
+                    Decimal(1))
+
+        def fake_prepare(cache, catalog, rulebook=""):
+            cache["sales"] = ([sale], "sales")
+            return {"ok": True}
+
+        result = plan("Tồn kho Bia Tiger lon cuối ngày hôm nay là bao nhiêu lon?")
+        with mock.patch.object(compute, "prepare_sales", fake_prepare):
+            candidate = compute.answer_plan({}, self.catalog(stock=stock), result, BOOK)
+        self.assertEqual(candidate.answer, 43)
+        # Sales that cannot load leave only the name, which no longer matches: abstain.
+        failed = compute.answer_plan({}, self.catalog(stock=stock), result, BOOK)
+        self.assertEqual(failed.type, "abstain")
 
     def test_split_stock_from_documented_base_conversion(self):
         book = BOOK + SPLIT_RULE
