@@ -571,7 +571,12 @@ _CUSTOMER = r"(?:khach hang|khach)"
 _TOP_CUSTOMERS = re.compile(
     rf"\b(?:ai la )?(?:top )?(?:(\d+) )?{_CUSTOMER}(?: nao)? "
     r"(?P<what>co tong tien mua cao nhat|mua (?:nhieu|nhiu) tien nhat|chi tieu (?:nhieu|nhiu) nhat"
-    r"|chi (?:nhieu|nhiu) tien nhat|mua (?:nhieu|nhiu) don(?: hang)? nhat)\b")
+    r"|chi (?:nhieu|nhiu) tien nhat|mua (?:nhieu|nhiu) don(?: hang)? nhat"
+    r"|co so don mua (?:nhieu|nhiu) nhat"
+    r"|mua (?:nhieu|nhiu) lan nhat tinh theo so don(?: hang)?)\b")
+_WHO_BY_REVENUE = re.compile(r"\bai mua hang (?:nhieu|nhiu) tien nhat\b")
+_CUSTOMER_PERCENT = re.compile(rf"\bphan tram {_CUSTOMER}\b")
+_BOUGHT_CUSTOMERS = re.compile(rf"\b(?:trong )?so {_CUSTOMER} (?:da|co) mua(?: hang)?\b")
 _AT_LEAST = re.compile(r"\b(?:mua )?(?:tu (\d+) don(?: hang)? tro len|it nhat (\d+) don(?: hang)?)\b")
 _CUSTOMER_WORDS = re.compile(
     rf"\b(?:trong so {_CUSTOMER} (?:da|co) mua(?: hang)?|so {_CUSTOMER} da mua(?: hang)?|"
@@ -580,17 +585,22 @@ _CUSTOMER_WORDS = re.compile(
 
 
 def _customers(text: str, today: date, rules: Rules) -> Plan | None | bool:
-    if not re.search(rf"\b{_CUSTOMER}\b|\bai la\b", text):
+    if not re.search(rf"\b{_CUSTOMER}\b|\bai la\b", text) and not _WHO_BY_REVENUE.search(text):
         return None
     top = _TOP_CUSTOMERS.search(text)
+    who = _WHO_BY_REVENUE.search(text) if not top else None
     at_least = _AT_LEAST.search(text)
-    if not top and not at_least:
+    if not (top or who or at_least):
         return None
+    if (top or who) and at_least:
+        return False
     if not (rules.customer_identity and rules.customers_bought):
         return False
     used = ["customer_identity", "customers_bought"]
-    if top:
-        rank_by = "order_count" if "don" in top.group("what") else "revenue"
+    comparison = ""
+    if top or who:
+        match = top or who
+        rank_by = "order_count" if top and "don" in top.group("what") else "revenue"
         if rank_by == "revenue":
             if not rules.customer_by_revenue:
                 return False
@@ -598,9 +608,9 @@ def _customers(text: str, today: date, rules: Rules) -> Plan | None | bool:
         if not rules.ties_by_code:
             return False
         used.append("ties_by_code")
-        top_k = int(top.group(1) or 1)
-        reduced = text[:top.start()] + " " + text[top.end():]
-        threshold, comparison = None, ""
+        top_k = int(top.group(1) or 1) if top else 1
+        reduced = text[:match.start()] + " " + text[match.end():]
+        threshold = None
         intent = "top_customers"
     else:
         number = int(at_least.group(1) or at_least.group(2))
@@ -610,9 +620,11 @@ def _customers(text: str, today: date, rules: Rules) -> Plan | None | bool:
             used.append("threshold_inclusive")
         reduced = text[:at_least.start()] + " " + text[at_least.end():]
         comparison = "share" if re.search(r"\bphan tram\b|\bt[iy] le\b", reduced) else ""
-        if comparison and not re.search(rf"\b(?:so|trong so) {_CUSTOMER} (?:da|co) mua\b|"
-                                        rf"\bphan tram {_CUSTOMER}\b", reduced):
-            return False  # a share of what? only "of the customers who bought" is defined
+        if comparison:
+            if not (_BOUGHT_CUSTOMERS.search(reduced) or _CUSTOMER_PERCENT.search(reduced)):
+                return False  # only the customers who bought are a defined denominator
+            # The denominator phrase can be the subject ("of those who bought, what %…").
+            reduced = _BOUGHT_CUSTOMERS.sub(" ", reduced)
         threshold = Threshold("customer", "order_count", ">=", Decimal(number),
                               rules.row("threshold_inclusive") or "")
         top_k, rank_by, intent = 1, "", "count_where"
