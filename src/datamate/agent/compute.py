@@ -270,6 +270,31 @@ def vocabulary(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -> d
             for field in ("product_group", "customer_group")}
 
 
+def price_history(cache: dict[str, Any], catalog: Catalog,
+                  rulebook: str) -> tuple[dict[tuple[str, Decimal], date], str]:
+    from datamate.ingestion.prices import load_price_increases
+
+    if not prepare_sales(cache, catalog, rulebook)["ok"]:
+        return {}, ""
+    try:
+        increases, source, by_code = load_price_increases(catalog)
+    except ValueError:
+        return {}, ""
+    sales, _ = cache["sales"]
+    aliases: dict[str, set[str]] = defaultdict(set)
+    for sale in sales:
+        key = sale.product_id if by_code else fold(sale.product_name or "")
+        if key:
+            for name in (sale.product_id, sale.product_name):
+                if name:
+                    aliases[name].add(key)
+    by_product: dict[str, dict[Decimal, date]] = defaultdict(dict)
+    for (key, price), day in increases.items():
+        by_product[key][price] = day
+    return {(alias, price): day for alias, keys in aliases.items() if len(keys) == 1
+            for price, day in by_product[next(iter(keys))].items()}, source
+
+
 def select_group(sales: list[Sale], field: str, value: str) -> list[Sale]:
     """Rows whose product group / customer group is exactly the named one (folded)."""
     key = fold(value)
@@ -369,6 +394,10 @@ def unsupported(plan: Plan) -> str:
                 or (plan.filters and not price_effect)
                 or not (plan.compare_start and plan.compare_end)):
             return f"Comparison {plan.comparison!r} for {plan.intent!r} not supported"
+        if price_effect and ((plan.start - plan.compare_end).days != 1
+                             or (plan.end - plan.start) != (plan.compare_end - plan.compare_start)
+                             or plan.start > plan.end):
+            return "Price effect requires two adjacent windows of equal length"
     if plan.periods or plan.shape:
         if SHAPES.get(plan.shape) != plan.intent or len(plan.periods) < 2 or plan.filters \
                 or plan.comparison:
