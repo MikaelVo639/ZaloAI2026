@@ -2,6 +2,7 @@
 
 import sqlite3
 import unittest
+from contextlib import closing
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -104,7 +105,7 @@ class DrugRevenueTests(unittest.TestCase):
                     load_drugs(self.catalog(rows, readme))
 
     def test_sqlite_table_named_by_the_readme(self):
-        with sqlite3.connect(self.shop / "shop.sqlite") as connection:
+        with closing(sqlite3.connect(self.shop / "shop.sqlite")) as connection, connection:
             connection.execute("CREATE TABLE meds (MaHangHoa, ThanhPhanChinh, RxFlag)")
             connection.execute("INSERT INTO meds VALUES ('AB1', 'Paracetamol', 1)")
             connection.execute("CREATE TABLE other (MaHangHoa, ThanhPhanChinh, RxFlag)")
