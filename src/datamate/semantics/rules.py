@@ -48,6 +48,7 @@ class Rules:
     trend_rule: bool = False            # the rulebook defines "tăng liên tục" / "xu hướng" itself
     table_answer: bool = False          # format table: {"columns", "rows"}, ô số là JSON number
     until_end_of_day: bool = False      # "đến hết ngày X": tình trạng lúc hết ngày, từ đầu dữ liệu
+    stock_split: bool = False          # tồn: đơn vị lớn nguyên và phần lẻ theo đơn vị cơ bản
     debt_orders: bool = False           # đơn tính vào nợ: không huỷ, đơn trả hàng vẫn tính
     debt_at_date: bool = False          # nợ một đơn tại X: tổng đơn (gồm phí giao) trừ khoản trả đến X
     debt_by_customer: bool = False      # nợ theo khách: khách lẻ vào tổng nợ, không có dòng
@@ -239,6 +240,10 @@ def read_rules(rulebook: str) -> Rules:
         price_effect=enable("price_effect", _find(rows, "hieu ung tang gia"),
                             "so luong don vi co ban", "n ngay ke tu d", "tinh ca d",
                             "n ngay ngay truoc d", "bo don huy va don tra"),
+        stock_split=enable("stock_split", _find(rows, "ton theo don vi lon"),
+                           "list 2 so", "so don vi lon nguyen", "so don vi co ban le",
+                           "khong co phan le thi so thu hai la 0",
+                           "phan le van tinh bang don vi co ban"),
         avg_purchase_price=enable(
             "avg_purchase_price", _find(rows, "gia nhap binh quan", "trong thang"),
             "theo so luong nhap", "khong phai trung binh cong", "theo don vi nhap",

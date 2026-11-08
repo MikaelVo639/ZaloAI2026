@@ -117,14 +117,7 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         filters.append(Filter("product", product, rules.row("product_names") or ""))
         used.append("product_names")
     if product and _STOCK_CUE.search(text):
-        # "tồn kho <hàng> cuối ngày hôm nay là bao nhiêu <đơn vị>": stock at the end of today.
-        unit = _stock_unit(text)
-        if unit is None or not rules.until_end_of_day:
-            return None
-        return Plan("stock", today, today, 1,
-                    tuple(dict.fromkeys(row for row in (rules.row("product_names"),
-                                                        rules.row("until_end_of_day")) if row)),
-                    filters=tuple(filters), unit=unit)
+        return _stock_plan(text, today, rules, filters)
     size = re.search(r"\bsize (m|l)\b", text)
     if size:
         if filters or not rules.size_by_name or len(re.findall(r"\bsize\b", text)) != 1:
@@ -909,17 +902,46 @@ def _price_effect(text: str, today: date, rules: Rules, names: Iterable[str]) ->
 
 
 _STOCK_CUE = re.compile(r"\b(?:ton kho|kho con ton|kho con|con ton|ton cuoi)\b"
-                        r"|\bcuoi ngay hom nay\b|\bluc cuoi ngay\b")
+                        r"|\bcuoi (?:ngay )?hom nay\b|\bluc cuoi ngay\b|\bhet hom nay\b")
 _STOCK_UNIT = re.compile(rf"\b{_AMOUNT} ([a-z][a-z0-9]*)\b")
+_STOCK_PAIR = re.compile(
+    rf"\b{_AMOUNT} (?P<big>[a-z][a-z0-9]*(?: \d+[a-z][a-z0-9]*)?) (?:chan|nguyen) "
+    rf"(?:va )?(?:{_AMOUNT} (?P<base>[a-z][a-z0-9]*) le|le {_AMOUNT} (?P<base2>[a-z][a-z0-9]*))\b")
 _STOCK_WORDS = frozenset("""
-    ton kho con cuoi ngay hom nay la luc trong tinh den cua duoc dc bua
+    ton kho con cuoi ngay hom nay la luc trong tinh den cua duoc dc bua het
 """.split())
+
+
+def stock_question(question: Question) -> bool:
+    text = normalize_question(question.question)
+    return bool(_STOCK_CUE.search(text) and re.search(r"\bhom nay\b", text))
+
+
+def _stock_plan(text: str, today: date, rules: Rules, filters: list[Filter]) -> Plan | None:
+    if not rules.until_end_of_day or not re.search(r"\bhom nay\b", text):
+        return None
+    pair = _STOCK_PAIR.search(text)
+    features = ("product_names", "until_end_of_day")
+    if pair:
+        rest = text[:pair.start()] + " " + text[pair.end():]
+        if not rules.stock_split or set(_FILLERS.sub(" ", rest).split()) - _STOCK_WORDS:
+            return None
+        big, base = pair["big"], pair["base"] or pair["base2"]
+        if big == base or base in _NOT_UNITS - {"phan"} or big in _NOT_UNITS:
+            return None
+        return Plan("stock_split", today, today, evidence=_rows(rules, *features, "stock_split"),
+                    filters=tuple(filters), unit=f"{big}|{base}")
+    unit = _stock_unit(text)
+    if unit is None:
+        return None
+    return Plan("stock", today, today, evidence=_rows(rules, *features),
+                filters=tuple(filters), unit=unit)
 
 
 def _stock_unit(text: str) -> str | None:
     """The base unit asked for today's stock; None for anything else (another day, a split
     into big and small units, an unknown word)."""
-    if not re.search(r"\bhom nay\b|\bbua nay\b", text) or re.search(r"\b(?:chan|le)\b", text):
+    if re.search(r"\b(?:chan|nguyen|le)\b", text):
         return None
     units = [m for m in _STOCK_UNIT.finditer(text) if m.group(1) not in _NOT_UNITS]
     if len(units) != 1:

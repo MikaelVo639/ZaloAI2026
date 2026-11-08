@@ -6,7 +6,7 @@ from datamate.agent import compute as tasks
 from datamate.agent.validation import check_executed
 from datamate.agent.worker import Worker, WorkerResult
 from datamate.contracts import BusinessContext, Candidate, Plan, Question
-from datamate.semantics.planner import plan_question
+from datamate.semantics.planner import plan_question, stock_question
 from datamate.semantics.rules import read_rules
 
 QUESTION_TIMEOUT_SECONDS = 30.0
@@ -55,13 +55,22 @@ class BaselineAgent:
         """Shared deterministic planning, including SEM-01's product-name retry."""
         if "rules" not in context.cache:
             context.cache["rules"] = read_rules(context.split.rulebook)
-        plan = plan_question(question, context.cache["rules"])
+        rules = context.cache["rules"]
+        plan = plan_question(question, rules)
+        if plan is None and rules.until_end_of_day and stock_question(question):
+            if "stock_names" not in context.cache:
+                result = self.worker.run(tasks.stock_names, self.question_timeout,
+                                         catalog=context.catalog)
+                context.cache["stock_names"] = result.value if result.ok else []
+            stock_plan = plan_question(question, rules, context.cache["stock_names"])
+            if stock_plan and stock_plan.intent in ("stock", "stock_split"):
+                return stock_plan
         if plan is None:
             # Retry with this business's product names/codes ("doanh thu <mặt hàng> …").
             names = self._product_names(context)
             if names:
-                plan = plan_question(question, context.cache["rules"], names,
-                                     self._vocabulary(context))
+                vocabulary = self._vocabulary(context)
+                plan = plan_question(question, rules, names, vocabulary)
         return plan
 
     def _answer_plan(self, plan: Plan, context: BusinessContext, *,
@@ -74,7 +83,7 @@ class BaselineAgent:
                 return Candidate(reason=reason or "Requested date is after as_of_date",
                                  evidence=planned)
         debt = plan.intent == "top_debt_customers" or plan.intent in tasks.DEBT_INTENTS
-        failure = self._prepare(context, debt=True) if debt else self._prepare(context)
+        failure = None if plan.intent in ("stock", "stock_split") else self._prepare(context, debt=debt)
         if failure is not None:
             failure.evidence = {**planned, **failure.evidence}
             return failure
