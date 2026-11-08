@@ -61,6 +61,13 @@ class DrugRevenueTests(unittest.TestCase):
         (self.shop / "README.md").write_text(readme, encoding="utf-8")
         return build_catalog(self.root, "b")
 
+    def test_telex_typos_need_no_drug_specific_patterns(self):
+        # "thuoocs" (thuốc) and the closing "nhir" (nhỉ) go through the shared Telex decoder.
+        typed = plan("tháng 3/2026 thuốc kê đơn chiếm bao nhiêu % doanh thu của nhà thuoocs nhir")
+        plain = plan("tháng 3/2026 thuốc kê đơn chiếm bao nhiêu % doanh thu của nhà thuốc")
+        self.assertIsNotNone(plain)
+        self.assertEqual((typed.filters, typed.comparison), (plain.filters, plain.comparison))
+
     def test_formula_and_exact_join(self):
         cases = (
             ("Doanh thu thuốc hoạt chất Paracetamol tháng 3/2026 là bao nhiêu?", "number", 150),

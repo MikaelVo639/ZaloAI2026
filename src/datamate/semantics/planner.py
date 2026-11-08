@@ -884,7 +884,6 @@ def _drug_revenue(question: Question, rules: Rules) -> Plan | None:
         return None
     text = normalize_question(question.question.replace("+", f" {marker} ")).replace(marker, "+")
     text = re.sub(r"\b(?:k|ko|hok|hong) (?=ke don\b)", "khong ", text)
-    text = re.sub(r"\bnha thuoocs\b", "nha thuoc", text)
     used: list[str] = []
     period = _period(text, question.as_of_date, rules, used)
     if period is None:
@@ -894,7 +893,7 @@ def _drug_revenue(question: Question, rules: Rules) -> Plan | None:
         return None
     text = " ".join(text.split())
     text = re.sub(r"^(?:cho (?:minh |toi )?(?:hoi|biet)|(?:xem|coi|check) giup|tinh giup) ", "", text)
-    text = re.sub(r" (?:ta|do|nhir)$", "", text)
+    text = re.sub(r" (?:ta|do)$", "", text)
 
     field, value = "", ""
     share = False
