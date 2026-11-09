@@ -388,6 +388,18 @@ class JoinedReadmeTests(_Shop):
             load_readme_sales(self.shop(JOINED_README, self.files(lines=lines)), RULEBOOK)
         self.assertEqual(caught.exception.code, "ORPHAN_FK")
 
+    def test_order_status_takes_priority_over_detail_notes(self):
+        readme = JOINED_README.replace("- **Dòng**: số thứ tự dòng trong đơn",
+                                       "- **Dòng**: số thứ tự dòng trong đơn\n"
+                                       "- **Ghi chú**: ghi chú của đơn")
+        files = self.files()
+        files["chi_tiet.csv"][0].append("Ghi chú")
+        for row in files["chi_tiet.csv"][1:]:
+            row.append("giao cho anh Huy")
+        sales, _, _ = load_readme_sales(self.shop(readme, files), RULEBOOK_WITH_NOTES)
+        self.assertEqual({sale.order_id: sale.status for sale in sales},
+                         {"C1": "valid", "C2": "returned", "C3": "cancelled"})
+
     def test_duplicate_order_keys_raise(self):
         orders = [["C1", "2026-01-05", "completed", "70000"],
                   ["C1", "2026-01-06", "completed", "70000"]]

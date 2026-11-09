@@ -950,12 +950,13 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         raw_date = line.get("date") if "date" in line_fields else (parent or {}).get("date")
         if "status" in line_fields:
             raw_status, status_from_note = line.get("status"), False
+        elif parent is not None and "status" in parent:
+            raw_status, status_from_note = parent["status"], False
         elif "status_note" in line_fields:
             raw_status, status_from_note = line.get("status_note"), True
-        elif "status_note" in (parent or {}):
-            raw_status, status_from_note = (parent or {}).get("status_note"), True
         else:
-            raw_status, status_from_note = (parent or {}).get("status"), False
+            raw_status = (parent or {}).get("status_note")
+            status_from_note = parent is not None and "status_note" in parent
         if _blank(raw_date) or (_blank(raw_status) and not status_from_note):
             raise ReadmeSalesError("MISSING_VALUE", "Order date or status is missing",
                                    order_source="lines" if parent is None else "orders")
