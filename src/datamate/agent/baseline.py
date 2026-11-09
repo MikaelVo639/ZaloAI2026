@@ -6,7 +6,12 @@ from datamate.agent import compute as tasks
 from datamate.agent.validation import check_executed
 from datamate.agent.worker import Worker, WorkerResult
 from datamate.contracts import BusinessContext, Candidate, Plan, Question
-from datamate.semantics.planner import plan_question, price_history_question, stock_question
+from datamate.semantics.planner import (
+    lot_product_question,
+    plan_question,
+    price_history_question,
+    stock_question,
+)
 from datamate.semantics.rules import read_rules
 
 QUESTION_TIMEOUT_SECONDS = 30.0
@@ -57,6 +62,10 @@ class BaselineAgent:
             context.cache["rules"] = read_rules(context.split.rulebook)
         rules = context.cache["rules"]
         plan = plan_question(question, rules)
+        if plan is None and rules.earliest_expiry and lot_product_question(question):
+            result = self.worker.run(tasks.lot_names, self.question_timeout,
+                                     catalog=context.catalog, day=question.as_of_date)
+            return plan_question(question, rules, result.value) if result.ok else None
         if plan is None and rules.until_end_of_day and stock_question(question):
             if "stock_names" not in context.cache:
                 result = self.worker.run(tasks.stock_names, self.question_timeout,
@@ -92,7 +101,7 @@ class BaselineAgent:
                 return Candidate(reason=reason or "Requested date is after as_of_date",
                                  evidence=planned)
         debt = plan.intent == "top_debt_customers" or plan.intent in tasks.DEBT_INTENTS
-        failure = None if plan.intent in ("stock", "stock_split") else self._prepare(context, debt=debt)
+        failure = None if plan.intent in tasks.INDEPENDENT_INTENTS else self._prepare(context, debt=debt)
         if failure is not None:
             failure.evidence = {**planned, **failure.evidence}
             return failure

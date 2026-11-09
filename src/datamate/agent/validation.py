@@ -18,6 +18,10 @@ ANSWER_TYPES = {
     "debt_flow": "list", "top_staff": "string", "stock": "number", "stock_split": "list",
     "purchase_total": "number", "top_supplier": "string",
     "avg_purchase_price": "number",
+    "unsold_count": "number", "delivery_count": "number",
+    "gross_profit": "number", "top_gross_profit": "string", "net_profit": "number",
+    "stock_value": "number", "earliest_expiry": "date", "expiring_products": "list",
+    "expiring_lot_count": "number", "expiring_lot_cost": "number", "expiring_product_count": "number",
 }
 
 
@@ -171,6 +175,9 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
                 if plan.shape == "best_period":
                     if candidate.answer not in {start.strftime("%Y-%m") for start, _ in plan.periods}:
                         raise ValueError("Month outside requested periods")
+                elif plan.intent == "earliest_expiry":
+                    if date.fromisoformat(candidate.answer) < plan.start:
+                        raise ValueError("Expiry is before the stock snapshot")
                 elif not plan.start <= date.fromisoformat(candidate.answer) <= plan.end:
                     raise ValueError("Date outside requested period")
             if candidate.type == "list":
@@ -187,6 +194,9 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
                     if (len(candidate.answer) != len(plan.periods)
                             or not all(is_number(x) for x in candidate.answer)):
                         raise ValueError("Revenue series disagrees with requested periods")
+                elif plan.intent == "expiring_products":
+                    if not all(isinstance(x, str) and x for x in candidate.answer):
+                        raise ValueError("Expiring products must be catalogue names")
                 elif (not 1 <= len(candidate.answer) <= plan.top_k
                       or not all(isinstance(x, str) and x for x in candidate.answer)):
                     raise ValueError("Ranking list outside Plan limits")
