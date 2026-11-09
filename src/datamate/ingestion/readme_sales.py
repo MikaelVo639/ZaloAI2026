@@ -241,6 +241,9 @@ _BANHANG = (
     ({"ma_sp", "Món", "Đơn vị", "Phân loại"}, {
         "ma_sp": "mã hàng", "Món": "tên", "Đơn vị": "đơn vị cơ bản", "Phân loại": "nhóm hàng",
     }),
+    ({"Customer ID", "ten_kh", "Hạng", "Loại hình khách"}, {
+        "Customer ID": "mã khách", "ten_kh": "tên khách", "Hạng": "nhóm khách",
+    }),
     ({"Mã hóa đơn", "SL trả (ĐVT cơ bản)"}, {
         "Mã hóa đơn": "mã đơn", "Lô": "số lô bán",
         "SL trả (ĐVT cơ bản)": "số lượng khách trả lại (đơn vị cơ bản); lớn hơn 0: đơn đó "
@@ -696,6 +699,38 @@ def _customers_index(roles: dict[str, _Role]) -> dict[str, dict[str, str | None]
         customers[key] = {"group": _text(row.get("customer_group")),
                           "name": _text(row.get("customer_name", row.get("name")))}
     return customers
+
+
+def joined_customer_sources(
+    catalog: Catalog, orders: Table,
+) -> tuple[dict[str, str], dict[str, dict[str, str | None]], str | None]:
+    """Optional customer fields documented for the joined adapter's actual order table."""
+    order_fields: list[dict[str, str]] = []
+    lists = []
+    for section in parse_sections(catalog.readme):
+        fields = section.fields
+        if not fields.keys() & {"customer_id", "customer_name", "customer_group"}:
+            continue
+        if "order_id" not in fields:
+            if {"customer_id", "customer_group"} <= fields.keys():
+                lists.append(section)
+            continue
+        if section.file != orders.path.name or section.sheet not in (None, orders.name):
+            continue
+        order_fields.append({key: column for key, column in fields.items()
+                             if key in {"customer_id", "customer_name", "customer_group"}})
+    if not order_fields:
+        return {}, {}, None
+    fields = order_fields[0]
+    if (any(candidate != fields for candidate in order_fields)
+            or set(fields.values()) - set(orders.columns)):
+        return {}, {}, "CUSTOMER_ORDER_MAPPING_AMBIGUOUS"
+    if "customer_id" not in fields:
+        return fields, {}, None
+    try:
+        return fields, _customers_index(_classify(lists, catalog)), None
+    except ReadmeSalesError as exc:
+        return fields, {}, exc.code
 
 
 def _conversion_table(roles: dict[str, _Role], conventions: Conventions

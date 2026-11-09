@@ -360,7 +360,7 @@ FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock
               "staff": frozenset({"revenue", "order_count"}),
               "size": frozenset({"quantity"}),
               "product_group": frozenset({"revenue"}),
-              "customer_group": frozenset({"revenue"}),
+              "customer_group": frozenset({"revenue", "average_order"}),
               "ingredient": frozenset({"revenue"}),
               "prescription": frozenset({"revenue"}),
               "payment": frozenset({"revenue"}),
@@ -1683,12 +1683,25 @@ def _answer_group(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Ca
     valid = select_valid(sales, plan.start, plan.end)
     if not any(getattr(s, item.field) for s in sales):
         return Candidate(reason=f"No {item.field} recorded in this shop", evidence=evidence)
+    if (item.field == "customer_group" and evidence.get("customer_order_columns")
+            and any(s.customer_id and not s.customer_group for s in valid)):
+        return Candidate(reason="A recorded customer's group is unknown in the period",
+                         evidence=evidence)
     part_rows = select_group(valid, item.field, item.value)
     evidence["inputs"].update(selected_rows=len(valid), group_rows=len(part_rows))
     part = revenue_total(part_rows)
     window = (f"date.fromisoformat({plan.start.isoformat()!r}), "
               f"date.fromisoformat({plan.end.isoformat()!r})")
     group_call = f"select_group(select_valid(sales, {window}), {item.field!r}, {item.value!r})"
+    if plan.intent == "average_order":
+        value = average_order_value(part_rows)
+        if value is None:
+            return Candidate(reason="No valid orders in customer group", evidence=evidence)
+        evidence.update(calculation="group revenue / distinct valid group orders; round VND half up",
+                        code=_code(f"average_order_value({group_call})",
+                                   select_valid, select_group, average_order_value),
+                        result=value)
+        return Candidate("number", value, 1.0, "", evidence)
     if plan.comparison != "share":
         value = revenue(part_rows)
         evidence.update(calculation=f"revenue of the {item.field} on valid whole orders",
