@@ -23,6 +23,7 @@ money totals are reconciled where the files allow it. Any failure raises
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
@@ -708,25 +709,45 @@ def _rules(rulebook: str) -> _Rules:
     return _Rules(status, blank, duplicates, returns, fee, notes, evidence)
 
 
+_NOTE_RETURNED = re.compile(r"\b(?:khach tra lai|tra lai hang|tra hang|hoan tra(?: hang)?)\b")
+_NOTE_CANCELLED = re.compile(r"\b(?:cancel|canceled|cancelled)\b")
+# "chưa giao": a README that writes only cancelled / delivering orders in the notes uses it
+# for orders not delivered yet, i.e. the rulebook's "đang giao".
+_NOTE_DELIVERING = re.compile(r"\b(?:dang giao|dang ship|cho giao|chua giao)\b")
+
+
+def _note_state(value: Any) -> str:
+    """Order state named by a free-form note; a note naming no state is "hoàn thành".
+
+    A note that is exactly a status label is read like a status cell. Otherwise the note
+    must mention the state: "huỷ" counts only with its tone mark, because the folded
+    "huy" is also the given name Huy ("giao cho anh Huy"). A note naming two different
+    states is not guessed.
+    """
+    state = canonical_order_state(value)
+    if state is not None:
+        return state
+    raw = unicodedata.normalize("NFC", str(value or "")).lower()
+    text = _name_key(value or "")
+    found = set()
+    if _NOTE_RETURNED.search(text):
+        found.add("tra hang")
+    if "huỷ" in raw or "hủy" in raw or _NOTE_CANCELLED.search(text):
+        found.add("huy")
+    if _NOTE_DELIVERING.search(text):
+        found.add("dang giao")
+    if len(found) > 1:
+        raise StatusError(f"Order note names several states: {value!r}")
+    return found.pop() if found else "hoan thanh"
+
+
 def _resolve_status(value: Any, rules: _Rules, *, from_note: bool) -> str:
     """Resolve a dedicated status cell, or a free-form note when the rulebook permits it."""
     if not from_note:
         return rules.status.resolve(value)
     if rules.status_in_notes is None:
         raise StatusError("The split rulebook does not define statuses written in notes")
-    text = _name_key(value or "")
-    state = canonical_order_state(value)
-    if state is None:
-        if any(marker in text for marker in ("khach tra lai", "tra lai hang", "tra hang",
-                                             "hoan tra hang")):
-            state = "tra hang"
-        elif re.search(r"\bhuy\b", text):
-            state = "huy"
-        elif any(marker in text for marker in ("dang giao", "dang ship", "cho giao")):
-            state = "dang giao"
-        else:
-            state = "hoan thanh"
-    return rules.status.resolve(state)
+    return rules.status.resolve(_note_state(value))
 
 
 # ---------------------------------------------------------------- loading

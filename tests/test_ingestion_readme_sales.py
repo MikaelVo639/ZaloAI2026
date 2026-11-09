@@ -11,6 +11,9 @@ from datamate.agent import sales_source
 from datamate.ingestion.catalog import build_catalog
 from datamate.ingestion.readme_sales import (
     ReadmeSalesError,
+    _note_state,
+    _resolve_status,
+    _rules,
     load_readme_sales,
     meaning_field,
     parse_amount,
@@ -18,6 +21,7 @@ from datamate.ingestion.readme_sales import (
     parse_quantity,
     parse_sections,
 )
+from datamate.ingestion.status import StatusError
 
 RULEBOOK = """# Synthetic split rules
 | Luật | Mặc định |
@@ -584,6 +588,32 @@ Sổ sửa xe, mỗi tháng một sheet; mỗi dòng một phiếu, không có m
             self.shop(readme, {"BanHang_2026.xlsx": rows}), RULEBOOK_WITH_NOTES)
         self.assertEqual([sale.amount for sale in sales], [Decimal(100000)])
         self.assertEqual(evidence["counts"]["non_product_adjustments_skipped"], 2)
+
+
+class NoteStatusTests(unittest.TestCase):
+    """Rulebook "Sổ không có cột trạng thái": the order state is written in the note."""
+
+    def test_note_states(self):
+        for note, state in (
+            ("", "hoan thanh"), (None, "hoan thanh"), ("khách quen", "hoan thanh"),
+            ("cancel", "huy"), ("Huỷ", "huy"), ("huy", "huy"), ("khách hủy đơn", "huy"),
+            ("đang giao", "dang giao"), ("chưa giao", "dang giao"),
+            ("khách trả lại 1 cái", "tra hang"),
+            # The given name Huy is not "huỷ"; delivering to someone is not "đang giao".
+            ("giao cho anh Huy", "hoan thanh"), ("Huy lấy giùm", "hoan thanh"),
+        ):
+            with self.subTest(note=note):
+                self.assertEqual(_note_state(note), state)
+
+    def test_note_naming_two_states_is_not_guessed(self):
+        with self.assertRaises(StatusError):
+            _note_state("huỷ, khách trả lại hàng")
+
+    def test_notes_need_the_rulebook_row(self):
+        self.assertEqual(_resolve_status("chưa giao", _rules(RULEBOOK_WITH_NOTES), from_note=True),
+                         _resolve_status("đang giao", _rules(RULEBOOK), from_note=False))
+        with self.assertRaises(StatusError):
+            _resolve_status("chưa giao", _rules(RULEBOOK), from_note=True)
 
 
 class AdapterSelectionTests(_Shop):
