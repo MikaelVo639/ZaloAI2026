@@ -302,10 +302,11 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
 def sale_cost_column(readme: str, table: Table, header: set[str]) -> str | None:
     """A cost column explicitly documented for one selling unit."""
     for line in readme.splitlines():
-        if not ("gia von" in fold(line.split(":", 1)[0])
-                and "la gia von mot don vi ban" in fold(line)):
+        heading, separator, definition = line.partition(":")
+        if not (separator and "gia von" in fold(heading)
+                and "la gia von mot don vi ban" in fold(definition)):
             continue
-        value = re.search(r"\*\*([^*]+)\*\*|\x60([^\x60]+)\x60", line.split(":", 1)[1])
+        value = re.search(r"\*\*([^*]+)\*\*|\x60([^\x60]+)\x60", definition)
         if value:
             name = value.group(1) or value.group(2)
             source, sep, column = name.rpartition(".")
