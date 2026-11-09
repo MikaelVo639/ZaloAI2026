@@ -12,6 +12,7 @@ from datamate.agent import compute
 from datamate.agent.validation import check_executed
 from datamate.contracts import Question
 from datamate.ingestion import build_catalog
+from datamate.ingestion import stock as stock_source
 from datamate.ingestion.sales import Sale
 from datamate.ingestion.stock import StockSourceError, load_stock
 from datamate.semantics.planner import plan_question
@@ -138,6 +139,27 @@ class StockTests(unittest.TestCase):
         self.assertEqual(compute.answer_plan({}, self.catalog(), result, book).type, "abstain")
         self.assertEqual(compute.answer_plan({}, self.catalog(readme, STOCK.replace("120", "100")),
                                              result, book).answer, [1, 0])
+
+    def test_conversion_lookup_only_inspects_documented_conversion_sections(self):
+        readme = README + """- **Quy đổi đơn vị**: hệ số quy đổi ở `quy_doi.csv`.
+
+## Cột trong `quy_doi.csv`
+- **Mã**: mã hàng
+- **ĐVT lớn**: đơn vị lớn
+- **Hệ số**: hệ số
+"""
+        root = Path(self.directory.name)
+        self.catalog(readme)
+        (root / "b" / "quy_doi.csv").write_text(
+            "Mã,ĐVT lớn,Hệ số\nSP1,thùng,24\n", encoding="utf-8"
+        )
+        catalog = build_catalog(root, "b")
+        with mock.patch.object(stock_source, "_matching_tables",
+                               wraps=stock_source._matching_tables) as matching:
+            conversions = stock_source.load_conversions(catalog)
+        self.assertEqual([(c.key, c.big_unit, c.factor) for c in conversions],
+                         [("SP1", "thung", Decimal(24))])
+        self.assertEqual([call.args[1].file for call in matching.call_args_list], ["quy_doi.csv"])
 
     def test_documented_csv_stock_report_profile(self):
         readme = ("## File\n- `ton_kho.csv` (csv)\n\n## Quy ước\n"
