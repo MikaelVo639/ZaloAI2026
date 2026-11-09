@@ -855,7 +855,12 @@ _PRICE_UP = re.compile(
     rf"|len gia) (?P<new>{_PRICE_VALUE}){_PRICE_SUFFIX}(?:/(?P<unit>[a-z][a-z0-9]*))?\b")
 _EFFECT_UNIT = re.compile(
     r"\bso ([a-z][a-z0-9]*) ban (?:ra|duoc)\b|\b(?:luong ban )?tinh theo (?:so )?([a-z][a-z0-9]*)\b")
-_DRUG_CUE = re.compile(r"\b(?:hoat chat|ke don)\b")
+_DRUG_CUE = re.compile(r"\b(?:hoat chat|ke don|(?:don|toa) (?:cua )?bac si)\b")
+# "Không cần đơn (toa) bác sĩ" is the plain wording of "không kê đơn"; "cần/phải có đơn bác sĩ"
+# is "kê đơn". Read them as the rulebook's terms before matching the closed wordings.
+_NO_PRESCRIPTION = re.compile(
+    r"\b(?:khong|k|ko|hok|hong) (?:can|phai co) (?:don|toa) (?:cua )?bac si\b")
+_PRESCRIPTION = re.compile(r"\b(?:can|phai co) (?:don|toa) (?:cua )?bac si\b")
 _DRUG_NAME = r"(?:cac )?(?:thuoc|hang|mat hang|san pham)"
 _INGREDIENT = rf"{_DRUG_NAME} (?:co )?hoat chat (?P<ingredient>[a-z0-9]+(?: [a-z0-9+]+)*?)"
 _RX = rf"{_DRUG_NAME} (?P<rx>khong |phai )?ke don"
@@ -883,6 +888,7 @@ def _drug_revenue(question: Question, rules: Rules) -> Plan | None:
     if marker in fold(question.question) or not rules.revenue:
         return None
     text = normalize_question(question.question.replace("+", f" {marker} ")).replace(marker, "+")
+    text = _PRESCRIPTION.sub("ke don", _NO_PRESCRIPTION.sub("khong ke don", text))
     text = re.sub(r"\b(?:k|ko|hok|hong) (?=ke don\b)", "khong ", text)
     used: list[str] = []
     period = _period(text, question.as_of_date, rules, used)
