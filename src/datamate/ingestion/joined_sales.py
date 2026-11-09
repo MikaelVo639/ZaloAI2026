@@ -11,7 +11,11 @@ from typing import Any, Mapping
 from datamate.contracts import Catalog, Table
 from datamate.ingestion.catalog import iter_rows
 from datamate.ingestion.inventory import _sha256
-from datamate.ingestion.readme_sales import joined_customer_sources
+from datamate.ingestion.readme_sales import (
+    joined_customer_sources,
+    optional_sale_cost,
+    sale_cost_column,
+)
 from datamate.ingestion.sales import Sale, parse_date, parse_minute
 from datamate.semantics.text import fold
 
@@ -296,6 +300,7 @@ def mapping_for_xlsx_order_detail_product(catalog: Catalog) -> MappingSpec:
                            if "nguoi ban" in fold(line) and "ma nhan vien ban" in fold(line)), None)
     if staff_evidence and "Người bán" in orders.columns:
         order_fields["staff_id"] = "Người bán"
+    cost_column = sale_cost_column(catalog.readme, details, set(details.columns))
 
     def source(table: Table) -> str:
         return f"{table.path.name}::{table.name}"
@@ -322,6 +327,7 @@ def mapping_for_xlsx_order_detail_product(catalog: Catalog) -> MappingSpec:
                 "quantity": "Số lượng", "quantity_base": "Số lượng quy đổi",
                 "unit": "Đơn vị tính", "unit_price": "Đơn giá",
                 "discount": "Giảm giá",
+                **({"unit_cost_at_sale": cost_column} if cost_column else {}),
             },
             key=("order_id", "line_no"), grain="one row per invoice line",
             evidence=(amount_evidence, line_key_evidence, quantity_evidence),
@@ -663,6 +669,9 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             customer_id=order["customer_id"],
             customer_name=order["customer_name"],
             customer_group=order["customer_group"],
+            quantity_sold=quantity,
+            unit_cost_at_sale=optional_sale_cost(
+                raw.get(mapping.details.fields.get("unit_cost_at_sale", ""))),
         ))
         line_amounts_by_order[order_id] = line_amounts_by_order.get(order_id, Decimal(0)) + amount
         lineage.append({

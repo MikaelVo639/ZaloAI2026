@@ -14,6 +14,19 @@ from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
 from typing import Any, Callable
 
+from datamate.agent.business_measures import (
+    delivery_count,
+    earliest_expiry,
+    expiring_lot_cost,
+    expiring_lots,
+    expiring_products,
+    gross_profit,
+    net_profit,
+    product_key,
+    stock_value,
+    top_gross_profit,
+    unsold_count,
+)
 from datamate.agent.sales_source import load_business_sales
 from datamate.contracts import (
     DEBT_TABLE_COLUMNS,
@@ -24,8 +37,10 @@ from datamate.contracts import (
     DebtPayment,
     Plan,
 )
+from datamate.ingestion.business_measures import load_deliveries, load_expenses
 from datamate.ingestion.debt import DebtSourceError, _coverage_day, load_debt_ledger
 from datamate.ingestion.drugs import Drug, ingredient_key, load_drugs
+from datamate.ingestion.expiry import load_lots
 from datamate.ingestion.purchases import (
     PurchaseLine,
     PurchaseSourceError,
@@ -40,6 +55,7 @@ from datamate.ingestion.stock import (
     StockSourceError,
     load_conversions,
     load_stock,
+    load_stock_costs,
 )
 from datamate.semantics.rules import DEBT_TABLE_FEATURES, read_rules
 from datamate.semantics.text import fold
@@ -318,14 +334,19 @@ C01_INTENTS = frozenset({"revenue_increasing", "top_debt_customers"})
 # Contract C01 §7: further debt questions on the same D01 ledger.
 DEBT_INTENTS = frozenset({"debt_total", "debt_customer_count", "debt_collected", "debt_flow"})
 DEBT_MEASURE_FEATURES = ("debt_orders", "debt_at_date", "debt_excluded", "customer_identity")
+LOT_INTENTS = frozenset({"earliest_expiry", "expiring_lot_count", "expiring_lot_cost",
+                         "expiring_product_count", "expiring_products"})
+MONTHLY_MEASURE_INTENTS = frozenset({"delivery_count", "gross_profit", "top_gross_profit", "net_profit"})
+SALES_MEASURE_INTENTS = (MONTHLY_MEASURE_INTENTS - {"delivery_count"}) | {"unsold_count"}
+INDEPENDENT_INTENTS = LOT_INTENTS | {"stock", "stock_split", "delivery_count", "stock_value"}
 INTENTS = (frozenset({"revenue", "order_count", "top_products", "average_order",
                      "cancel_count", "cancel_rate", "best_day",
                      "top_customers", "count_where", "quantity", "top_staff", "stock", "stock_split",
                      "purchase_total", "top_supplier", "avg_purchase_price"})
-           | C01_INTENTS | DEBT_INTENTS)
+           | C01_INTENTS | DEBT_INTENTS | INDEPENDENT_INTENTS | SALES_MEASURE_INTENTS)
 # Plan filters this backend applies, and the intents each one may be combined with.
 FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock", "stock_split",
-                                     "avg_purchase_price"}),
+                                     "avg_purchase_price", "earliest_expiry"}),
               "shift": frozenset({"revenue", "order_count"}),
               "staff": frozenset({"revenue", "order_count"}),
               "size": frozenset({"quantity"}),
@@ -347,6 +368,17 @@ def unsupported(plan: Plan) -> str:
     """
     if plan.intent not in INTENTS:
         return f"Intent {plan.intent!r} not supported by baseline agent"
+    if plan.intent in MONTHLY_MEASURE_INTENTS and (
+            plan.start.day != 1 or plan.start > plan.end or
+            (plan.start.year, plan.start.month) != (plan.end.year, plan.end.month)):
+        return "Measure requires a single month beginning on its first day"
+    if plan.intent in INDEPENDENT_INTENTS - {"stock", "stock_split"}:
+        if plan.start > plan.end or plan.top_k != 1:
+            return "Invalid measure window or ranking size"
+        if plan.intent in {"stock_value", "earliest_expiry"} and plan.start != plan.end:
+            return "Measure requires a single snapshot day"
+        if plan.intent == "earliest_expiry" and len(plan.filters) != 1:
+            return "Earliest expiry requires one product"
     if plan.intent in DEBT_INTENTS:
         if (plan.comparison or plan.compare_start is not None or plan.periods or plan.shape
                 or plan.unit or plan.rank_by or plan.top_k != 1):
@@ -1102,11 +1134,153 @@ def change_percent(current: Decimal, previous: Decimal) -> float | None:
     return float(change.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
+def _answer_deliveries(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                       rulebook: str) -> Candidate:
+    rules = read_rules(rulebook)
+    if not (rules.delivery_count and rules.calendar_month):
+        return Candidate(reason="Current rulebook does not define monthly delivery counts")
+    key = ("deliveries", _catalog_key(catalog))
+    try:
+        if key not in cache:
+            cache[key] = load_deliveries(catalog)
+        deliveries, tables = cache[key]
+        last_day = _coverage_day(catalog.readme) or max(deliveries.values(), default=None)
+    except ValueError as exc:
+        return Candidate(reason=str(exc))
+    if (not deliveries or plan.start > plan.end or plan.start > last_day
+            or plan.end < min(deliveries.values())):
+        return Candidate(reason="Delivery period coverage is not established")
+    value = delivery_count(deliveries, plan.start, plan.end)
+    evidence = {"intent": plan.intent, "tables": tables, "rules": plan.evidence,
+                "start": plan.start.isoformat(), "end": plan.end.isoformat(),
+                "code": _code(f"delivery_count(deliveries, {plan.start!r}, {plan.end!r})",
+                              delivery_count), "result": value}
+    return Candidate("number", value, 1.0, "", evidence)
+
+
+def _lots(cache: dict[str, Any], catalog: Catalog, day: date, with_cost: bool = False):
+    key = ("lots", _catalog_key(catalog), day, with_cost)
+    if key not in cache:
+        cache[key] = load_lots(catalog, day, with_cost=with_cost)
+    return cache[key]
+
+
+def lot_names(cache: dict[str, Any], catalog: Catalog, day: date) -> list[str]:
+    try:
+        _, names, _ = _lots(cache, catalog, day)
+    except ValueError:
+        return []
+    return sorted(set(names) | set(names.values()))
+
+
+def _answer_inventory_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                              rulebook: str) -> Candidate:
+    rules = read_rules(rulebook)
+    start, end = plan.start, plan.end
+    evidence = {"intent": plan.intent, "start": start.isoformat(), "end": end.isoformat(),
+                "rules": plan.evidence}
+    kind = "number"
+    try:
+        if plan.intent == "stock_value":
+            if not (rules.stock_value and rules.until_end_of_day):
+                raise ValueError("Current rulebook does not define stock value")
+            snapshot = _stock_snapshot(cache, catalog)
+            if isinstance(snapshot, StockSourceError):
+                raise snapshot
+            if snapshot.day != start:
+                raise ValueError("Stock is available only at the end of the last data day")
+            costs, source = load_stock_costs(catalog)
+            value = int(_vnd(stock_value(snapshot.items, costs)))
+            code = _code("int(_vnd(stock_value(snapshot.items, costs)))", stock_value, _vnd)
+            sources = [snapshot.source, source]
+        elif plan.intent == "earliest_expiry":
+            if not (rules.earliest_expiry and rules.product_names):
+                raise ValueError("Current rulebook does not define earliest expiry")
+            lots, names, sources = _lots(cache, catalog, start)
+            key = fold(plan.filters[0].value)
+            matches = [code for code, name in names.items() if key in (fold(code), fold(name))]
+            if len(matches) != 1:
+                raise ValueError("Expiry question must match exactly one catalogue product")
+            product = matches[0]
+            kind, value = "date", earliest_expiry(lots, product, start).isoformat()
+            code = _code(f"earliest_expiry(lots, {product!r}, {start!r}).isoformat()",
+                         expiring_lots, earliest_expiry)
+        else:
+            if not rules.expiring_lots:
+                raise ValueError("Current rulebook does not define the expiry horizon")
+            lots, names, sources = _lots(cache, catalog, start, plan.intent == "expiring_lot_cost")
+            selected = expiring_lots(lots, start, end)
+            call = f"expiring_lots(lots, {start!r}, {end!r})"
+            if plan.intent == "expiring_lot_cost":
+                value = int(_vnd(expiring_lot_cost(selected)))
+                code = _code(f"int(_vnd(expiring_lot_cost({call})))",
+                             expiring_lots, expiring_lot_cost, _vnd)
+            elif plan.intent == "expiring_lot_count":
+                value = len(selected)
+                code = _code(f"len({call})", expiring_lots)
+            elif plan.intent == "expiring_product_count":
+                value = len({lot.product for lot in selected})
+                code = _code(f"len({{lot.product for lot in {call}}})", expiring_lots)
+            else:
+                if not rules.expiry_list_order:
+                    raise ValueError("Current rulebook does not define expiry list order")
+                kind, value = "list", expiring_products(selected, names)
+                code = _code(f"expiring_products({call}, names)", expiring_lots, expiring_products)
+    except ValueError as exc:
+        return Candidate(reason=str(exc), evidence=evidence)
+    evidence.update(tables=sources, code=code, result=value)
+    return Candidate(kind, value, 1.0, "", evidence)
+
+
+def _answer_sales_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                          rulebook: str, sales: list[Sale], evidence: dict[str, Any]) -> Candidate:
+    rules = read_rules(rulebook)
+    if (not rules.revenue or not getattr(rules, plan.intent)
+            or (plan.intent in {"unsold_count", "top_gross_profit"} and not rules.product_names)
+            or (plan.intent != "unsold_count" and not (rules.gross_profit and rules.calendar_month))):
+        return Candidate(reason="Required measure rules are absent in the current split")
+    start, end = plan.start, plan.end
+    products = [row for row in ranking_candidates(sales, cache.get("ranking_eligible"))
+                if fold(row.product_name or "") != "phi phuc vu"]
+    kind = "number"
+    try:
+        if plan.intent == "unsold_count":
+            value = unsold_count(products, start, end)
+            code = _code(f"unsold_count(products, {start!r}, {end!r})", product_key, unsold_count)
+        else:
+            rows = select_valid(products if plan.intent == "top_gross_profit" else sales, start, end)
+            if not any(sale.unit_cost_at_sale is not None for sale in sales):
+                raise ValueError("No documented costs per selling unit in sales data")
+            if plan.intent == "top_gross_profit":
+                kind, value = "string", top_gross_profit(rows, rules.ties_by_code)
+                code = _code(f"top_gross_profit(rows, {rules.ties_by_code!r})",
+                             product_key, gross_profit, top_gross_profit)
+            elif plan.intent == "net_profit":
+                if "expenses" not in cache:
+                    cache["expenses"] = load_expenses(catalog)
+                expenses, source = cache["expenses"]
+                evidence["expense_table"] = source
+                value = int(_vnd(net_profit(rows, expenses, start, end)))
+                code = _code(f"int(_vnd(net_profit(rows, expenses, {start!r}, {end!r})))",
+                             gross_profit, net_profit, _vnd)
+            else:
+                value = int(_vnd(gross_profit(rows)))
+                code = _code("int(_vnd(gross_profit(rows)))", gross_profit, _vnd)
+    except ValueError as exc:
+        return Candidate(reason=str(exc), evidence=evidence)
+    evidence.update(code=code, result=value)
+    return Candidate(kind, value, 1.0, "", evidence)
+
+
 def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                 rulebook: str = "") -> Candidate:
     reason = unsupported(plan)
     if reason:
         return Candidate(reason=reason)
+    if plan.intent == "delivery_count":
+        return _answer_deliveries(cache, catalog, plan, rulebook)
+    if plan.intent in LOT_INTENTS | {"stock_value"}:
+        return _answer_inventory_measure(cache, catalog, plan, rulebook)
     if plan.intent in DEBT_INTENTS:
         return _answer_debt_measure(cache, catalog, plan, rulebook)
     if plan.intent in ("stock", "stock_split"):
@@ -1156,6 +1330,8 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         if outside:
             return Candidate(reason="No sales in period; business coverage is not established",
                              evidence=evidence)
+    if plan.intent in SALES_MEASURE_INTENTS:
+        return _answer_sales_measure(cache, catalog, plan, rulebook, sales, evidence)
     product_call = ""
     if plan.filters and plan.filters[0].field == "shift":
         return _answer_shift(plan, sales, rulebook, evidence)

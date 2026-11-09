@@ -48,6 +48,7 @@ _MEANINGS = {
     "ten hang": "product_name",
     "ten": "name",
     "so luong": "quantity",
+    "gia von mot don vi ban": "unit_cost_at_sale",
     "don vi tinh": "unit",
     "don vi co ban": "base_unit",
     "don gia": "unit_price",
@@ -286,6 +287,10 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
             for required, meanings in lists:
                 if required <= header:
                     columns = {c: m for c, m in meanings.items() if c in header}
+                    if "thanh tien sau giam" in map(fold, columns.values()):
+                        cost = sale_cost_column(catalog.readme, table, header)
+                        if cost:
+                            columns[cost] = "giá vốn một đơn vị bán"
                     sections.append(Section(table.path.name, table.name, columns,
                                             origin=version))
                     break
@@ -295,6 +300,34 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
         if has_lines and has_orders:
             return sections
     return []
+
+
+def sale_cost_column(readme: str, table: Table, header: set[str]) -> str | None:
+    """A cost column explicitly documented for one selling unit."""
+    for line in readme.splitlines():
+        heading, separator, definition = line.partition(":")
+        if not (separator and "gia von" in fold(heading)
+                and "la gia von mot don vi ban" in fold(definition)):
+            continue
+        value = re.search(r"\*\*([^*]+)\*\*|\x60([^\x60]+)\x60", definition)
+        if value:
+            name = value.group(1) or value.group(2)
+            source, sep, column = name.rpartition(".")
+            if sep and source != table.name:
+                continue
+            if (column or name) in header:
+                return column or name
+    return None
+
+
+def optional_sale_cost(value: Any) -> Decimal | None:
+    if _blank(value):
+        return None
+    try:
+        cost = parse_amount(value)
+        return cost if cost >= 0 else None
+    except ValueError:
+        return None
 
 
 def parse_conventions(readme: str, *, strict: bool = False) -> Conventions:
@@ -864,7 +897,8 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
             None if _blank(line.get("product_id")) else str(line["product_id"]).strip())
         product_name = (None if _blank(line.get("product_name"))
                         else str(line["product_name"]).strip()) or (product or {}).get("name")
-        if product_id is None and product_name is not None and not products_by_id:
+        product_id_is_name = product_id is None and product_name is not None and not products_by_id
+        if product_id_is_name:
             product_id = product_name  # no product codes in this shop: the name identifies
         quantity_base, source = _base_quantity(line, product, conversions, conversion_complete)
         unit_sources[source] += 1
@@ -886,6 +920,9 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
             context["customer_name"] = context["customer_name"] or listed["name"]
         sales.append(Sale(key, final_day[key], final_status[key], amount, product_id,
                           product_name, quantity_base, minute=final_time[key],
+                          quantity_sold=line["_quantity"],
+                          unit_cost_at_sale=optional_sale_cost(line.get("unit_cost_at_sale")),
+                          product_id_is_name=product_id_is_name,
                           product_group=_text((product or {}).get("group")
                                               or line.get("product_group")),
                           **context))
