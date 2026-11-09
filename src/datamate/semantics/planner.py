@@ -174,6 +174,30 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
             if not getattr(rules, f"{field}_share"):
                 return None
             used.append(f"{field}_share")
+    pair = False
+    labelled = _labels(text, vocabulary or {})
+    if labelled is False:
+        return None
+    if labelled:
+        if group:
+            return None
+        text, clauses = labelled
+        for field, value in clauses:
+            if field == "payment" and not rules.payment_revenue:
+                return None
+            filters.append(Filter(field, value, rules.row("payment_revenue") or ""
+                                  if field == "payment" else ""))
+        if clauses[0][0] == "payment":
+            used.append("payment_revenue")
+        if len(clauses) == 2:
+            if not rules.list_in_question_order:
+                return None
+            used.append("list_in_question_order")
+            pair = True
+            text = _PAIR_WORDS.sub(" ", text)
+            text = re.sub(rf"\b{_REVENUE}\b", " ", text) + " doanh thu"
+        else:
+            text, share = _share(text)
     text, product = _product(text, names)
     text = re.sub(r"\s+", " ", text).strip()  # removing a name leaves double spaces
     if group and product:
@@ -293,7 +317,7 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         again = _period(leftover, today, rules)
         if again is not None and again[:2] == (start, end):
             leftover = again[2]
-    if group and intent != "revenue":
+    if (group or labelled) and intent != "revenue":
         return None
     if (shift or staff) and intent not in ("revenue", "order_count"):
         return None
@@ -318,7 +342,7 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
                 "change_percent" if reference else ("shift_change_percent" if shift_compare
                                                     else ("share" if share else "")),
                 tuple(filters),
-                unit=unit)
+                unit=unit, shape="by_filter" if pair else "")
 
 
 def _rows(rules: Rules, *features: str) -> tuple[str, ...]:
@@ -727,7 +751,8 @@ _CUSTOMER_PERCENT = re.compile(rf"\bphan tram {_CUSTOMER}\b")
 _BOUGHT_CUSTOMERS = re.compile(rf"\b(?:trong )?so {_CUSTOMER} (?:da|co) mua(?: hang)?\b")
 _AT_LEAST = re.compile(r"\b(?:mua )?(?:tu (\d+) don(?: hang)? tro (?:len|leen)|it nhat (\d+) don(?: hang)?)\b")
 _CUSTOMER_WORDS = re.compile(
-    rf"\b(?:trong so {_CUSTOMER} (?:da|co) mua(?: hang)?|so {_CUSTOMER} da mua(?: hang)?|"
+    rf"\b(?:trong so {_CUSTOMER} (?:da|co) mua(?: hang)?|(?:dem )?so {_CUSTOMER} da mua(?: hang)?|"
+    rf"dem so {_CUSTOMER} da|"
     rf"so {_CUSTOMER}|{_CUSTOMER}|chiem|t[iy] le|(?:{_AMOUNT} )?phan tram|la (?:nhung )?ai|ai|"
     r"cho cua hang)\b")
 
@@ -791,7 +816,9 @@ def _customers(text: str, today: date, rules: Rules) -> Plan | None | bool:
 # ---------------------------------------------------------------- SEM-02: thresholds
 _MONEY_VALUE = r"(\d{1,3}(?: \d{3})+|\d+)"
 _AT_LEAST_MONEY = re.compile(rf"\b(?:dat )?(?:tu )?{_MONEY_VALUE} (?:dong |d |vnd )?tro len\b")
-_AT_LEAST_ORDERS = re.compile(r"\b(?:o |xuat hien o )(?:tu )?(\d+) don(?: hang)? khac nhau tro len\b")
+_AT_LEAST_ORDERS = re.compile(
+    r"\b(?:(?:co mat |xuat hien )?o (?:tu )?(\d+) (?:don|bill)(?: hang)? khac nhau tro len"
+    r"|(?:co mat |xuat hien )(?:o |trong )it nhat (\d+) (?:don|bill)(?: hang)?(?: khac nhau)?)\b")
 _THRESHOLD_SUBJECTS = (
     ("day", re.compile(rf"\b(?:dem )?(?:so |co )?(?:{_AMOUNT} )?ngay\b")),
     ("order", re.compile(rf"\b(?:dem )?(?:so |co )?(?:{_AMOUNT} )?{_ORDER}\b")),
@@ -813,13 +840,13 @@ def _thresholds(text: str, today: date, rules: Rules) -> Plan | None | bool:
         return False
     used = ["threshold_inclusive"]
     if orders:
-        products = re.search(r"\b(?:co )?(?:{0} )?(?:so )?(?:mat hang|san pham)\b".format(_AMOUNT),
+        products = re.search(r"\b(?:dem )?(?:co )?(?:{0} )?(?:so )?(?:mat hang|san pham)\b".format(_AMOUNT),
                              text)
         if not products or not rules.customers_bought:  # "Số đơn ... đếm số đơn có một mặt hàng"
             return False
         used.append("customers_bought")
         subject, measure = "product", "order_count"
-        value = Decimal(orders.group(1))
+        value = Decimal(orders.group(1) or orders.group(2))
         reduced = text[:orders.start()] + " " + text[orders.end():]
         reduced = reduced[:products.start()] + " " + reduced[products.end():] \
             if products.end() <= orders.start() else reduced.replace(products.group(), " ", 1)
@@ -847,6 +874,44 @@ def _thresholds(text: str, today: date, rules: Rules) -> Plan | None | bool:
         return False
     threshold = Threshold(subject, measure, ">=", value, rules.row("threshold_inclusive") or "")
     return Plan("count_where", start, min(end, today), 1, _rows(rules, *used), threshold=threshold)
+
+
+# Đợt 3 gói 1: "các đơn trả bằng <hình thức>", "các đơn bán qua / tại <kênh>".
+_LABEL_CLAUSE = {
+    "payment": re.compile(r"\b(?:cac )?don(?: hang)? (?:duoc )?(?:tra|thanh toan) bang "),
+    "channel": re.compile(r"\b(?:cac )?don(?: hang)? (?:duoc )?ban (?:qua |tren |(?=tai ))"),
+}
+_PAIR_WORDS = re.compile(
+    r"\b(?:lan luot|moi loai|moi ben|tung loai|ca hai)\b|^so\b|\bvoi\b|\bva\b")
+
+
+def _labels(text: str, vocabulary: dict[str, Iterable[str]]) -> tuple | bool | None:
+    """One or two payment / channel clauses, by the words the shop's labels allow.
+
+    None: no such clause. False: a clause whose label is unknown, ambiguous, of mixed
+    kinds or repeated, or more than two clauses (abstain rather than drop a condition).
+    """
+    clauses = []
+    for field, pattern in _LABEL_CLAUSE.items():
+        terms = sorted((tuple(t.split("|", 1)) for t in vocabulary.get(f"{field}_terms", ())),
+                       key=lambda t: -len(t[0]))
+        for match in pattern.finditer(text):
+            rest = text[match.end():]
+            hit = next(((term, label) for term, label in terms
+                        if re.match(rf"{re.escape(term)}(?!\S)", rest)), None)
+            if hit is None:
+                return False if vocabulary.get(f"{field}_terms") is not None else None
+            clauses.append((match.start(), match.end() + len(hit[0]), field, hit[1]))
+    if not clauses:
+        return None
+    clauses.sort()
+    if (len(clauses) > 2 or len({c[2] for c in clauses}) != 1
+            or len({c[3] for c in clauses}) != len(clauses)
+            or any(a[1] > b[0] for a, b in zip(clauses, clauses[1:]))):
+        return False
+    for start, end, _, _ in reversed(clauses):
+        text = text[:start] + " " + text[end:]
+    return re.sub(r"\s+", " ", text).strip(), [(c[2], c[3]) for c in clauses]
 
 
 _AMBIGUOUS = object()
