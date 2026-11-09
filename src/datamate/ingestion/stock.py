@@ -97,8 +97,9 @@ def load_conversions(catalog: Catalog) -> tuple[Conversion, ...]:
         tables = [t for t in catalog.tables if source in (t.path.name, t.name)]
         sections = parse_sections(catalog.readme)
         for table in tables:
-            fields = [s.fields for s in sections if table in _matching_tables(catalog, s)
-                      and {"factor", "big_unit"} <= s.fields.keys()]
+            # Matching a section can open XLSX sheets to locate their headers.
+            fields = [s.fields for s in sections if {"factor", "big_unit"} <= s.fields.keys()
+                      and table in _matching_tables(catalog, s)]
             if len(fields) == 1:
                 cols = fields[0]
                 by_code = "product_id" in cols
