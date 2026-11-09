@@ -26,6 +26,10 @@ _FILLERS = re.compile(
 _ORDER = r"(?:don|bill|order)(?: hang)?"
 _REVENUE = r"(?:doanh thu|dthu)"
 _ONE = r"(?:mot|moi|1)"
+_GROUP_AVERAGE = (
+    rf"\btrung binh {_ONE} {_ORDER} (?:la )?{_AMOUNT} {_REVENUE}\b"
+    rf"|\b(?:mua )?trung binh {_AMOUNT} {_REVENUE} {_ONE} {_ORDER}\b"
+)
 # (intent, rule feature that must be enabled, pattern, fragments also removed). First match
 # wins, so specific intents come before the generic "doanh thu" / "số đơn" ones.
 _INTENTS = (
@@ -194,6 +198,8 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         intent, text = "best_day", best_day
     unit = ""
     for kind, feature, pattern, extras in () if intent else _INTENTS:
+        if kind == "average_order" and group and group[1] == "customer_group":
+            pattern = rf"(?:{pattern}|{_GROUP_AVERAGE})"
         match = re.search(pattern, text)
         if not match:
             continue
@@ -228,7 +234,9 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         again = _period(leftover, today, rules)
         if again is not None and again[:2] == (start, end):
             leftover = again[2]
-    if group and intent != "revenue":
+    if group and intent != "revenue" and not (
+        group[1] == "customer_group" and intent == "average_order" and not share
+    ):
         return None
     if (shift or staff) and intent not in ("revenue", "order_count"):
         return None
@@ -707,7 +715,8 @@ def _thresholds(text: str, today: date, rules: Rules) -> Plan | None | bool:
 _AMBIGUOUS = object()
 _GROUP_PREFIX = {
     "product_group": r"(?:cua )?(?:cac |nhung )?(?:mat hang |san pham |hang )?nhom (?:hang )?",
-    "customer_group": r"(?:(?:cac )?don (?:hang )?)?(?:tu |cua |do )?(?:cac |nhung )?khach(?: hang)? "
+    "customer_group": r"(?:(?<!moi )(?<!mot )(?<!1 )(?:cac )?don (?:hang )?)?"
+                      r"(?:tu |cua |do )?(?:cac |nhung )?khach(?: hang)? "
                       r"(?:thuoc )?nhom ",
 }
 

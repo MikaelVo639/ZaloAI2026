@@ -131,6 +131,35 @@ class JoinedSalesTests(unittest.TestCase):
             catalog, mapping=mapping or self.mapping, rule_capabilities=rules or self.rules
         )
 
+    def test_documented_customer_context_preserves_order_and_line_grain(self):
+        self._write_sources(details=[
+            ["O001", "01", "P001", "20", "2", "48", "case", "10", "0"],
+            ["O001", "02", "P001", "10", "1", "24", "case", "10", "0"],
+            ["O002", "01", "P001", "20", "2", "48", "case", "10", "0"],
+            ["O003", "01", "P001", "10", "1", "24", "case", "10", "0"],
+        ])
+        self._write_csv("orders.csv",
+                        ["oid", "day", "state", "header_total", "payment", "buyer", "label"],
+                        [["O001", "2026-01-01", "completed", "30", "cash", "C01", "Lan"],
+                         ["O002", "2026-01-01", "completed", "20", "cash", "C02", "Lan"],
+                         ["O003", "2026-01-01", "completed", "10", "cash", "", "Khách lẻ"]])
+        readme = self.business / "README.md"
+        readme.write_text("## Cột trong `orders.csv`\n"
+                          "- **oid**: mã đơn\n- **buyer**: mã khách (trống nếu khách lẻ)\n"
+                          "- **label**: tên khách\n\n"
+                          "## Cột trong `customers.csv`\n"
+                          "- **ref**: mã khách\n- **segment**: nhóm khách\n", encoding="utf-8")
+        self._write_csv("customers.csv", ["ref", "segment"], [["C01", "Sỉ"]])
+        sales, _ = self._load()
+        self.assertEqual([(s.customer_id, s.customer_name, s.customer_group) for s in sales],
+                         [("C01", "Lan", "Sỉ"), ("C01", "Lan", "Sỉ"),
+                          ("C02", "Lan", None), (None, None, None)])
+
+        self._write_csv("customers.csv", ["ref", "segment"], [["C01", "Sỉ"], ["C01", "Lẻ"]])
+        sales, evidence = self._load()
+        self.assertEqual([s.customer_group for s in sales], [None] * 4)
+        self.assertIn("DUPLICATE_PARENT_KEY", {item["code"] for item in evidence["diagnostics"]})
+
     def test_valid_join_statuses_suffix_quantity_base_service_fee_and_hashes(self):
         paths = self._write_sources(
             orders=[
