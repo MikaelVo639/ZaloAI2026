@@ -15,9 +15,13 @@ ANSWER_TYPES = {
     "quantity": "number", "count_where": "number",
     "revenue_increasing": "boolean", "top_debt_customers": "table",
     "debt_total": "number", "debt_customer_count": "number", "debt_collected": "number",
-    "debt_flow": "list", "top_staff": "string", "stock": "number",
+    "debt_flow": "list", "top_staff": "string", "stock": "number", "stock_split": "list",
     "purchase_total": "number", "top_supplier": "string",
     "avg_purchase_price": "number",
+    "unsold_count": "number", "delivery_count": "number",
+    "gross_profit": "number", "top_gross_profit": "string", "net_profit": "number",
+    "stock_value": "number", "earliest_expiry": "date", "expiring_products": "list",
+    "expiring_lot_count": "number", "expiring_lot_cost": "number", "expiring_product_count": "number",
 }
 
 
@@ -133,7 +137,7 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
         if "result" not in evidence or evidence["result"] != candidate.answer:
             raise ValueError("Answer differs from execution output")
         if plan is not None:
-            if plan.shape == "series":
+            if plan.shape in ("series", "by_filter"):
                 expected = "list"
             elif plan.shape == "best_period":
                 expected = "date"
@@ -171,10 +175,18 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
                 if plan.shape == "best_period":
                     if candidate.answer not in {start.strftime("%Y-%m") for start, _ in plan.periods}:
                         raise ValueError("Month outside requested periods")
+                elif plan.intent == "earliest_expiry":
+                    if date.fromisoformat(candidate.answer) < plan.start:
+                        raise ValueError("Expiry is before the stock snapshot")
                 elif not plan.start <= date.fromisoformat(candidate.answer) <= plan.end:
                     raise ValueError("Date outside requested period")
             if candidate.type == "list":
-                if plan.intent == "debt_flow":
+                if plan.intent == "stock_split":
+                    if (len(candidate.answer) != 2 or type(candidate.answer[0]) is not int
+                            or candidate.answer[0] < 0 or not is_number(candidate.answer[1])
+                            or candidate.answer[1] < 0):
+                        raise ValueError("Stock split requires two nonnegative quantities")
+                elif plan.intent == "debt_flow":
                     if (len(candidate.answer) != 2 or not all(
                             type(x) is int and x >= 0 for x in candidate.answer)):
                         raise ValueError("Debt flow is [nợ thêm, trả được] in whole VND")
@@ -182,6 +194,13 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
                     if (len(candidate.answer) != len(plan.periods)
                             or not all(is_number(x) for x in candidate.answer)):
                         raise ValueError("Revenue series disagrees with requested periods")
+                elif plan.intent == "expiring_products":
+                    if not all(isinstance(x, str) and x for x in candidate.answer):
+                        raise ValueError("Expiring products must be catalogue names")
+                elif plan.shape == "by_filter":
+                    if (len(candidate.answer) != len(plan.filters)
+                            or not all(type(x) is int and x >= 0 for x in candidate.answer)):
+                        raise ValueError("Revenue per label disagrees with the Plan filters")
                 elif (not 1 <= len(candidate.answer) <= plan.top_k
                       or not all(isinstance(x, str) and x for x in candidate.answer)):
                     raise ValueError("Ranking list outside Plan limits")

@@ -14,6 +14,19 @@ from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
 from typing import Any, Callable
 
+from datamate.agent.business_measures import (
+    delivery_count,
+    earliest_expiry,
+    expiring_lot_cost,
+    expiring_lots,
+    expiring_products,
+    gross_profit,
+    net_profit,
+    product_key,
+    stock_value,
+    top_gross_profit,
+    unsold_count,
+)
 from datamate.agent.sales_source import load_business_sales
 from datamate.contracts import (
     DEBT_TABLE_COLUMNS,
@@ -24,7 +37,10 @@ from datamate.contracts import (
     DebtPayment,
     Plan,
 )
+from datamate.ingestion.business_measures import load_deliveries, load_expenses
 from datamate.ingestion.debt import DebtSourceError, _coverage_day, load_debt_ledger
+from datamate.ingestion.drugs import Drug, ingredient_key, load_drugs
+from datamate.ingestion.expiry import load_lots
 from datamate.ingestion.purchases import (
     PurchaseLine,
     PurchaseSourceError,
@@ -32,8 +48,18 @@ from datamate.ingestion.purchases import (
     load_purchase_lines,
     load_purchases,
 )
+from datamate.ingestion.readme_sales import field_meanings
 from datamate.ingestion.sales import Sale
-from datamate.ingestion.stock import StockItem, StockSourceError, load_stock
+from datamate.ingestion.stock import (
+    StockItem,
+    StockSnapshot,
+    StockSourceError,
+    load_conversions,
+    load_stock,
+    load_stock_costs,
+)
+from datamate.semantics.payment import FIELDS as PAYMENT_FIELDS
+from datamate.semantics.payment import label_terms
 from datamate.semantics.rules import DEBT_TABLE_FEATURES, read_rules
 from datamate.semantics.text import fold
 
@@ -266,8 +292,39 @@ def vocabulary(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -> d
     if not prepare_sales(cache, catalog, rulebook)["ok"]:
         return {}
     sales, _ = cache["sales"]
-    return {field: sorted({getattr(s, field) for s in sales if getattr(s, field)})
-            for field in ("product_group", "customer_group")}
+    result = {field: sorted({getattr(s, field) for s in sales if getattr(s, field)})
+              for field in ("product_group", "customer_group")}
+    # Đợt 3 gói 1: payment method / channel labels and the words that name them.
+    for kind, attribute in PAYMENT_FIELDS.items():
+        labels = {getattr(s, attribute) for s in sales if getattr(s, attribute)}
+        result[f"{kind}_terms"] = label_terms(labels, field_meanings(catalog.readme, attribute),
+                                              kind)
+    return result
+
+
+def price_history(cache: dict[str, Any], catalog: Catalog,
+                  rulebook: str) -> tuple[dict[tuple[str, Decimal], date], str]:
+    from datamate.ingestion.prices import load_price_increases
+
+    if not prepare_sales(cache, catalog, rulebook)["ok"]:
+        return {}, ""
+    try:
+        increases, source, by_code = load_price_increases(catalog)
+    except ValueError:
+        return {}, ""
+    sales, _ = cache["sales"]
+    aliases: dict[str, set[str]] = defaultdict(set)
+    for sale in sales:
+        key = sale.product_id if by_code else fold(sale.product_name or "")
+        if key:
+            for name in (sale.product_id, sale.product_name):
+                if name:
+                    aliases[name].add(key)
+    by_product: dict[str, dict[Decimal, date]] = defaultdict(dict)
+    for (key, price), day in increases.items():
+        by_product[key][price] = day
+    return {(alias, price): day for alias, keys in aliases.items() if len(keys) == 1
+            for price, day in by_product[next(iter(keys))].items()}, source
 
 
 def select_group(sales: list[Sale], field: str, value: str) -> list[Sale]:
@@ -286,20 +343,30 @@ C01_INTENTS = frozenset({"revenue_increasing", "top_debt_customers"})
 # Contract C01 §7: further debt questions on the same D01 ledger.
 DEBT_INTENTS = frozenset({"debt_total", "debt_customer_count", "debt_collected", "debt_flow"})
 DEBT_MEASURE_FEATURES = ("debt_orders", "debt_at_date", "debt_excluded", "customer_identity")
+LOT_INTENTS = frozenset({"earliest_expiry", "expiring_lot_count", "expiring_lot_cost",
+                         "expiring_product_count", "expiring_products"})
+MONTHLY_MEASURE_INTENTS = frozenset({"delivery_count", "gross_profit", "top_gross_profit", "net_profit"})
+SALES_MEASURE_INTENTS = (MONTHLY_MEASURE_INTENTS - {"delivery_count"}) | {"unsold_count"}
+INDEPENDENT_INTENTS = LOT_INTENTS | {"stock", "stock_split", "delivery_count", "stock_value"}
 INTENTS = (frozenset({"revenue", "order_count", "top_products", "average_order",
                      "cancel_count", "cancel_rate", "best_day",
-                     "top_customers", "count_where", "quantity", "top_staff", "stock",
+                     "top_customers", "count_where", "quantity", "top_staff", "stock", "stock_split",
                      "purchase_total", "top_supplier", "avg_purchase_price"})
-           | C01_INTENTS | DEBT_INTENTS)
+           | C01_INTENTS | DEBT_INTENTS | INDEPENDENT_INTENTS | SALES_MEASURE_INTENTS)
 # Plan filters this backend applies, and the intents each one may be combined with.
-FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock",
-                                     "avg_purchase_price"}),
+FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock", "stock_split",
+                                     "avg_purchase_price", "earliest_expiry"}),
               "shift": frozenset({"revenue", "order_count"}),
               "staff": frozenset({"revenue", "order_count"}),
               "size": frozenset({"quantity"}),
               "product_group": frozenset({"revenue"}),
-              "customer_group": frozenset({"revenue"})}
+              "customer_group": frozenset({"revenue"}),
+              "ingredient": frozenset({"revenue"}),
+              "prescription": frozenset({"revenue"}),
+              "payment": frozenset({"revenue"}),
+              "channel": frozenset({"revenue"})}
 GROUP_FIELDS = ("product_group", "customer_group")
+DRUG_FIELDS = ("ingredient", "prescription")
 SHAPES = {"series": "revenue", "best_period": "revenue"}  # shape -> the one intent it supports
 COVERAGE = re.compile(r"Khoảng dữ liệu:\s*(\d{4}-\d{2}-\d{2})\s+đến\s+(\d{4}-\d{2}-\d{2})")
 
@@ -312,6 +379,17 @@ def unsupported(plan: Plan) -> str:
     """
     if plan.intent not in INTENTS:
         return f"Intent {plan.intent!r} not supported by baseline agent"
+    if plan.intent in MONTHLY_MEASURE_INTENTS and (
+            plan.start.day != 1 or plan.start > plan.end or
+            (plan.start.year, plan.start.month) != (plan.end.year, plan.end.month)):
+        return "Measure requires a single month beginning on its first day"
+    if plan.intent in INDEPENDENT_INTENTS - {"stock", "stock_split"}:
+        if plan.start > plan.end or plan.top_k != 1:
+            return "Invalid measure window or ranking size"
+        if plan.intent in {"stock_value", "earliest_expiry"} and plan.start != plan.end:
+            return "Measure requires a single snapshot day"
+        if plan.intent == "earliest_expiry" and len(plan.filters) != 1:
+            return "Earliest expiry requires one product"
     if plan.intent in DEBT_INTENTS:
         if (plan.comparison or plan.compare_start is not None or plan.periods or plan.shape
                 or plan.unit or plan.rank_by or plan.top_k != 1):
@@ -352,7 +430,8 @@ def unsupported(plan: Plan) -> str:
         if plan.compare_start is not None or plan.compare_end is not None:
             return "Share does not support comparison periods"
         group_share = (plan.intent == "revenue" and len(plan.filters) == 1
-                       and plan.filters[0].field in GROUP_FIELDS)
+                       and plan.filters[0].field in GROUP_FIELDS + DRUG_FIELDS
+                       + tuple(PAYMENT_FIELDS))
         if not group_share and (plan.intent != "count_where" or plan.threshold is None):
             return f"Comparison 'share' for {plan.intent!r} not supported"
     elif plan.comparison == "shift_change_percent":
@@ -369,6 +448,21 @@ def unsupported(plan: Plan) -> str:
                 or (plan.filters and not price_effect)
                 or not (plan.compare_start and plan.compare_end)):
             return f"Comparison {plan.comparison!r} for {plan.intent!r} not supported"
+        if price_effect and ((plan.start - plan.compare_end).days != 1
+                             or (plan.end - plan.start) != (plan.compare_end - plan.compare_start)
+                             or plan.start > plan.end):
+            return "Price effect requires two adjacent windows of equal length"
+    if plan.shape == "by_filter":
+        # "doanh thu các đơn trả bằng A và các đơn trả bằng B lần lượt": one revenue per
+        # filter, in the order the question names them.
+        fields = {f.field for f in plan.filters}
+        if (plan.intent != "revenue" or len(plan.filters) != 2 or len(fields) != 1
+                or not fields <= set(PAYMENT_FIELDS) or plan.filters[0] == plan.filters[1]
+                or plan.filters[0].value == plan.filters[1].value or plan.periods
+                or plan.comparison or plan.compare_start is not None or plan.threshold
+                or plan.unit or plan.rank_by or plan.top_k != 1):
+            return "Shape 'by_filter' needs revenue and two values of one payment/channel field"
+        return ""
     if plan.periods or plan.shape:
         if SHAPES.get(plan.shape) != plan.intent or len(plan.periods) < 2 or plan.filters \
                 or plan.comparison:
@@ -393,16 +487,21 @@ def unsupported(plan: Plan) -> str:
             return "Order thresholds must be finite nonnegative integers"
     elif plan.intent == "count_where":
         return "Customer count needs a threshold"
-    if (plan.intent in ("quantity", "stock", "avg_purchase_price")) != bool(plan.unit):
+    if (plan.intent in ("quantity", "stock", "stock_split", "avg_purchase_price")) != bool(plan.unit):
         return "Quantity needs the unit asked for"
     if plan.intent == "avg_purchase_price" and (
             len(plan.filters) != 1 or plan.filters[0].field != "product" or plan.start.day != 1
             or plan.end != date(plan.start.year, plan.start.month,
                                 monthrange(plan.start.year, plan.start.month)[1])):
         return "Average purchase price is one product over one full month"
-    if plan.intent == "stock" and (plan.start != plan.end or len(plan.filters) != 1
-                                   or plan.filters[0].field != "product"):
+    if plan.intent in ("stock", "stock_split") and (
+            plan.start != plan.end or len(plan.filters) != 1 or plan.filters[0].field != "product"
+            or plan.top_k != 1):
         return "Stock is one product at the end of one day"
+    if plan.intent == "stock_split":
+        units = plan.unit.split("|")
+        if len(units) != 2 or not all(units) or units[0] == units[1]:
+            return "Stock split needs two distinct units"
     if plan.rank_by and (plan.intent != "top_customers"
                          or plan.rank_by not in ("revenue", "order_count")):
         return f"Ranking by {plan.rank_by!r} not supported"
@@ -413,6 +512,8 @@ def unsupported(plan: Plan) -> str:
     for item in plan.filters:
         if plan.intent not in FILTERABLE.get(item.field, ()):
             return f"Filter {item.field!r} for {plan.intent!r} not supported"
+        if item.field == "prescription" and item.value not in ("rx", "non_rx"):
+            return "Unknown prescription class"
     return ""
 
 
@@ -894,11 +995,7 @@ def _answer_avg_purchase(cache: dict[str, Any], catalog: Catalog, plan: Plan,
     return Candidate("number", result, 1.0, "", evidence)
 
 
-def _answer_stock(cache: dict[str, Any], catalog: Catalog, plan: Plan,
-                  rulebook: str) -> Candidate:
-    """Stock of one product at the end of the last data day, in its base unit."""
-    evidence: dict[str, Any] = {"intent": "stock", "start": plan.start.isoformat(),
-                                "end": plan.end.isoformat(), "rules": plan.evidence}
+def _stock_snapshot(cache: dict[str, Any], catalog: Catalog) -> StockSnapshot | StockSourceError:
     key = (_catalog_key(catalog), catalog.readme)
     if cache.get("stock_key") != key:
         try:
@@ -906,7 +1003,33 @@ def _answer_stock(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         except StockSourceError as exc:
             cache["stock"] = exc
         cache["stock_key"] = key
-    snapshot = cache["stock"]
+    return cache["stock"]
+
+
+def stock_names(cache: dict[str, Any], catalog: Catalog) -> list[str]:
+    snapshot = _stock_snapshot(cache, catalog)
+    if isinstance(snapshot, StockSourceError):
+        return []
+    return sorted({name for item in snapshot.items for name in (item.product_id, item.product_name)
+                   if name})
+
+
+def split_stock(quantity: Decimal, factor: Decimal) -> list[int | float]:
+    if not quantity.is_finite() or quantity < 0 or not factor.is_finite() or factor <= 1:
+        raise ValueError("Stock or conversion factor is invalid")
+    big, rest = divmod(quantity, factor)
+    return [int(big), int(rest) if rest == rest.to_integral() else float(rest)]
+
+
+def _answer_stock(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                  rulebook: str) -> Candidate:
+    """Stock of one product at the end of the last data day."""
+    evidence: dict[str, Any] = {"intent": plan.intent, "start": plan.start.isoformat(),
+                                "end": plan.end.isoformat(), "rules": plan.evidence}
+    if plan.intent == "stock_split" and not read_rules(rulebook).stock_split:
+        return Candidate(reason="Split rulebook does not define stock in larger units",
+                         evidence=evidence)
+    snapshot = _stock_snapshot(cache, catalog)
     if isinstance(snapshot, StockSourceError):
         return Candidate(reason=str(snapshot), evidence=evidence)
     evidence.update(stock_source=snapshot.source, stock_convention=snapshot.convention,
@@ -915,6 +1038,8 @@ def _answer_stock(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return Candidate(reason="Stock is known only at the end of the last data day",
                          evidence=evidence)
     name = plan.filters[0].value
+    # Always load (or reuse) this business's sales so the codes used for matching never
+    # depend on which question the worker answered before; a failed load means no codes.
     codes: set[str] = set()
     if prepare_sales(cache, catalog, rulebook)["ok"]:
         codes = {s.product_id for s in select_product(cache["sales"][0], name) if s.product_id}
@@ -923,6 +1048,30 @@ def _answer_stock(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return Candidate(reason="Product matches no stock row or several", evidence=evidence)
     evidence["stock_item"] = {"product_id": item.product_id, "product_name": item.product_name,
                               "base_unit": item.base_unit, "quantity": str(item.quantity)}
+    if plan.intent == "stock_split":
+        big, base = plan.unit.split("|")
+        if fold(item.base_unit or "") != base:
+            return Candidate(reason="The remainder unit must be the product's base unit",
+                             evidence=evidence)
+        try:
+            if cache.get("stock_conversion_key") != cache["stock_key"]:
+                cache["stock_conversions"] = load_conversions(catalog)
+                cache["stock_conversion_key"] = cache["stock_key"]
+            matches = [c for c in cache["stock_conversions"] if c.big_unit == big and
+                       c.key == (item.product_id if c.by_code else fold(item.product_name or ""))]
+            factors = {(c.factor, c.base_unit or base) for c in matches}
+            if len(factors) != 1:
+                raise ValueError("No unique factor for the product and larger unit")
+            factor, conversion_base = factors.pop()
+            if conversion_base != base:
+                raise ValueError("Conversion does not use the product's base unit")
+            result = split_stock(item.quantity, factor)
+        except (ValueError, ArithmeticError) as exc:
+            return Candidate(reason=str(exc), evidence=evidence)
+        evidence.update(conversion_sources=sorted({c.source for c in matches}), factor=str(factor),
+                        code=_code(f"split_stock(Decimal({str(item.quantity)!r}), "
+                                   f"Decimal({str(factor)!r}))", split_stock), result=result)
+        return Candidate("list", result, 1.0, "", evidence)
     if item.base_unit is None or fold(item.base_unit) != fold(plan.unit):
         return Candidate(reason="The unit asked is not the product's base unit",
                          evidence=evidence)
@@ -935,12 +1084,18 @@ def _answer_stock(cache: dict[str, Any], catalog: Catalog, plan: Plan,
 
 def stock_item(items: tuple[StockItem, ...], name: str, codes: set[str]) -> StockItem | None:
     """The one stock row of the product: by its sales code, else by its folded name."""
-    if len(codes) == 1:
+    explicit = [item for item in items if item.product_id == name]
+    if explicit:
+        return explicit[0] if len(explicit) == 1 else None
+    if len(codes) > 1:
+        return None
+    by_name = [item for item in items if item.product_name and fold(item.product_name) == fold(name)]
+    if len(by_name) > 1:
+        return None
+    if codes:
         by_code = [item for item in items if item.product_id in codes]
-        if len(by_code) == 1:
-            return by_code[0]
-    by_name = [item for item in items
-               if item.product_name and fold(item.product_name) == fold(name)]
+        if by_code:
+            return by_code[0] if len(by_code) == 1 else None
     return by_name[0] if len(by_name) == 1 else None
 
 
@@ -1002,14 +1157,156 @@ def change_percent(current: Decimal, previous: Decimal) -> float | None:
     return float(change.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
+def _answer_deliveries(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                       rulebook: str) -> Candidate:
+    rules = read_rules(rulebook)
+    if not (rules.delivery_count and rules.calendar_month):
+        return Candidate(reason="Current rulebook does not define monthly delivery counts")
+    key = ("deliveries", _catalog_key(catalog))
+    try:
+        if key not in cache:
+            cache[key] = load_deliveries(catalog)
+        deliveries, tables = cache[key]
+        last_day = _coverage_day(catalog.readme) or max(deliveries.values(), default=None)
+    except ValueError as exc:
+        return Candidate(reason=str(exc))
+    if (not deliveries or plan.start > plan.end or plan.start > last_day
+            or plan.end < min(deliveries.values())):
+        return Candidate(reason="Delivery period coverage is not established")
+    value = delivery_count(deliveries, plan.start, plan.end)
+    evidence = {"intent": plan.intent, "tables": tables, "rules": plan.evidence,
+                "start": plan.start.isoformat(), "end": plan.end.isoformat(),
+                "code": _code(f"delivery_count(deliveries, {plan.start!r}, {plan.end!r})",
+                              delivery_count), "result": value}
+    return Candidate("number", value, 1.0, "", evidence)
+
+
+def _lots(cache: dict[str, Any], catalog: Catalog, day: date, with_cost: bool = False):
+    key = ("lots", _catalog_key(catalog), day, with_cost)
+    if key not in cache:
+        cache[key] = load_lots(catalog, day, with_cost=with_cost)
+    return cache[key]
+
+
+def lot_names(cache: dict[str, Any], catalog: Catalog, day: date) -> list[str]:
+    try:
+        _, names, _ = _lots(cache, catalog, day)
+    except ValueError:
+        return []
+    return sorted(set(names) | set(names.values()))
+
+
+def _answer_inventory_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                              rulebook: str) -> Candidate:
+    rules = read_rules(rulebook)
+    start, end = plan.start, plan.end
+    evidence = {"intent": plan.intent, "start": start.isoformat(), "end": end.isoformat(),
+                "rules": plan.evidence}
+    kind = "number"
+    try:
+        if plan.intent == "stock_value":
+            if not (rules.stock_value and rules.until_end_of_day):
+                raise ValueError("Current rulebook does not define stock value")
+            snapshot = _stock_snapshot(cache, catalog)
+            if isinstance(snapshot, StockSourceError):
+                raise snapshot
+            if snapshot.day != start:
+                raise ValueError("Stock is available only at the end of the last data day")
+            costs, source = load_stock_costs(catalog)
+            value = int(_vnd(stock_value(snapshot.items, costs)))
+            code = _code("int(_vnd(stock_value(snapshot.items, costs)))", stock_value, _vnd)
+            sources = [snapshot.source, source]
+        elif plan.intent == "earliest_expiry":
+            if not (rules.earliest_expiry and rules.product_names):
+                raise ValueError("Current rulebook does not define earliest expiry")
+            lots, names, sources = _lots(cache, catalog, start)
+            key = fold(plan.filters[0].value)
+            matches = [code for code, name in names.items() if key in (fold(code), fold(name))]
+            if len(matches) != 1:
+                raise ValueError("Expiry question must match exactly one catalogue product")
+            product = matches[0]
+            kind, value = "date", earliest_expiry(lots, product, start).isoformat()
+            code = _code(f"earliest_expiry(lots, {product!r}, {start!r}).isoformat()",
+                         expiring_lots, earliest_expiry)
+        else:
+            if not rules.expiring_lots:
+                raise ValueError("Current rulebook does not define the expiry horizon")
+            lots, names, sources = _lots(cache, catalog, start, plan.intent == "expiring_lot_cost")
+            selected = expiring_lots(lots, start, end)
+            call = f"expiring_lots(lots, {start!r}, {end!r})"
+            if plan.intent == "expiring_lot_cost":
+                value = int(_vnd(expiring_lot_cost(selected)))
+                code = _code(f"int(_vnd(expiring_lot_cost({call})))",
+                             expiring_lots, expiring_lot_cost, _vnd)
+            elif plan.intent == "expiring_lot_count":
+                value = len(selected)
+                code = _code(f"len({call})", expiring_lots)
+            elif plan.intent == "expiring_product_count":
+                value = len({lot.product for lot in selected})
+                code = _code(f"len({{lot.product for lot in {call}}})", expiring_lots)
+            else:
+                if not rules.expiry_list_order:
+                    raise ValueError("Current rulebook does not define expiry list order")
+                kind, value = "list", expiring_products(selected, names)
+                code = _code(f"expiring_products({call}, names)", expiring_lots, expiring_products)
+    except ValueError as exc:
+        return Candidate(reason=str(exc), evidence=evidence)
+    evidence.update(tables=sources, code=code, result=value)
+    return Candidate(kind, value, 1.0, "", evidence)
+
+
+def _answer_sales_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                          rulebook: str, sales: list[Sale], evidence: dict[str, Any]) -> Candidate:
+    rules = read_rules(rulebook)
+    if (not rules.revenue or not getattr(rules, plan.intent)
+            or (plan.intent in {"unsold_count", "top_gross_profit"} and not rules.product_names)
+            or (plan.intent != "unsold_count" and not (rules.gross_profit and rules.calendar_month))):
+        return Candidate(reason="Required measure rules are absent in the current split")
+    start, end = plan.start, plan.end
+    products = [row for row in ranking_candidates(sales, cache.get("ranking_eligible"))
+                if fold(row.product_name or "") != "phi phuc vu"]
+    kind = "number"
+    try:
+        if plan.intent == "unsold_count":
+            value = unsold_count(products, start, end)
+            code = _code(f"unsold_count(products, {start!r}, {end!r})", product_key, unsold_count)
+        else:
+            rows = select_valid(products if plan.intent == "top_gross_profit" else sales, start, end)
+            if not any(sale.unit_cost_at_sale is not None for sale in sales):
+                raise ValueError("No documented costs per selling unit in sales data")
+            if plan.intent == "top_gross_profit":
+                kind, value = "string", top_gross_profit(rows, rules.ties_by_code)
+                code = _code(f"top_gross_profit(rows, {rules.ties_by_code!r})",
+                             product_key, gross_profit, top_gross_profit)
+            elif plan.intent == "net_profit":
+                if "expenses" not in cache:
+                    cache["expenses"] = load_expenses(catalog)
+                expenses, source = cache["expenses"]
+                evidence["expense_table"] = source
+                value = int(_vnd(net_profit(rows, expenses, start, end)))
+                code = _code(f"int(_vnd(net_profit(rows, expenses, {start!r}, {end!r})))",
+                             gross_profit, net_profit, _vnd)
+            else:
+                value = int(_vnd(gross_profit(rows)))
+                code = _code("int(_vnd(gross_profit(rows)))", gross_profit, _vnd)
+    except ValueError as exc:
+        return Candidate(reason=str(exc), evidence=evidence)
+    evidence.update(code=code, result=value)
+    return Candidate(kind, value, 1.0, "", evidence)
+
+
 def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                 rulebook: str = "") -> Candidate:
     reason = unsupported(plan)
     if reason:
         return Candidate(reason=reason)
+    if plan.intent == "delivery_count":
+        return _answer_deliveries(cache, catalog, plan, rulebook)
+    if plan.intent in LOT_INTENTS | {"stock_value"}:
+        return _answer_inventory_measure(cache, catalog, plan, rulebook)
     if plan.intent in DEBT_INTENTS:
         return _answer_debt_measure(cache, catalog, plan, rulebook)
-    if plan.intent == "stock":
+    if plan.intent in ("stock", "stock_split"):
         return _answer_stock(cache, catalog, plan, rulebook)
     if plan.intent in ("purchase_total", "top_supplier"):
         return _answer_purchase(cache, catalog, plan)
@@ -1056,6 +1353,8 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         if outside:
             return Candidate(reason="No sales in period; business coverage is not established",
                              evidence=evidence)
+    if plan.intent in SALES_MEASURE_INTENTS:
+        return _answer_sales_measure(cache, catalog, plan, rulebook, sales, evidence)
     product_call = ""
     if plan.filters and plan.filters[0].field == "shift":
         return _answer_shift(plan, sales, rulebook, evidence)
@@ -1063,6 +1362,10 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return _answer_staff(plan, sales, evidence)
     if plan.filters and plan.filters[0].field in GROUP_FIELDS:
         return _answer_group(plan, sales, evidence)
+    if plan.filters and plan.filters[0].field in PAYMENT_FIELDS:
+        return _answer_payment(plan, sales, evidence)
+    if plan.filters and plan.filters[0].field in DRUG_FIELDS:
+        return _answer_drug_revenue(cache, catalog, rulebook, plan, sales, evidence)
     if plan.filters and plan.filters[0].field == "size":
         size = plan.filters[0].value
         sales = select_size(sales, size)
@@ -1314,6 +1617,66 @@ def _answer_extended(plan: Plan, sales: list[Sale], full: list[Sale],
     return Candidate("percent", value, 1.0, "", evidence)
 
 
+def select_drugs(rows: list[Sale], products: dict[str, Drug], field: str,
+                 value: str) -> list[Sale]:
+    if any(not row.product_id for row in rows):
+        raise ValueError("A valid sales line has no product identity for the drug join")
+    if field == "ingredient":
+        labels = {d.ingredient for d in products.values()
+                  if d.ingredient and ingredient_key(d.ingredient) == ingredient_key(value)}
+        if len(labels) != 1:
+            raise ValueError("Ingredient does not match exactly one drug catalog label")
+        label = labels.pop()
+        codes = {code for code, drug in products.items() if drug.ingredient == label}
+        return [row for row in rows if row.product_id in codes]
+    codes = {code for code, drug in products.items() if drug.prescription}
+    return [row for row in rows if (row.product_id in codes) == (value == "rx")]
+
+
+def _answer_drug_revenue(cache: dict[str, Any], catalog: Catalog, rulebook: str, plan: Plan,
+                         sales: list[Sale], evidence: dict[str, Any]) -> Candidate:
+    field, value = plan.filters[0].field, plan.filters[0].value
+    rules = read_rules(rulebook)
+    if not rules.revenue or not getattr(rules, f"{field}_revenue"):
+        return Candidate(reason="Split rulebook does not support the drug filter", evidence=evidence)
+    key = (_catalog_key(catalog), catalog.readme)
+    if cache.get("drugs_key") != key:
+        try:
+            cache["drugs"] = load_drugs(catalog)
+        except ValueError as exc:
+            cache["drugs"] = exc
+        cache["drugs_key"] = key
+    drugs = cache["drugs"]
+    if isinstance(drugs, ValueError):
+        return Candidate(reason=str(drugs), evidence=evidence)
+    if not any(row.product_id in drugs.products for row in sales):
+        return Candidate(reason="Sales identities do not join to the drug catalog", evidence=evidence)
+    rows = select_valid(sales, plan.start, plan.end)
+    try:
+        selected = select_drugs(rows, drugs.products, field, value)
+    except ValueError as exc:
+        return Candidate(reason=str(exc), evidence=evidence)
+    evidence.update(drug_source=drugs.source, drug_convention=drugs.convention,
+                    matching_sales_lines=len(selected), valid_sales_lines=len(rows))
+    window = f"date.fromisoformat({plan.start.isoformat()!r}), date.fromisoformat({plan.end.isoformat()!r})"
+    all_rows = f"select_valid(sales, {window})"
+    subset = f"select_drugs({all_rows}, drugs.products, {field!r}, {value!r})"
+    if plan.comparison == "share":
+        part, total = revenue_total(selected), revenue_total(rows)
+        result = share_percent(part, total)
+        evidence.update(drug_revenue=str(part), total_revenue=str(total), result=result,
+                        code=_code(f"share_percent(revenue_total({subset}), revenue_total({all_rows}))",
+                                   select_valid, select_drugs, ingredient_key, revenue_total, share_percent))
+        if result is None:
+            return Candidate(reason="Total revenue is zero; drug revenue share is undefined",
+                             evidence=evidence)
+        return Candidate("percent", result, 1.0, "", evidence)
+    result = revenue(selected)
+    evidence.update(result=result, code=_code(f"revenue({subset})", select_valid, select_drugs,
+                                             ingredient_key, revenue))
+    return Candidate("number", result, 1.0, "", evidence)
+
+
 def _answer_group(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Candidate:
     """Revenue of one product group / customer group, or its share of the whole shop."""
     item = plan.filters[0]
@@ -1339,6 +1702,62 @@ def _answer_group(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Ca
                     code=_code(f"share_percent(revenue_total({group_call}), "
                                f"revenue_total(select_valid(sales, {window})))",
                                select_valid, select_group, revenue_total, share_percent),
+                    part_revenue=str(part), whole_revenue=str(whole), result=value)
+    if value is None:
+        return Candidate(reason="No revenue in the period; share undefined", evidence=evidence)
+    return Candidate("percent", value, 1.0, "", evidence)
+
+
+def select_label(sales: list[Sale], attribute: str, label: str) -> list[Sale]:
+    """Rows whose payment method / channel is exactly this label, as written in the file."""
+    return [s for s in sales if (getattr(s, attribute) or "").strip() == label]
+
+
+def _answer_payment(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Candidate:
+    """Revenue of the orders paid / sold one way, its share of the shop, or two of them.
+
+    Rulebook "Doanh thu theo hình thức thanh toán": the method written on the order, not
+    later debt payments; "ghi nợ" and COD are labels of their own. Channels are the
+    shop's "kênh bán" column. An order without a label in the period makes the part
+    unknown, so the question abstains.
+    """
+    attribute = PAYMENT_FIELDS[plan.filters[0].field]
+    labels = [f.value for f in plan.filters]
+    valid = select_valid(sales, plan.start, plan.end)
+    known = {(getattr(s, attribute) or "").strip() for s in sales}
+    if any(label not in known for label in labels):
+        return Candidate(reason=f"Label not found in this shop's {attribute}", evidence=evidence)
+    unlabeled = sum(1 for s in valid if not (getattr(s, attribute) or "").strip())
+    evidence["inputs"].update(selected_rows=len(valid), unlabeled_rows=unlabeled)
+    if unlabeled:
+        return Candidate(reason=f"Orders without {attribute} in the period", evidence=evidence)
+    window = (f"date.fromisoformat({plan.start.isoformat()!r}), "
+              f"date.fromisoformat({plan.end.isoformat()!r})")
+    calls = [f"select_label(select_valid(sales, {window}), {attribute!r}, {label!r})"
+             for label in labels]
+    parts = [select_label(valid, attribute, label) for label in labels]
+    evidence["inputs"]["label_rows"] = [len(rows) for rows in parts]
+    if plan.shape == "by_filter":
+        value = [revenue(rows) for rows in parts]
+        evidence.update(calculation=f"revenue of each {attribute} label on valid orders, in "
+                        "question order",
+                        code=_code("[" + ", ".join(f"revenue({c})" for c in calls) + "]",
+                                   select_valid, select_label, revenue),
+                        result=value)
+        return Candidate("list", value, 1.0, "", evidence)
+    if plan.comparison != "share":
+        value = revenue(parts[0])
+        evidence.update(calculation=f"revenue of the orders with this {attribute}",
+                        code=_code(f"revenue({calls[0]})", select_valid, select_label, revenue),
+                        result=value)
+        return Candidate("number", value, 1.0, "", evidence)
+    part, whole = revenue_total(parts[0]), revenue_total(valid)
+    value = share_percent(part, whole)
+    evidence.update(calculation=f"100 * revenue with this {attribute} / revenue of the whole "
+                    "shop; 2 decimals half up",
+                    code=_code(f"share_percent(revenue_total({calls[0]}), "
+                               f"revenue_total(select_valid(sales, {window})))",
+                               select_valid, select_label, revenue_total, share_percent),
                     part_revenue=str(part), whole_revenue=str(whole), result=value)
     if value is None:
         return Candidate(reason="No revenue in the period; share undefined", evidence=evidence)

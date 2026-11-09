@@ -10,7 +10,6 @@ from datamate.contracts import Catalog
 from datamate.ingestion.catalog import iter_rows
 from datamate.semantics.text import fold
 
-
 ALIASES = {
     "order_id": ("order_id", "Mã đơn hàng", "Mã đơn", "Mã hóa đơn", "Số hóa đơn"),
     "date": ("order_date", "Ngày đặt hàng", "Ngày đặt", "Ngày bán", "Ngày", "Thời gian"),
@@ -50,6 +49,12 @@ class Sale:
     # source records no time for the order or its lines disagree.
     minute: int | None = None
     staff_id: str | None = None  # "mã nhân viên bán" of the order, as written
+    quantity_sold: Decimal | None = None  # quantity in the selling unit
+    unit_cost_at_sale: Decimal | None = None
+    product_id_is_name: bool = False
+    # "hình thức thanh toán" of the order, as written in the file (e.g. "cash", "Tiền mặt").
+    # Matching a question word to it goes through the README's description of the labels.
+    payment_method: str | None = None
 
 
 def parse_minute(value: Any) -> int | None:

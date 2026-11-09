@@ -13,7 +13,7 @@ def fold(value: object) -> str:
 # merely look like Telex ("max", "gas", "plus") are never altered.
 GRAMMAR_WORDS = frozenset("""
     a bao ban bi bill binh biet bn bnhiu bua cao chay cho co cong cua cuoi da dat dau dem den do
-    hot ngay
+    hot ngay nhom chiem gop
     don dong duoc gan gi gia gium giup ha hang het hien hoi hom huy khach la le luong mang
     mat may minh moi mon mot nam nao nay nhat nhieu nhiu nhung pham phan quan qua quy roi
     san so tai tam thai thang theo thu ti tien toi tong tram trang tren trong truoc trung
@@ -21,6 +21,8 @@ GRAMMAR_WORDS = frozenset("""
     cung doi giam hay hon kem ke ky liet lien ngoai tang top truong voi vs
     con huong khong luon nguoi no phai sau tuc tung xu
     sang chieu tra bot chiu them thieu nha vao
+    len nhi thuoc
+    bang dien thoai
 """.split())
 # Whole-token abbreviations and misspellings seen in everyday questions.
 ABBREVIATIONS = {
@@ -80,6 +82,11 @@ def normalize_question(value: object) -> str:
     """
     # fold() drops "%", which would turn "bao nhiêu % đơn bị huỷ" into a count question.
     raw = str(value).replace("%", " phần trăm ")
+    # fold() also drops "≥": "doanh thu ≥ 580.000 đồng", "mua ≥ 4 đơn" are the rulebook's
+    # "từ N trở lên" (gồm N). "≤", "<", ">" stay unread, so those questions abstain.
+    raw = re.sub(r"(?:≥|>=|⩾)\s*(\d[\d.,]*)\s*((?:đồng|dong|đ|vnđ|vnd|"
+                 r"(?:đơn|don|bill|order)(?: (?:hàng|hang))?(?: (?:khác|khac) nhau)?)(?!\w))?",
+                 lambda m: f" từ {m.group(1)} {m.group(2) or ''} trở lên ", raw, flags=re.I)
     # fold() also drops "-": "15-3-2026" / "3-2026" are the same dates as "15/3/2026" / "3/2026".
     raw = re.sub(r"(?<![\d/-])(\d{1,2})-(\d{1,2})-(\d{4})(?![\d/-])", r"\1/\2/\3", raw)
     raw = re.sub(r"(?<![\d/-])(\d{1,2})-(\d{4})(?![\d/-])", r"\1/\2", raw)

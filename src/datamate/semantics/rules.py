@@ -48,6 +48,7 @@ class Rules:
     trend_rule: bool = False            # the rulebook defines "tăng liên tục" / "xu hướng" itself
     table_answer: bool = False          # format table: {"columns", "rows"}, ô số là JSON number
     until_end_of_day: bool = False      # "đến hết ngày X": tình trạng lúc hết ngày, từ đầu dữ liệu
+    stock_split: bool = False          # tồn: đơn vị lớn nguyên và phần lẻ theo đơn vị cơ bản
     debt_orders: bool = False           # đơn tính vào nợ: không huỷ, đơn trả hàng vẫn tính
     debt_at_date: bool = False          # nợ một đơn tại X: tổng đơn (gồm phí giao) trừ khoản trả đến X
     debt_by_customer: bool = False      # nợ theo khách: khách lẻ vào tổng nợ, không có dòng
@@ -61,6 +62,20 @@ class Rules:
     top_supplier: bool = False          # nhà cung cấp nhập nhiều nhất = tiền nhập cao nhất
     avg_purchase_price: bool = False    # giá nhập bình quân trong tháng: theo số lượng nhập
     price_effect: bool = False          # hiệu ứng tăng giá: N ngày kể từ D với N ngày trước D
+    price_effect_lookup: bool = False   # look up the first increase to the requested price
+    ingredient_revenue: bool = False   # exact active ingredient, combinations are separate
+    prescription_revenue: bool = False # prescription status comes from the drug catalog
+    unsold_count: bool = False
+    delivery_count: bool = False
+    gross_profit: bool = False
+    top_gross_profit: bool = False
+    net_profit: bool = False
+    earliest_expiry: bool = False
+    expiring_lots: bool = False
+    expiry_list_order: bool = False
+    stock_value: bool = False
+    # Đợt 3 gói 1: doanh thu theo hình thức thanh toán ghi trên đơn (ghi nợ, COD riêng)
+    payment_revenue: bool = False
     # Shifts by order time: (name, first minute, last minute) and the base of "ca chiều so
     # với ca sáng", read from the split's "Ca sáng, ca chiều" row; () when absent or unclear.
     shifts: tuple[tuple[str, int, int], ...] = ()
@@ -103,7 +118,7 @@ def read_rules(rulebook: str) -> Rules:
     features: dict[str, str] = {}
 
     def enable(feature: str, key: str | None, *value_tokens: str) -> bool:
-        if key is None or not all(token in rows[key] for token in value_tokens):
+        if key not in rows or key in conflicts or not all(token in rows[key] for token in value_tokens):
             return False
         features[feature] = originals[key]
         return True
@@ -239,6 +254,38 @@ def read_rules(rulebook: str) -> Rules:
         price_effect=enable("price_effect", _find(rows, "hieu ung tang gia"),
                             "so luong don vi co ban", "n ngay ke tu d", "tinh ca d",
                             "n ngay ngay truoc d", "bo don huy va don tra"),
+        price_effect_lookup=enable("price_effect_lookup", _find(rows, "hieu ung tang gia"),
+                                   "gia moi cao hon gia lien truoc", "theo bang gia",
+                                   "tang len cung mot gia nhieu lan thi lay lan dau"),
+        stock_split=enable("stock_split", _find(rows, "ton theo don vi lon"),
+                           "list 2 so", "so don vi lon nguyen", "so don vi co ban le",
+                           "khong co phan le thi so thu hai la 0",
+                           "phan le van tinh bang don vi co ban"),
+        ingredient_revenue=enable("ingredient_revenue", _find(rows, "doanh thu theo hoat chat"),
+                                  "doanh thu", "hoat chat ghi dung nhu vay trong danh muc thuoc",
+                                  "mot loai rieng", "khong tinh vao tung hoat chat"),
+        unsold_count=enable("unsold_count", _find(rows, "mat hang khong ban duoc"),
+                            "da tung ban truoc ky", "khong tinh don huy", "don tra",
+                            "trong ky khong co don nao"),
+        delivery_count=enable("delivery_count", "giao nhieu dot", "ngay giao trong thang",
+                              "moi dot cua moi don", "sau do tra hang"),
+        gross_profit=enable("gross_profit", "lai gop", "doanh thu", "so luong nhan voi",
+                            "gia von ghi tren dong ban", "mot don vi ban"),
+        top_gross_profit=enable("top_gross_profit", "hang loi nhat", "tong lai gop"),
+        net_profit=enable("net_profit", "lai rong mot thang", "lai gop", "moi khoan",
+                          "so chi phi cua thang"),
+        earliest_expiry=enable("earliest_expiry", _find(rows, "lo gan het han nhat"),
+                               "con ton chua qua han", "han som nhat"),
+        expiring_lots=enable("expiring_lots", _find(rows, "hang het han trong"),
+                             "lo con ton", "tu d den het ngay d n", "gia nhap cua chinh lo"),
+        expiry_list_order=enable_text("expiry_list_order", "danh sach",
+                                     "han som nhat cua mat hang truoc", "cung han thi theo ma"),
+        stock_value=enable("stock_value", "gia tri hang ton kho", "ton het hom nay",
+                           "gia von mot don vi co ban ghi trong danh muc", "hang con ton"),
+        prescription_revenue=enable("prescription_revenue", _find(rows, "thuoc ke don"),
+                                    "san pham ghi ke don trong danh muc thuoc",
+                                    "moi san pham con lai la hang khong ke don",
+                                    "ti le ke don tinh theo doanh thu"),
         avg_purchase_price=enable(
             "avg_purchase_price", _find(rows, "gia nhap binh quan", "trong thang"),
             "theo so luong nhap", "khong phai trung binh cong", "theo don vi nhap",
@@ -247,6 +294,11 @@ def read_rules(rulebook: str) -> Rules:
                             "khong phan biet hoa thuong"),
         best_staff=enable("best_staff", _find(rows, "nhan vien ban gioi nhat"), "theo doanh thu",
                           "khong theo so don"),
+        payment_revenue=enable("payment_revenue",
+                               _find(rows, "doanh thu theo hinh thuc thanh toan"),
+                               "ghi tren don", "khong theo lan tra no ve sau",
+                               "don ghi no khong tinh vao tien mat hay chuyen khoan",
+                               "cod la hinh thuc rieng"),
         rule_rows=tuple(features.items()),
     )
 
