@@ -494,8 +494,9 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             "total_due": total_due,
             "row_ordinal": row_ordinal,
             "payment_method": (
-                raw.get(mapping.orders.fields["payment_method"])
-                if "payment_method" in mapping.orders.fields else None
+                None if "payment_method" not in mapping.orders.fields
+                or _missing(raw.get(mapping.orders.fields["payment_method"]))
+                else str(raw.get(mapping.orders.fields["payment_method"])).strip()
             ),
         }
         status_counts[canonical_status] += 1
@@ -647,6 +648,7 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             quantity_sold=quantity,
             unit_cost_at_sale=optional_sale_cost(
                 raw.get(mapping.details.fields.get("unit_cost_at_sale", ""))),
+            payment_method=order["payment_method"],
         ))
         line_amounts_by_order[order_id] = line_amounts_by_order.get(order_id, Decimal(0)) + amount
         lineage.append({
