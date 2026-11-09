@@ -30,6 +30,7 @@ from datamate.ingestion.readme_sales import (
     _matching_tables,
     _records,
     meaning_field,
+    parse_amount,
     parse_conventions,
     parse_quantity,
     parse_sections,
@@ -136,6 +137,34 @@ def _convention(readme: str) -> tuple[str, str]:
             if len(names) == 2 and fold(names[0]) == "ton kho":
                 return names[1].strip(), line.strip()
     raise StockSourceError("absent", "README states no end-of-data stock column")
+
+
+def load_stock_costs(catalog: Catalog) -> tuple[dict[str, Decimal], str]:
+    """Read the documented base-unit cost from a product catalogue."""
+    sources = []
+    for section in parse_sections(catalog.readme):
+        identity = section.fields.get("product_id")
+        if not identity or "base_unit" not in section.fields or "order_id" in section.fields:
+            continue
+        names = [name for name, meaning in section.columns.items()
+                 if fold(meaning) in {"gia von", "gia von mot don vi co ban",
+                                      "gia von theo don vi co ban"}]
+        if len(names) == 1:
+            sources.extend((table, identity, names[0])
+                           for table in _matching_tables(catalog, section))
+    if len(sources) != 1:
+        raise StockSourceError("columns", "No unique product catalogue with base-unit cost")
+    table, identity, cost = sources[0]
+    costs = {}
+    for _, row in _records(table, (identity, cost)):
+        code = str(row[identity] or "").strip()
+        if row[cost] in (None, ""):
+            continue
+        value = parse_amount(row[cost])
+        if not code or code in costs or value < 0:
+            raise StockSourceError("key", "Invalid or repeated catalogue cost")
+        costs[code] = value
+    return costs, table.key
 
 
 def load_stock(catalog: Catalog) -> StockSnapshot:

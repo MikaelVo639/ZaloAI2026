@@ -65,6 +65,15 @@ class Rules:
     price_effect_lookup: bool = False   # look up the first increase to the requested price
     ingredient_revenue: bool = False   # exact active ingredient, combinations are separate
     prescription_revenue: bool = False # prescription status comes from the drug catalog
+    unsold_count: bool = False
+    delivery_count: bool = False
+    gross_profit: bool = False
+    top_gross_profit: bool = False
+    net_profit: bool = False
+    earliest_expiry: bool = False
+    expiring_lots: bool = False
+    expiry_list_order: bool = False
+    stock_value: bool = False
     # Shifts by order time: (name, first minute, last minute) and the base of "ca chiều so
     # với ca sáng", read from the split's "Ca sáng, ca chiều" row; () when absent or unclear.
     shifts: tuple[tuple[str, int, int], ...] = ()
@@ -107,7 +116,7 @@ def read_rules(rulebook: str) -> Rules:
     features: dict[str, str] = {}
 
     def enable(feature: str, key: str | None, *value_tokens: str) -> bool:
-        if key is None or not all(token in rows[key] for token in value_tokens):
+        if key not in rows or key in conflicts or not all(token in rows[key] for token in value_tokens):
             return False
         features[feature] = originals[key]
         return True
@@ -253,6 +262,24 @@ def read_rules(rulebook: str) -> Rules:
         ingredient_revenue=enable("ingredient_revenue", _find(rows, "doanh thu theo hoat chat"),
                                   "doanh thu", "hoat chat ghi dung nhu vay trong danh muc thuoc",
                                   "mot loai rieng", "khong tinh vao tung hoat chat"),
+        unsold_count=enable("unsold_count", _find(rows, "mat hang khong ban duoc"),
+                            "da tung ban truoc ky", "khong tinh don huy", "don tra",
+                            "trong ky khong co don nao"),
+        delivery_count=enable("delivery_count", "giao nhieu dot", "ngay giao trong thang",
+                              "moi dot cua moi don", "sau do tra hang"),
+        gross_profit=enable("gross_profit", "lai gop", "doanh thu", "so luong nhan voi",
+                            "gia von ghi tren dong ban", "mot don vi ban"),
+        top_gross_profit=enable("top_gross_profit", "hang loi nhat", "tong lai gop"),
+        net_profit=enable("net_profit", "lai rong mot thang", "lai gop", "moi khoan",
+                          "so chi phi cua thang"),
+        earliest_expiry=enable("earliest_expiry", _find(rows, "lo gan het han nhat"),
+                               "con ton chua qua han", "han som nhat"),
+        expiring_lots=enable("expiring_lots", _find(rows, "hang het han trong"),
+                             "lo con ton", "tu d den het ngay d n", "gia nhap cua chinh lo"),
+        expiry_list_order=enable_text("expiry_list_order", "danh sach",
+                                     "han som nhat cua mat hang truoc", "cung han thi theo ma"),
+        stock_value=enable("stock_value", "gia tri hang ton kho", "ton het hom nay",
+                           "gia von mot don vi co ban ghi trong danh muc", "hang con ton"),
         prescription_revenue=enable("prescription_revenue", _find(rows, "thuoc ke don"),
                                     "san pham ghi ke don trong danh muc thuoc",
                                     "moi san pham con lai la hang khong ke don",

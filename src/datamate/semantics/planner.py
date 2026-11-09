@@ -26,6 +26,66 @@ _FILLERS = re.compile(
 _ORDER = r"(?:don|bill|order)(?: hang)?"
 _REVENUE = r"(?:doanh thu|dthu)"
 _ONE = r"(?:mot|moi|1)"
+_UNSOLD = re.compile(
+    r"\b(?:mat hang|san pham|hang|mon) (?:(?:bi )?(?:e|ees)(?: han| den muc)?|van dang ban ma)\b"
+    r"|\b(?:khong|ko|k|hong|hok) ban (?:ra )?(?:duoc|dc|d c) (?:cai|mon|lan) nao\b")
+_DELIVERY = re.compile(r"\bdot (?:giao hang|hang)\b")
+_PROFIT = re.compile(r"\b(?:lai|loi) (?:gop|rong|nhat)\b")
+_EARLIEST = re.compile(r"\b(?:gan het han nhat|can date nh(?:at|ut))\b")
+_STOCK_VALUE = re.compile(r"\bgia tri (?:hang ton kho|hang con trong kho)\b")
+_EXPIRY = re.compile(r"\bhet han (?:trong|tu)\b|\b(?:tien von|lo con ton) .*\bhan dung tu\b")
+
+
+def _package_period(text: str, today: date, rules: Rules) -> Plan | bool:
+    """Period measures with a closed grammar for their respective units and qualifiers."""
+    if _UNSOLD.search(text):
+        if not re.search(rf"\b(?:{_AMOUNT}|dem|so)\b", text):
+            return True
+        intent, features = "unsold_count", ("unsold_count", "product_names")
+        remove = (
+            r"\b(?:mat hang|san pham|hang|mon)"
+            r"(?: (?:(?:bi )?(?:e|ees)(?: han| den muc)?|ban cham den muc|van dang ban ma))?\b"
+            r"|\b(?:ban )?(?:khong|ko|k|hong|hok) (?:ai mua|ban[ ]?(?:ra )?(?:duoc|dc|d c)|duoc|dc|d c)"
+            r" (?:cai|mon|lan) nao\b|\b(?:dem(?: giup toi)? so|so|total|may|ta)\b")
+    elif _DELIVERY.search(text):
+        if not re.search(rf"\b(?:{_AMOUNT}|dem|so)\b", text):
+            return True
+        intent, features = "delivery_count", ("delivery_count", "calendar_month")
+        remove = (r"\bdot (?:giao hang|hang)\b|\b(?:xe|tiem|cho giao|cho khach|cho duoc|giao|"
+                  r"dem(?: so)?|so|total|may)\b")
+    elif _PROFIT.search(text):
+        text = re.sub(r"\b(?:lai|loi) gop (?:ca thang )?(?:cao|nhieu) nh(?:at|ut)\b",
+                      "lai gop cao nhat", text)
+        if re.search(r"\b(?:lai|loi) nhat\b|\b(?:lai|loi) gop cao nhat\b", text):
+            intent, features = "top_gross_profit", ("gross_profit", "top_gross_profit",
+                                                     "product_names", "calendar_month")
+            if rules.ties_by_code:
+                features += ("ties_by_code",)
+        elif re.search(r"\b(?:lai|loi) rong\b", text):
+            intent, features = "net_profit", ("gross_profit", "net_profit", "calendar_month")
+        else:
+            intent, features = "gross_profit", ("gross_profit", "calendar_month")
+        remove = (r"\b(?:mat hang|san pham|hang mo|hang|mon|tong|mang ve|"
+                  r"(?:lai|loi) (?:gop(?: cao nhat)?|rong|nhat)|"
+                  r"tru het chi phi(?: roi thi)?|tinh ca thang thi|quan|tiem|con|rua|ta)\b")
+    else:
+        return False
+    if not all(getattr(rules, name) for name in features):
+        return True
+    if intent != "delivery_count" and not rules.revenue:
+        return True
+    if intent != "unsold_count" and not re.search(r"\bthang (?:\d|nay\b|truoc\b)", text):
+        return True
+    text = re.sub(r"\bthang (\d{1,2}) nam (\d{4})\b", r"thang \1/\2", text)
+    used = list(features)
+    resolved = _period(text, today, rules, used)
+    if resolved is None:
+        return True
+    start, end, leftover = resolved
+    leftover = re.sub(remove, " ", re.sub(r"\s+", " ", leftover))
+    if _FILLERS.sub(" ", leftover).strip() or start > today:
+        return True
+    return Plan(intent, start, min(end, today), evidence=_rows(rules, *used))
 # (intent, rule feature that must be enabled, pattern, fragments also removed). First match
 # wins, so specific intents come before the generic "doanh thu" / "số đơn" ones.
 _INTENTS = (
@@ -84,6 +144,11 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     """
     today = question.as_of_date
     text = normalize_question(question.question)
+    package = _package_period(text, today, rules)
+    if package:
+        return package if isinstance(package, Plan) else None
+    if _EARLIEST.search(text) or _STOCK_VALUE.search(text) or _EXPIRY.search(text):
+        return _package_snapshot(text, today, rules, names)
     used: list[str] = []
     filters: list[Filter] = []
     share = False
@@ -259,6 +324,86 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
 def _rows(rules: Rules, *features: str) -> tuple[str, ...]:
     return rules.source_rows + tuple(row for row in dict.fromkeys(rules.row(f) for f in features)
                                      if row)
+
+
+def lot_product_question(question: Question) -> bool:
+    return bool(_EARLIEST.search(normalize_question(question.question)))
+
+
+def _package_snapshot(text: str, today: date, rules: Rules,
+                      names: Iterable[str]) -> Plan | None:
+    snapshot = re.search(
+        rf"\b(?:theo ton kho ngay|tinh den het ngay|tinh tai ngay|cuoi ngay) {_DATE}\b", text)
+    if snapshot:
+        try:
+            day, month, year = map(int, snapshot.groups())
+            if date(year, month, day) != today:
+                return None
+        except ValueError:
+            return None
+        text = text[:snapshot.start()] + " " + text[snapshot.end():]
+    filters = ()
+    end = today
+    if _EARLIEST.search(text):
+        if not (rules.earliest_expiry and rules.product_names):
+            return None
+        text, product = _product(text, names)
+        if not product or product is _AMBIGUOUS:
+            return None
+        filters = (Filter("product", product, rules.row("product_names") or ""),)
+        intent, features = "earliest_expiry", ("earliest_expiry", "product_names")
+        remove = (r"\b(?:con lo|lo|gan het han nhat|can date nh(?:at|ut)|"
+                  r"het han ngay (?:nao|may)|han dung|han su dung|hsd|ngay may|hom nay)\b")
+    elif _STOCK_VALUE.search(text):
+        if not (rules.stock_value and rules.until_end_of_day):
+            return None
+        intent, features = "stock_value", ("stock_value", "until_end_of_day")
+        remove = r"\bgia tri (?:hang ton kho|hang con trong kho)\b|\b(?:tong|theo gia von|hom nay)\b"
+    else:
+        if not rules.expiring_lots:
+            return None
+        features = ("expiring_lots",)
+        if "tien von" in text:
+            intent = "expiring_lot_cost"
+        elif re.search(r"\b(?:may|bao nhieu|bao nhiu|so) lo\b", text):
+            intent = "expiring_lot_count"
+        elif re.search(rf"\b{_AMOUNT} mat hang\b", text):
+            intent = "expiring_product_count"
+        else:
+            if not rules.expiry_list_order:
+                return None
+            intent = "expiring_products"
+            features += ("expiry_list_order",)
+        horizon = re.search(r"\btrong (\d{1,3}) ngay toi\b", text)
+        explicit = re.search(
+            rf"\btu (?:(?:ngay )?{_DATE}|nay) den (?:het )?(?:ngay )?{_DATE}\b", text)
+        if not horizon and not explicit:
+            return None
+        if horizon:
+            end = today + timedelta(days=int(horizon.group(1)))
+        if explicit:
+            d1, m1, y1, d2, m2, y2 = explicit.groups()
+            try:
+                first = date(int(y1), int(m1), int(d1)) if d1 else today
+                last = date(int(y2), int(m2), int(d2))
+            except ValueError:
+                return None
+            if not rules.inclusive_range or first != today or last < today or (horizon and last != end):
+                return None
+            end = last
+            features += ("inclusive_range",)
+            text = text[:explicit.start()] + " " + text[explicit.end():]
+        text = re.sub(r"\btrong \d{1,3} ngay toi\b", " ", text)
+        remove = (r"\b(?:tien von dang nam o cac lo con ton co han dung|"
+                  r"(?:may|bao nhieu|bao nhiu|so) lo(?: hang)? con ton se het han|"
+                  rf"{_AMOUNT} mat hang con lo ton sap het han|tuc han dung|"
+                  r"(?:liet )?ke giup cac san pham con lo ton het han|"
+                  r"(?:mat )?hang nao het han|ma hien van con ton kho|"
+                  r"hang se het han|con ton kho|con ton|tien von|hom nay)\b")
+    text = re.sub(remove, " ", re.sub(r"\s+", " ", text))
+    if _FILLERS.sub(" ", text).strip():
+        return None
+    return Plan(intent, today, end, evidence=_rows(rules, *features), filters=filters)
 
 
 # ---------------------------------------------------------------- SEM-02: months
