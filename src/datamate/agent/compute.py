@@ -48,6 +48,7 @@ from datamate.ingestion.purchases import (
     load_purchase_lines,
     load_purchases,
 )
+from datamate.ingestion.readme_sales import field_meanings
 from datamate.ingestion.sales import Sale
 from datamate.ingestion.stock import (
     StockItem,
@@ -57,6 +58,8 @@ from datamate.ingestion.stock import (
     load_stock,
     load_stock_costs,
 )
+from datamate.semantics.payment import FIELDS as PAYMENT_FIELDS
+from datamate.semantics.payment import label_terms
 from datamate.semantics.rules import DEBT_TABLE_FEATURES, read_rules
 from datamate.semantics.text import fold
 
@@ -289,8 +292,14 @@ def vocabulary(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -> d
     if not prepare_sales(cache, catalog, rulebook)["ok"]:
         return {}
     sales, _ = cache["sales"]
-    return {field: sorted({getattr(s, field) for s in sales if getattr(s, field)})
-            for field in ("product_group", "customer_group")}
+    result = {field: sorted({getattr(s, field) for s in sales if getattr(s, field)})
+              for field in ("product_group", "customer_group")}
+    # Đợt 3 gói 1: payment method / channel labels and the words that name them.
+    for kind, attribute in PAYMENT_FIELDS.items():
+        labels = {getattr(s, attribute) for s in sales if getattr(s, attribute)}
+        result[f"{kind}_terms"] = label_terms(labels, field_meanings(catalog.readme, attribute),
+                                              kind)
+    return result
 
 
 def price_history(cache: dict[str, Any], catalog: Catalog,
@@ -353,7 +362,9 @@ FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock
               "product_group": frozenset({"revenue"}),
               "customer_group": frozenset({"revenue", "average_order"}),
               "ingredient": frozenset({"revenue"}),
-              "prescription": frozenset({"revenue"})}
+              "prescription": frozenset({"revenue"}),
+              "payment": frozenset({"revenue"}),
+              "channel": frozenset({"revenue"})}
 GROUP_FIELDS = ("product_group", "customer_group")
 DRUG_FIELDS = ("ingredient", "prescription")
 SHAPES = {"series": "revenue", "best_period": "revenue"}  # shape -> the one intent it supports
@@ -419,7 +430,8 @@ def unsupported(plan: Plan) -> str:
         if plan.compare_start is not None or plan.compare_end is not None:
             return "Share does not support comparison periods"
         group_share = (plan.intent == "revenue" and len(plan.filters) == 1
-                       and plan.filters[0].field in GROUP_FIELDS + DRUG_FIELDS)
+                       and plan.filters[0].field in GROUP_FIELDS + DRUG_FIELDS
+                       + tuple(PAYMENT_FIELDS))
         if not group_share and (plan.intent != "count_where" or plan.threshold is None):
             return f"Comparison 'share' for {plan.intent!r} not supported"
     elif plan.comparison == "shift_change_percent":
@@ -440,6 +452,17 @@ def unsupported(plan: Plan) -> str:
                              or (plan.end - plan.start) != (plan.compare_end - plan.compare_start)
                              or plan.start > plan.end):
             return "Price effect requires two adjacent windows of equal length"
+    if plan.shape == "by_filter":
+        # "doanh thu các đơn trả bằng A và các đơn trả bằng B lần lượt": one revenue per
+        # filter, in the order the question names them.
+        fields = {f.field for f in plan.filters}
+        if (plan.intent != "revenue" or len(plan.filters) != 2 or len(fields) != 1
+                or not fields <= set(PAYMENT_FIELDS) or plan.filters[0] == plan.filters[1]
+                or plan.filters[0].value == plan.filters[1].value or plan.periods
+                or plan.comparison or plan.compare_start is not None or plan.threshold
+                or plan.unit or plan.rank_by or plan.top_k != 1):
+            return "Shape 'by_filter' needs revenue and two values of one payment/channel field"
+        return ""
     if plan.periods or plan.shape:
         if SHAPES.get(plan.shape) != plan.intent or len(plan.periods) < 2 or plan.filters \
                 or plan.comparison:
@@ -1339,6 +1362,8 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return _answer_staff(plan, sales, evidence)
     if plan.filters and plan.filters[0].field in GROUP_FIELDS:
         return _answer_group(plan, sales, evidence)
+    if plan.filters and plan.filters[0].field in PAYMENT_FIELDS:
+        return _answer_payment(plan, sales, evidence)
     if plan.filters and plan.filters[0].field in DRUG_FIELDS:
         return _answer_drug_revenue(cache, catalog, rulebook, plan, sales, evidence)
     if plan.filters and plan.filters[0].field == "size":
@@ -1690,6 +1715,62 @@ def _answer_group(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Ca
                     code=_code(f"share_percent(revenue_total({group_call}), "
                                f"revenue_total(select_valid(sales, {window})))",
                                select_valid, select_group, revenue_total, share_percent),
+                    part_revenue=str(part), whole_revenue=str(whole), result=value)
+    if value is None:
+        return Candidate(reason="No revenue in the period; share undefined", evidence=evidence)
+    return Candidate("percent", value, 1.0, "", evidence)
+
+
+def select_label(sales: list[Sale], attribute: str, label: str) -> list[Sale]:
+    """Rows whose payment method / channel is exactly this label, as written in the file."""
+    return [s for s in sales if (getattr(s, attribute) or "").strip() == label]
+
+
+def _answer_payment(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Candidate:
+    """Revenue of the orders paid / sold one way, its share of the shop, or two of them.
+
+    Rulebook "Doanh thu theo hình thức thanh toán": the method written on the order, not
+    later debt payments; "ghi nợ" and COD are labels of their own. Channels are the
+    shop's "kênh bán" column. An order without a label in the period makes the part
+    unknown, so the question abstains.
+    """
+    attribute = PAYMENT_FIELDS[plan.filters[0].field]
+    labels = [f.value for f in plan.filters]
+    valid = select_valid(sales, plan.start, plan.end)
+    known = {(getattr(s, attribute) or "").strip() for s in sales}
+    if any(label not in known for label in labels):
+        return Candidate(reason=f"Label not found in this shop's {attribute}", evidence=evidence)
+    unlabeled = sum(1 for s in valid if not (getattr(s, attribute) or "").strip())
+    evidence["inputs"].update(selected_rows=len(valid), unlabeled_rows=unlabeled)
+    if unlabeled:
+        return Candidate(reason=f"Orders without {attribute} in the period", evidence=evidence)
+    window = (f"date.fromisoformat({plan.start.isoformat()!r}), "
+              f"date.fromisoformat({plan.end.isoformat()!r})")
+    calls = [f"select_label(select_valid(sales, {window}), {attribute!r}, {label!r})"
+             for label in labels]
+    parts = [select_label(valid, attribute, label) for label in labels]
+    evidence["inputs"]["label_rows"] = [len(rows) for rows in parts]
+    if plan.shape == "by_filter":
+        value = [revenue(rows) for rows in parts]
+        evidence.update(calculation=f"revenue of each {attribute} label on valid orders, in "
+                        "question order",
+                        code=_code("[" + ", ".join(f"revenue({c})" for c in calls) + "]",
+                                   select_valid, select_label, revenue),
+                        result=value)
+        return Candidate("list", value, 1.0, "", evidence)
+    if plan.comparison != "share":
+        value = revenue(parts[0])
+        evidence.update(calculation=f"revenue of the orders with this {attribute}",
+                        code=_code(f"revenue({calls[0]})", select_valid, select_label, revenue),
+                        result=value)
+        return Candidate("number", value, 1.0, "", evidence)
+    part, whole = revenue_total(parts[0]), revenue_total(valid)
+    value = share_percent(part, whole)
+    evidence.update(calculation=f"100 * revenue with this {attribute} / revenue of the whole "
+                    "shop; 2 decimals half up",
+                    code=_code(f"share_percent(revenue_total({calls[0]}), "
+                               f"revenue_total(select_valid(sales, {window})))",
+                               select_valid, select_label, revenue_total, share_percent),
                     part_revenue=str(part), whole_revenue=str(whole), result=value)
     if value is None:
         return Candidate(reason="No revenue in the period; share undefined", evidence=evidence)

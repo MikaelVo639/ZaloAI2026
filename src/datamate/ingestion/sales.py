@@ -52,6 +52,9 @@ class Sale:
     quantity_sold: Decimal | None = None  # quantity in the selling unit
     unit_cost_at_sale: Decimal | None = None
     product_id_is_name: bool = False
+    # "hình thức thanh toán" of the order, as written in the file (e.g. "cash", "Tiền mặt").
+    # Matching a question word to it goes through the README's description of the labels.
+    payment_method: str | None = None
 
 
 def parse_minute(value: Any) -> int | None:

@@ -137,6 +137,13 @@ def meaning_field(meaning: str) -> str | None:
     return None
 
 
+def field_meanings(readme: str, field: str) -> list[str]:
+    """README meanings of every documented column that holds ``field`` (e.g. the label
+    list after "hình thức thanh toán của đơn: …"). Empty when the README documents none."""
+    return [meaning for section in parse_sections(readme)
+            for meaning in section.columns.values() if meaning_field(meaning) == field]
+
+
 def parse_sections(readme: str) -> list[Section]:
     sections: list[Section] = []
     current: tuple[str, str | None] | None = None
@@ -913,7 +920,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         parent = orders.get(key) or {}
         context = {name: _text(line.get(name) if name in line_fields else parent.get(name))
                    for name in ("customer_id", "customer_name", "customer_group", "channel",
-                                "staff_id")}
+                                "staff_id", "payment_method")}
         listed = customer_groups.get(context["customer_id"] or "")
         if listed:
             context["customer_group"] = context["customer_group"] or listed["group"]
