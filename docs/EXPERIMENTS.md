@@ -639,14 +639,56 @@ từng đúng trên main. Kaggle báo timeout tính toán 30 giây. Windows mấ
 Hai lượt xác nhận ca này vẫn abstain, nguyên nhân gốc chưa được xác định.
 
 Phần nhóm khách của gói 3 đã merge qua #44. #46 bổ sung các ca thiếu
-danh tính có bằng chứng schema. Các ca địa chỉ, giới tính, nhóm khách và
-kỳ hỏi trong nhóm 23 câu cần bằng chứng riêng. Gói 12 là việc dự phòng,
+danh tính có bằng chứng schema. Kết quả rà nguồn của nhóm 23 câu nằm ở
+phần kiểm kê bên dưới. Gói 12 là việc dự phòng,
 đã kiểm chứng bốn câu đơn giá theo ngày trong lượt `biz_102`. Việc
 đối chiếu nhãn `q_02eb42db6665` đã hoàn tất, còn quyết định nhãn thuộc nhóm.
 
 Các số 2.681 đúng, 0 sai, 319 abstain là full train của main `c6283d2`.
-Kết quả hai notebook đích chỉ xác nhận phạm vi trong bảng. Chưa có full
-train ở `37cd647` hoặc bằng chứng đủ cả bốn mốc benchmark của plan.
+Kết quả hai notebook đích chỉ xác nhận phạm vi trong bảng. Chưa có
+full train ở `37cd647`.
 
 [biz_112 trên Kaggle](https://www.kaggle.com/code/trngquangbodng/datamate-r3-37cd647-biz-112-targeted-cpu) ·
 [biz_106 trên Kaggle](https://www.kaggle.com/code/trngquangbodng/datamate-r3-37cd647-biz-106-targeted-cpu)
+
+### Kiểm kê 23 câu khách hàng có nhãn unanswerable
+
+Tài liệu chia việc nêu số lượng nhưng không liệt kê ID. Danh sách dưới đây
+được dựng bằng cách ghép câu hỏi với nhãn train, lấy các câu về khách hàng
+và công nợ, loại câu đánh giá nhân viên. Tập thu được có 23 ID thuộc 11 shop.
+Nhãn chỉ dùng để chọn tập kiểm kê. Kết luận dùng rulebook train §3, §4, §7,
+README và header của 168 sheet thuộc 60 workbook. Probe chạy chỉ đọc từng
+workbook trên Windows, đỉnh bộ nhớ cam kết 32,84 MiB.
+
+| Nhóm | Shop và ID | Bằng chứng từ dữ liệu phát hành |
+| --- | --- | --- |
+| Địa chỉ | `biz_118` · `q_04128078842a` | Sổ bán có tên khách. Sổ giao và sổ hạn nợ thiếu địa chỉ khách. |
+| Địa chỉ | `biz_105` · `q_a4560b62b198` | Hai sổ bán có tên khách, thiếu địa chỉ và nguồn khách để nối. |
+| Địa chỉ | `biz_121` · `q_e9455734edd3` | Chi tiết đơn có tên khách, thiếu địa chỉ. Workbook xuất kèm chứa dữ liệu hàng, lô, nhập và thuốc. |
+| Địa chỉ | `biz_122` · `q_f120d0f5e7d0` | Sổ bán có tên khách, thiếu địa chỉ và danh mục khách. |
+| Địa chỉ | `biz_117` · `q_f895c5de92bd` | Sổ bán có `TenKH`. Sổ giao có mã bill, biển số và tài xế, thiếu địa chỉ khách. |
+| Địa chỉ | `biz_109` · `q_fcafb39ec35f` | Có hoá đơn tháng 2/2025 và nối được danh mục theo mã khách. Danh mục thiếu địa chỉ. |
+| Giới tính | `biz_103` · `q_9f82b2f25fd6` | Sổ bán có tên khách, thiếu giới tính. File còn lại là bảng quy đổi. |
+| Giới tính | `biz_109` · `q_95099c4916a8` | Danh mục khách có nhóm khách, thiếu giới tính. |
+| Giới tính | `biz_122` · `q_ea69ed45df1c` | Sổ bán có tên khách, thiếu giới tính và danh mục khách. |
+| Giới tính | `biz_124` · `q_ee9d6f998de7` | Danh mục khách có hạng, ngày sinh và loại hình khách, thiếu giới tính. |
+| Nhóm khách | `biz_106` · `q_4bc3846b6f5b` | Hoá đơn nối danh mục theo mã khách. Danh mục có `Loại hình khách` và điểm, thiếu nhóm thân thiết và quy tắc suy ra nhóm. |
+| Danh tính khách | `biz_112` · `q_2306395cb34a`, `q_43953e1ca6ca`, `q_d18944d81860` | 16 sheet bán thiếu mã và tên khách. Ba ID đều đúng trong lượt Kaggle `37cd647`. |
+| Danh tính khách | `biz_130` · `q_05a8b30443a1`, `q_937cb5addd0b`, `q_99bc48a3da13` | Cả hai sổ bán thiếu mã và tên khách. Ba ID đều đúng trong lượt full train `995d0a6`. |
+| Kỳ ngoài phạm vi | `biz_121` · `q_40f434f3920d` | Quét cột ngày của sổ bán thấy 44.042 dòng có ngày, sớm nhất 01/03/2025 và muộn nhất 20/09/2026. Kỳ hỏi là tháng 2/2025. |
+| Công nợ theo khách | `biz_117` · `q_4333ad0589a1` | Sổ hạn nợ ghi mã đơn và hạn trả, thiếu số đã trả và lịch sử thanh toán. C01 đã chấm đúng trên main `c6283d2`. |
+| Công nợ theo khách | `biz_105` · `q_faf7802261fb` | Sổ bán có tên khách và trị giá dòng, thiếu khoản trả theo đơn. C01 đã chấm đúng trên main `c6283d2`. |
+| Công nợ | `biz_112` · `q_8d1792dae92c`, `q_b376cbe01666` | Sổ bán thiếu các khoản thu nợ theo ngày. Câu nợ theo khách còn cần mã hoặc tên khách. |
+| Công nợ tổng | `biz_103` · `q_ecca6bcc3dfc` | Sổ chi tiết bán có tổng tiền dòng. Nguồn thiếu khoản trả theo đơn hoặc số dư nợ. |
+
+Bằng chứng nguồn đã được rà cho 23/23 câu. Tám ID đã chấm đúng qua
+các lượt nêu trong bảng. 15 ID còn lại có kết quả đối chiếu nguồn,
+chưa có thay đổi hành vi trong PR này. Địa chỉ và giới tính cần trường
+được ghi rõ, danh tính và nhóm khách dùng quy tắc của split, còn câu công
+nợ cần sổ đủ dữ liệu tính số tiền. Báo cáo cũ ghi 10 ca với lý do
+`No customer recorded on the orders` nhưng artifact còn lưu thiếu log từng
+câu để ghép đủ 10 ID. Sáu ca thiếu danh tính ở bảng là các ID đã đối chiếu
+được bằng schema và kết quả chấm.
+
+Đây là kiểm kê phạm vi dữ liệu. Báo cáo sử dụng các benchmark đã có,
+gồm full train và robustness của main cùng các lượt đích đã hoàn tất.
