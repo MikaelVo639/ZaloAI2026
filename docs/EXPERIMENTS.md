@@ -460,3 +460,86 @@ config và manifest đã chốt cho A và hai lượt B. Xem từng gate trong
 `acceptance.json`, gồm generation thật, kết quả hai lượt, lỗi mới và runtime
 bao gồm load. Nếu hiệu chỉnh B, thu candidate với `min_confidence=0`, chọn
 ngưỡng trên business train, khóa config rồi chạy lại acceptance trên config đó.
+
+## R3 — Evaluation và sửa lượt đọc thừa ở adapter bán hàng
+
+### Kết quả của #44 đã merge
+
+Hai lượt Kaggle CPU dùng baseline theo luật, cùng 3.000 câu, cùng config và cùng
+SHA-256 của ZIP train (`c1adbc654a301c30e4cf20b55d301381025f49db1162d88322b552d7472fea01`).
+Điểm dưới đây do scorer local proxy tính.
+
+| Revision | Đúng | Sai | Abstain |
+| --- | ---: | ---: | ---: |
+| Main trước #44 — `fb76719` | 2.651 | 0 | 349 |
+| Head #44 — `ea4ba09` | 2.680 | 0 | 320 |
+| Nhánh thử thiếu danh tính — `995d0a6` | 2.572 | 0 | 428 |
+
+#44 thêm 29 câu đúng và giữ đủ 2.651 ID đúng của main. Hai lượt Kaggle thấp hơn
+một câu đúng so với số tuyệt đối trong báo cáo tiến độ cũ, cùng chênh lệch +29.
+
+| Biến thể | Số câu | Đúng trên main cũ | Đúng trên #44 | Sai trên #44 | ID đúng bị mất |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Bỏ dấu | 2.226 | 1.964 | 1.990 | 0 | 0 |
+| Viết tắt tháng | 1.335 | 1.196 | 1.220 | 0 | 0 |
+| Thêm hư từ | 2.963 | 2.620 | 2.650 | 0 | 0 |
+| Từ đồng nghĩa | 271 | 262 | 263 | 0 | 0 |
+| Đảo ký tự | 2.737 | 2.437 | 2.467 | 0 | 0 |
+| Năm ngắn | 1.335 | 1.199 | 1.223 | 0 | 0 |
+| Cách viết chat | 3.000 | 2.649 | 2.679 | 0 | 0 |
+
+Trong 320 abstain của head #44 có 68 câu mang nhãn `unanswerable` và 252 câu
+có nhãn đáp án cụ thể. Gom theo từ khóa, các nhóm lớn là giá bán/đơn giá 62,
+công nợ 36, đơn vị bán 29, nhập hàng 27, nhóm hàng/doanh thu 23 và tồn kho/lô 20.
+Còn 99 câu chưa gán chủ đề. Lý do bỏ qua cần đối chiếu log của từng câu.
+
+[PR #44](https://github.com/MikaelVo639/ZaloAI2026/pull/44) ·
+[Train main cũ](https://www.kaggle.com/code/trngquangbodng/datamate-r3-fb76719-train-cpu) ·
+[Train #44](https://www.kaggle.com/code/trngquangbodng/datamate-r3-ea4ba09-train-cpu) ·
+[Robustness main cũ](https://www.kaggle.com/code/trngquangbodng/datamate-r3-fb76719-robustness-cpu) ·
+[Robustness #44](https://www.kaggle.com/code/trngquangbodng/datamate-r3-ea4ba09-robustness-cpu)
+
+### Sửa phần còn lại trên main sau tích hợp
+
+`995d0a6` cứu 6 câu thiếu danh tính khách ở `biz_112` và `biz_130`, đồng thời mất
+114 ID từng đúng ở `biz_102`. Khoảng xử lý shop này theo console tăng từ 277 lên
+306 giây, trong khi worker có ngưỡng nạp dữ liệu 300 giây. Timeout là giả thuyết
+chính cho lượt cũ, vì artifact không xuất log nguyên nhân của từng câu.
+
+`biz_102` có 86.029 dòng bán trên 18 sheet. Adapter phẳng gặp trạng thái ngoài
+tập nhãn của nó lần đầu ở sheet 18, sau đó adapter README phải đọc lại dữ liệu.
+Ưu tiên adapter README khi README mô tả rõ bảng bán theo đơn vị bán và bảng
+hệ số quy đổi, vì đây là nguồn đã có cả cách đọc trạng thái của split lẫn cách
+quy về đơn vị cơ bản. Khi nguồn được mô tả chưa dùng được, adapter phẳng vẫn
+có thể trả lời các ca nó đọc được. Điều kiện chọn adapter dùng schema thay vì
+ID shop.
+
+Chỉ trả `unanswerable` cho câu cần mã hoặc tên khách nếu rulebook cho phép và
+schema của mọi bảng liên quan chứng minh thiếu cả hai trường. Header được lấy
+trong lúc adapter đọc nguồn. Thiếu mapping, lỗi worker và dữ liệu trống chưa
+rõ nguyên nhân vẫn được xử lý theo đường abstain. Các ca địa chỉ, giới tính,
+nhóm khách và kỳ hỏi cần kiểm chứng riêng.
+
+Câu bán chạy `q_02eb42db6665` cũng đã được đối chiếu ngoài inference. Theo lượng
+quy về lon, Bia Sài Gòn Special đạt 303 và Bia Tiger đạt 300. Nhãn train chọn
+Tiger. Phần bán chạy được theo dõi riêng để nhóm kiểm lại nhãn.
+
+Trên Windows, smoke qua với 21 đúng, 0 sai và 3 abstain trên dữ liệu giả lập.
+Unittest chạy 441 ca, có 1 ca skip. Lượt kiểm tra hồi quy thêm ca nhiều sheet
+và ca không có bảng quy đổi.
+
+Bản đầu của notebook chẩn đoán (`0629954`) dừng khi unit test import nhầm gói
+`tests` của ảnh Kaggle. Lượt mới ưu tiên package test trong snapshot đã trích
+xuất, chạy lại smoke và unit test, rồi so hai revision trên ba shop mục tiêu.
+Full train của bản sửa so với `c6283d2` là phép kiểm chung cho các shop chịu ảnh
+hưởng của thay đổi thứ tự adapter. Điều kiện review kết quả là 0 sai, giữ các
+ID đã đúng, phục hồi đủ 114 ID `biz_102` từng bị mất và đúng đủ 6 ca thiếu danh
+tính. Public chỉ báo coverage theo shop vì split này chưa có nhãn.
+
+[Train nhánh thử](https://www.kaggle.com/code/trngquangbodng/datamate-r3-995d0a6-train-cpu) ·
+[Chẩn đoán cũ](https://www.kaggle.com/code/trngquangbodng/datamate-r3-0629954-identity-ab-cpu) ·
+[A/B ba shop](https://www.kaggle.com/code/trngquangbodng/datamate-r3-068f9b1-identity-ab-cpu) ·
+[Train bản sửa](https://www.kaggle.com/code/trngquangbodng/datamate-r3-068f9b1-train-cpu) ·
+[Train main hiện tại](https://www.kaggle.com/code/trngquangbodng/datamate-r3-c6283d2-train-cpu) ·
+[Robustness main hiện tại](https://www.kaggle.com/code/trngquangbodng/datamate-r3-c6283d2-robustness-cpu) ·
+[Public main hiện tại](https://www.kaggle.com/code/trngquangbodng/datamate-r3-c6283d2-public-audit-cpu)
