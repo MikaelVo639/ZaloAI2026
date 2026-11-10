@@ -142,14 +142,32 @@ def _best_day(text: str) -> str | None:
 def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
                   vocabulary: dict[str, Iterable[str]] | None = None, *,
                   price_increases: dict[tuple[str, Decimal], date] | None = None,
-                  price_source: str = "") -> Plan | None:
+                  price_source: str = "", everyday_wording: bool = True) -> Plan | None:
     """Closed grammar: leftover filters/comparisons cause abstention.
 
     `names` are product names/codes of the business (from the Agent's data); a question
     naming exactly one of them gets a product filter. Without names, it abstains as before.
     """
-    today = question.as_of_date
+    names = tuple(names)
     text = normalize_question(question.question)
+    plan = _plan_question(question, text, rules, names, vocabulary, price_increases, price_source)
+    if plan is not None or not everyday_wording:
+        return plan
+    labels = tuple(label for field in ("product_group", "customer_group")
+                   for label in (vocabulary or {}).get(field, ()))
+    rewritten = normalize_question(question.question, product_names=names + labels,
+                                   as_of_year=question.as_of_date.year)
+    if rewritten == text:
+        return None
+    return _plan_question(question, rewritten, rules, names, vocabulary, price_increases,
+                          price_source)
+
+
+def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str, ...],
+                   vocabulary: dict[str, Iterable[str]] | None,
+                   price_increases: dict[tuple[str, Decimal], date] | None,
+                   price_source: str) -> Plan | None:
+    today = question.as_of_date
     package = _package_period(text, today, rules)
     if package:
         return package if isinstance(package, Plan) else None
