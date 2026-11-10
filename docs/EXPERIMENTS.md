@@ -510,9 +510,17 @@ chính cho lượt cũ, vì artifact không xuất log nguyên nhân của từn
 tập nhãn của nó lần đầu ở sheet 18, sau đó adapter README phải đọc lại dữ liệu.
 Ưu tiên adapter README khi README mô tả rõ bảng bán theo đơn vị bán và bảng
 hệ số quy đổi, vì đây là nguồn đã có cả cách đọc trạng thái của split lẫn cách
-quy về đơn vị cơ bản. Khi nguồn được mô tả chưa dùng được, adapter phẳng vẫn
-có thể trả lời các ca nó đọc được. Điều kiện chọn adapter dùng schema thay vì
-ID shop.
+quy về đơn vị cơ bản. Khi nguồn được mô tả thiếu hoặc giá trị quy đổi sai
+định dạng, adapter phẳng vẫn có thể trả lời các ca nó đọc được. Điều kiện chọn
+adapter dùng schema thay vì ID shop.
+
+Probe Windows dùng cùng nguồn và giới hạn 105 giây cho mỗi revision. Adapter
+trên `c6283d2` chạm ngưỡng này. Adapter trên `068f9b1` đọc đủ 86.029 dòng
+trong 51,4 giây. Chạy pipeline trên riêng 119 câu của `biz_102` với code này
+đạt **114 đúng, 0 sai, 5 abstain** và phục hồi đủ 114 ID từng mất. Lượt predict
+mất 58,7 giây, đỉnh bộ nhớ cam kết của job là 385,8 MiB dưới giới hạn 512 MiB.
+Năm câu còn lại thuộc grammar, gồm bốn câu đơn giá theo ngày và một cách hỏi
+top 5 bán chạy.
 
 Chỉ trả `unanswerable` cho câu cần mã hoặc tên khách nếu rulebook cho phép và
 schema của mọi bảng liên quan chứng minh thiếu cả hai trường. Header được lấy
@@ -525,21 +533,25 @@ quy về lon, Bia Sài Gòn Special đạt 303 và Bia Tiger đạt 300. Nhãn t
 Tiger. Phần bán chạy được theo dõi riêng để nhóm kiểm lại nhãn.
 
 Trên Windows, smoke qua với 21 đúng, 0 sai và 3 abstain trên dữ liệu giả lập.
-Unittest chạy 441 ca, có 1 ca skip. Lượt kiểm tra hồi quy thêm ca nhiều sheet
-và ca không có bảng quy đổi.
+Unittest chạy 441 ca, có 1 ca skip trên `068f9b1`. Sau khi thêm fallback cho
+giá trị quy đổi sai định dạng ở `4c8f670`, chạy lại 38 test adapter đều qua.
 
-Bản đầu của notebook chẩn đoán (`0629954`) dừng khi unit test import nhầm gói
-`tests` của ảnh Kaggle. Lượt mới ưu tiên package test trong snapshot đã trích
-xuất, chạy lại smoke và unit test, rồi so hai revision trên ba shop mục tiêu.
-Full train của bản sửa so với `c6283d2` là phép kiểm chung cho các shop chịu ảnh
-hưởng của thay đổi thứ tự adapter. Điều kiện review kết quả là 0 sai, giữ các
-ID đã đúng, phục hồi đủ 114 ID `biz_102` từng bị mất và đúng đủ 6 ca thiếu danh
-tính. Public chỉ báo coverage theo shop vì split này chưa có nhãn.
+Hai notebook chẩn đoán trước dừng ở test setup. Một lượt import nhầm package
+`tests` của ảnh Kaggle, lượt kế tiếp gặp test đòi Git checkout trong khi
+notebook dùng Git archive. Lượt chẩn đoán mới chạy smoke và test adapter,
+sau đó so hai revision trên ba shop và xuất lý do abstain. Suite đầy đủ dùng
+checkout Windows và GitHub Actions.
+
+Full train của `4c8f670` so với `c6283d2` là phép kiểm các shop chịu ảnh
+hưởng của thay đổi thứ tự adapter. Điều kiện chốt là 0 sai, giữ ID đúng
+của base và đạt đủ các ca đã xác minh. Trên public, `c6283d2` có **353/1.000**
+câu có đáp án, 647 abstain, đọc được **14/14 shop**. Public chưa có nhãn để
+chấm độ đúng.
 
 [Train nhánh thử](https://www.kaggle.com/code/trngquangbodng/datamate-r3-995d0a6-train-cpu) ·
 [Chẩn đoán cũ](https://www.kaggle.com/code/trngquangbodng/datamate-r3-0629954-identity-ab-cpu) ·
-[A/B ba shop](https://www.kaggle.com/code/trngquangbodng/datamate-r3-068f9b1-identity-ab-cpu) ·
-[Train bản sửa](https://www.kaggle.com/code/trngquangbodng/datamate-r3-068f9b1-train-cpu) ·
+[A/B ba shop](https://www.kaggle.com/code/trngquangbodng/datamate-r3-4c8f670-identity-ab-cpu) ·
+[Train bản sửa](https://www.kaggle.com/code/trngquangbodng/datamate-r3-4c8f670-train-cpu) ·
 [Train main hiện tại](https://www.kaggle.com/code/trngquangbodng/datamate-r3-c6283d2-train-cpu) ·
 [Robustness main hiện tại](https://www.kaggle.com/code/trngquangbodng/datamate-r3-c6283d2-robustness-cpu) ·
 [Public main hiện tại](https://www.kaggle.com/code/trngquangbodng/datamate-r3-c6283d2-public-audit-cpu)
