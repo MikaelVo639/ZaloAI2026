@@ -619,3 +619,34 @@ có các cột công nợ và nhập hàng mà README nêu. Probe adapter vẫn 
 [Full train 068f9b1](https://www.kaggle.com/code/trngquangbodng/datamate-r3-068f9b1-train-cpu) ·
 [Full train 4c8f670](https://www.kaggle.com/code/trngquangbodng/datamate-r3-4c8f670-train-cpu) ·
 [A/B ba shop](https://www.kaggle.com/code/trngquangbodng/datamate-r3-4c8f670-identity-ab-cpu)
+
+### Kết quả chốt cho Evaluation đợt 3
+
+Hai notebook CPU kiểm tra đúng revision `37cd647` và đã hoàn tất. Các số
+dưới đây dùng scorer local proxy trên tập train.
+
+| Phạm vi | Môi trường | Đúng | Sai | Abstain |
+| --- | --- | ---: | ---: | ---: |
+| `biz_102`, 119 câu, `6d9c8a9` | Windows | 119 | 0 | 0 |
+| `biz_112`, 118 câu, `37cd647` | Kaggle | 109 | 0 | 9 |
+| `biz_106`, `q_0266c6b24cbf`, `37cd647` | Kaggle | 0 | 0 | 1 |
+| `biz_106`, cùng câu và revision | Windows | 0 | 0 | 1 |
+
+`biz_112` giữ đủ 104 ID đúng trên main, thêm 5 câu đúng và đạt cả ba
+ca thiếu danh tính được theo dõi. `biz_106` là một ca giá nhập bình quân
+từng đúng trên main. Kaggle báo timeout tính toán 30 giây. Windows mất
+38,7 giây, chạm giới hạn bộ nhớ 512 MiB và ghi lý do chung của baseline.
+Hai lượt xác nhận ca này vẫn abstain, nguyên nhân gốc chưa được xác định.
+
+Phần nhóm khách của gói 3 đã merge qua #44. #46 bổ sung các ca thiếu
+danh tính có bằng chứng schema. Các ca địa chỉ, giới tính, nhóm khách và
+kỳ hỏi trong nhóm 23 câu cần bằng chứng riêng. Gói 12 là việc dự phòng,
+đã kiểm chứng bốn câu đơn giá theo ngày trong lượt `biz_102`. Việc
+đối chiếu nhãn `q_02eb42db6665` đã hoàn tất, còn quyết định nhãn thuộc nhóm.
+
+Các số 2.681 đúng, 0 sai, 319 abstain là full train của main `c6283d2`.
+Kết quả hai notebook đích chỉ xác nhận phạm vi trong bảng. Chưa có full
+train ở `37cd647` hoặc bằng chứng đủ cả bốn mốc benchmark của plan.
+
+[biz_112 trên Kaggle](https://www.kaggle.com/code/trngquangbodng/datamate-r3-37cd647-biz-112-targeted-cpu) ·
+[biz_106 trên Kaggle](https://www.kaggle.com/code/trngquangbodng/datamate-r3-37cd647-biz-106-targeted-cpu)
