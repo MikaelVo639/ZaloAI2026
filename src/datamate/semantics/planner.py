@@ -26,6 +26,14 @@ _FILLERS = re.compile(
 _ORDER = r"(?:don|bill|order)(?: hang)?"
 _REVENUE = r"(?:doanh thu|dthu)"
 _ONE = r"(?:mot|moi|1)"
+_AVERAGE = r"(?:trung binh|binh quan)"
+# Money on one order, after "trung bình mỗi đơn": "được bao nhiêu doanh thu", "hết bao
+# nhiêu tiền", "giá trị bao nhiêu". Without a money word ("mấy món") it is not this measure.
+# A bare "doanh thu" is what the rulebook's "thu được bao nhiêu tiền" row has become.
+_MONEY_PER_ORDER = (
+    rf"(?:(?:co |la |duoc |dat |het |mua |mang ve |mang lai |thu duoc |ban duoc )*"
+    rf"{_AMOUNT} (?:tien|{_REVENUE})|(?:gia tri|tri gia|co gia tri)(?: la| duoc)? {_AMOUNT}"
+    rf"|(?:co |la |duoc )?{_REVENUE}(?:(?: la| duoc)? {_AMOUNT})?)\b")
 _GROUP_AVERAGE = (
     rf"\btrung binh {_ONE} {_ORDER} (?:la )?{_AMOUNT} {_REVENUE}\b"
     rf"|\b(?:mua )?trung binh {_AMOUNT} {_REVENUE} {_ONE} {_ORDER}\b"
@@ -109,12 +117,17 @@ _INTENTS = (
      (rf"\b(?:{_AMOUNT} )?phan tram\b",)),
     ("cancel_count", "cancelled_order",
      rf"(?:dem )?so {_ORDER} (?:bi |da )?huy"
-     rf"|(?:co )?{_AMOUNT} {_ORDER} (?:bi huy|da huy|o trang thai huy)"
-     rf"|bi huy {_AMOUNT} {_ORDER}", ()),
+     rf"|(?:co )?{_AMOUNT} {_ORDER} (?:bi huy|da huy|o trang thai huy|huy\b)"
+     rf"|(?<!khong )(?<!chua )(?<!ko )(?:bi )?huy(?: mat)? {_AMOUNT} {_ORDER}"
+     rf"|(?:dem )?{_ORDER} (?:bi )?huy (?:duoc |la |co )?{_AMOUNT}\b(?! phan tram)", ()),
     ("average_order", "average_order",
      rf"gia tri trung binh {_ONE} {_ORDER}"
-     rf"|{_REVENUE} (?:trung binh|binh quan) (?:tren )?{_ONE} {_ORDER}"
-     rf"|trung binh {_ONE} {_ORDER}(?P<mid>.*?) mang ve {_AMOUNT} {_REVENUE}", ()),
+     rf"|(?:gia tri|{_REVENUE}) {_AVERAGE} (?:tren )?{_ONE} {_ORDER}"
+     rf"|trung binh {_ONE} {_ORDER}(?P<mid>.*?) mang ve {_AMOUNT} {_REVENUE}"
+     rf"|(?:khach (?:hang )?mua )?{_AVERAGE} (?:tren )?{_ONE} {_ORDER}(?P<mid2>.*?)"
+     rf" {_MONEY_PER_ORDER}"
+     rf"|{_ONE} {_ORDER} {_AVERAGE}(?P<mid3>.*?) {_MONEY_PER_ORDER}"
+     rf"|{_AVERAGE} {_ORDER}(?P<mid4>.*?) (?:gia tri|tri gia) {_AMOUNT}\b", ()),
     ("top_products", None,
      r"(?:(?P<count>\d+|(?<=\btop )(?:hai|ba|bon|nam|sau)) )?"
      r"(?:mat hang|san pham|hang|mon)(?: nao)? "
@@ -371,7 +384,8 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
                 if unit in _NOT_UNITS or not rules.unit_quantity:
                     return None
                 used.append("unit_quantity")
-        middle = match.groupdict().get("mid") or ""
+        middle = " ".join(value for key, value in match.groupdict().items()
+                          if key.startswith("mid") and value)
         text = text[:match.start()] + " " + middle + " " + text[match.end():]
         if kind == "quantity" and not filters:
             text = re.sub(rf"\bcong moi (?:mat hang|mon) tinh theo {re.escape(unit)}\b", " ", text)
