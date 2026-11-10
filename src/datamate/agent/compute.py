@@ -118,14 +118,14 @@ def ranking_candidates(sales: list[Sale], eligible: frozenset[int] | None) -> li
     return [s for index, s in enumerate(sales) if index in eligible]
 
 
-def product_ranking(selected: list[Sale]) -> list[tuple[str, str, Decimal]]:
-    quantities: dict[str, Decimal] = defaultdict(Decimal)
+def product_ranking(selected: list[Sale], by_revenue: bool = False) -> list[tuple[str, str, Decimal]]:
+    totals: dict[str, Decimal] = defaultdict(Decimal)
     names: dict[str, str] = {}
     for sale in selected:
-        quantities[sale.product_id] += sale.quantity_base
+        totals[sale.product_id] += sale.amount if by_revenue else sale.quantity_base
         names.setdefault(sale.product_id, sale.product_name)
-    ranked = sorted(quantities, key=lambda key: (-quantities[key], key))
-    return [(key, names[key], quantities[key]) for key in ranked]
+    ranked = sorted(totals, key=lambda key: (-totals[key], key))
+    return [(key, names[key], totals[key]) for key in ranked]
 
 
 def period_revenues(sales: list[Sale], periods: list[tuple[date, date]]) -> list[int]:
@@ -359,7 +359,7 @@ FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock
               "shift": frozenset({"revenue", "order_count"}),
               "staff": frozenset({"revenue", "order_count"}),
               "size": frozenset({"quantity"}),
-              "product_group": frozenset({"revenue"}),
+              "product_group": frozenset({"revenue", "top_products"}),
               "customer_group": frozenset({"revenue", "average_order"}),
               "ingredient": frozenset({"revenue"}),
               "prescription": frozenset({"revenue"}),
@@ -487,8 +487,13 @@ def unsupported(plan: Plan) -> str:
             return "Order thresholds must be finite nonnegative integers"
     elif plan.intent == "count_where":
         return "Customer count needs a threshold"
-    if (plan.intent in ("quantity", "stock", "stock_split", "avg_purchase_price")) != bool(plan.unit):
+    scoped_ranking = (plan.intent == "top_products" and len(plan.filters) == 1
+                      and plan.filters[0].field == "product_group")
+    if (not scoped_ranking and (plan.intent in ("quantity", "stock", "stock_split",
+                                                "avg_purchase_price")) != bool(plan.unit)):
         return "Quantity needs the unit asked for"
+    if scoped_ranking and plan.unit and plan.rank_by:
+        return "A unit filter is only defined for a product quantity ranking"
     if plan.intent == "avg_purchase_price" and (
             len(plan.filters) != 1 or plan.filters[0].field != "product" or plan.start.day != 1
             or plan.end != date(plan.start.year, plan.start.month,
@@ -502,8 +507,9 @@ def unsupported(plan: Plan) -> str:
         units = plan.unit.split("|")
         if len(units) != 2 or not all(units) or units[0] == units[1]:
             return "Stock split needs two distinct units"
-    if plan.rank_by and (plan.intent != "top_customers"
-                         or plan.rank_by not in ("revenue", "order_count")):
+    if plan.rank_by and not ((scoped_ranking and plan.rank_by == "revenue")
+                             or (plan.intent == "top_customers"
+                                 and plan.rank_by in ("revenue", "order_count"))):
         return f"Ranking by {plan.rank_by!r} not supported"
     if plan.intent == "top_customers" and not plan.rank_by:
         return "Customer ranking needs its measure"
@@ -1361,6 +1367,8 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
     if plan.filters and plan.filters[0].field == "staff" or plan.intent == "top_staff":
         return _answer_staff(plan, sales, evidence)
     if plan.filters and plan.filters[0].field in GROUP_FIELDS:
+        if plan.intent == "top_products":
+            return _answer_product_ranking(plan, sales, cache.get("ranking_eligible"), evidence)
         return _answer_group(plan, sales, evidence)
     if plan.filters and plan.filters[0].field in PAYMENT_FIELDS:
         return _answer_payment(plan, sales, evidence)
@@ -1469,30 +1477,61 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return Candidate("date", evidence["result"], 1.0, "", evidence)
     if plan.intent != "top_products":  # unreachable while INTENTS is checked; keep explicit
         return Candidate(reason=f"Intent {plan.intent!r} not supported", evidence=evidence)
-    eligible = cache.get("ranking_eligible")
+    return _answer_product_ranking(plan, sales, cache.get("ranking_eligible"), evidence)
+
+
+def _answer_product_ranking(plan: Plan, sales: list[Sale], eligible: frozenset[int] | None,
+                            evidence: dict[str, Any]) -> Candidate:
     ranked_rows = select_valid(ranking_candidates(sales, eligible), plan.start, plan.end)
-    evidence["ranking_rows"] = len(ranked_rows)
-    if not ranked_rows or any(s.quantity_base is None or not s.product_id or not s.product_name
-                              for s in ranked_rows):
-        return Candidate(reason="Ranking needs explicit base quantities and product ids/names",
-                         evidence=evidence)
-    ranking = product_ranking(ranked_rows)
-    # ``eligible`` (sale indices from the adapter lineage) can be large: log its size only.
+    window = f"date.fromisoformat({plan.start.isoformat()!r}), date.fromisoformat({plan.end.isoformat()!r})"
     candidates = "ranking_candidates(sales, None)" if eligible is None else \
         "ranking_candidates(sales, eligible)"
+    selection = f"select_valid({candidates}, {window})"
+    sources = [ranking_candidates, select_valid]
+    if plan.filters:
+        item = plan.filters[0]
+        if any(not fold(s.product_group or "") for s in ranked_rows):
+            return Candidate(reason="A ranked item's product group is unknown", evidence=evidence)
+        ranked_rows = select_group(ranked_rows, item.field, item.value)
+        selection = f"select_group({selection}, {item.field!r}, {item.value!r})"
+        sources.append(select_group)
+    if plan.unit:
+        if any(not fold(s.base_unit or "") for s in ranked_rows):
+            return Candidate(reason="A ranked item's base unit is unknown", evidence=evidence)
+        ranked_rows = select_base_unit(ranked_rows, plan.unit)
+        selection = f"select_base_unit({selection}, {plan.unit!r})"
+        sources.append(select_base_unit)
+        evidence["unit"] = plan.unit
+
+    by_revenue = plan.rank_by == "revenue"
+    evidence["ranking_rows"] = len(ranked_rows)
+    if not ranked_rows or any(not s.product_id or not s.product_name
+                              or (not by_revenue and s.quantity_base is None) for s in ranked_rows):
+        reason = ("Ranking needs product ids/names and rows in scope" if by_revenue else
+                  "Ranking needs explicit base quantities and product ids/names")
+        return Candidate(reason=reason, evidence=evidence)
+    ranking = product_ranking(ranked_rows, by_revenue)
+    metric = "revenue" if by_revenue else "quantity_base"
+    argument = ", by_revenue=True" if by_revenue else ""
+    # ``eligible`` can be large: log its size only.
     if eligible is not None:
         evidence["inputs"]["ranking_eligible_rows"] = len(eligible)
     answer = [name for _, name, _ in ranking[:plan.top_k]]
     result = answer[0] if plan.top_k == 1 else answer
     evidence.update(
-        calculation="sum(quantity_base) by product_id, descending; ties by id",
-        code=_code(f"product_ranking(select_valid({candidates}, {window}))[:{plan.top_k}]",
-                   ranking_candidates, select_valid, product_ranking),
+        calculation=f"sum({metric}) by product_id, descending; ties by id",
+        code=_code(f"product_ranking({selection}{argument})[:{plan.top_k}]",
+                   *sources, product_ranking),
         # One row past k shows whether the boundary is a tie.
-        ranking=[{"product_id": key, "product_name": name, "quantity_base": str(quantity)}
-                 for key, name, quantity in ranking[:plan.top_k + 1]],
+        ranking=[{"product_id": key, "product_name": name, metric: str(value)}
+                 for key, name, value in ranking[:plan.top_k + 1]],
         result=result)
     return Candidate("string" if plan.top_k == 1 else "list", result, 1.0, "", evidence)
+
+
+def select_base_unit(sales: list[Sale], unit: str) -> list[Sale]:
+    key = fold(unit)
+    return [s for s in sales if fold(s.base_unit or "") == key]
 
 
 def _answer_price_effect(plan: Plan, sales: list[Sale], evidence: dict[str, Any], window: str,

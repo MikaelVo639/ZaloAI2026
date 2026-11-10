@@ -92,6 +92,9 @@ def _package_period(text: str, today: date, rules: Rules) -> Plan | bool:
     return Plan(intent, start, min(end, today), evidence=_rows(rules, *used))
 
 
+_TOP_SELLING = r"(?:ban chay|ban duoc nhieu|ban duoc nhiu|ban nhieu|ban nhiu|chay) nh(?:at|ut)"
+
+
 # (intent, rule feature that must be enabled, pattern, fragments also removed). First match
 # wins, so specific intents come before the generic "doanh thu" / "số đơn" ones.
 _INTENTS = (
@@ -110,7 +113,7 @@ _INTENTS = (
     ("top_products", None,
      r"(?:(?P<count>\d+|(?<=\btop )(?:hai|ba|bon|nam|sau)) )?"
      r"(?:mat hang|san pham|hang|mon)(?: nao)? "
-     r"(?:ban chay|ban duoc nhieu|ban duoc nhiu|ban nhieu|ban nhiu|chay) nh(?:at|ut)\b",
+     rf"{_TOP_SELLING}\b",
      (r"\bla (?:nhung )?(?:mon|hang) nao$",)),
     ("quantity", "unit_quantity",
      rf"\bban(?: ra| duoc)?(?: tong cong)? {_AMOUNT} (?P<unit>[a-z0-9]+)\b"
@@ -124,7 +127,14 @@ _INTENTS = (
 )
 
 
-_DAY_QUESTION = re.compile(r"\b(?:(?:roi )?vao )?(?:ngay ?|hom )(?:nao|mo)\b")
+_GROUP_PRODUCT_RANK = (
+    r"(?:(?<![/\d])(?P<group_count>\d+|(?<=\btop )(?:hai|ba|bon|nam|sau)) )?"
+    r"(?:mat hang|san pham|hang|mon)(?: nao)? "
+    r"(?:(?P<by_revenue>(?:co )?(?:doanh thu|dthu) (?:(?:cao|lon|nhieu) )?nh(?:at|ut))"
+    r"|ban (?:duoc )?(?:nhieu|nhiu) (?P<rank_unit>[a-z]+) nh(?:at|ut)"
+    rf"|{_TOP_SELLING})\b"
+)
+_DAY_QUESTION = re.compile(r"\b(?:(?:roi )?vao )?(?:ngay ?|hom |bua )(?:nao|mo)\b")
 
 
 def _best_day(text: str) -> str | None:
@@ -137,10 +147,11 @@ def _best_day(text: str) -> str | None:
         return None
     reduced = reduced[:revenue.start()] + " " + reduced[revenue.end():]
     # "thấp nhất" leaves "thap" behind, so the leftover check rejects it.
-    best = re.search(r"\b(?:ban dat|cao|nhieu) nh(?:at|ut)\b|\bnhat\b", reduced)
+    best = re.search(r"\b(?:(?:ban dat|(?:len )?cao|nhieu) )?nh(?:at|ut)\b", reduced)
     if not best:
         return None
-    return reduced[:best.start()] + " " + reduced[best.end():]
+    rest = reduced[:best.start()] + " " + reduced[best.end():]
+    return re.sub(r"\bngay ma\b", " ", rest, count=1)
 
 
 def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
@@ -309,10 +320,13 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
             used.append("best_staff")
     elif best_day is not None:
         intent, text = "best_day", best_day
-    unit = ""
+    unit = rank_by = ""
+    product_group = bool(group and group[1] == "product_group")
     for kind, feature, pattern, extras in () if intent else _INTENTS:
         if kind == "average_order" and group and group[1] == "customer_group":
             pattern = rf"(?:{pattern}|{_GROUP_AVERAGE})"
+        if kind == "top_products" and product_group:
+            pattern = _GROUP_PRODUCT_RANK
         match = re.search(pattern, text)
         if not match:
             continue
@@ -325,10 +339,23 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
             return None
         intent = kind
         if kind == "top_products":
-            count = match.group("count") or "1"
+            parts = match.groupdict()
+            count = parts.get("group_count") or parts.get("count") or "1"
             top_k = int(count) if count.isdecimal() else _COUNT_WORD[count]
-            if not rules.quantity_ranking or not 1 <= top_k <= 100:
+            unit = parts.get("rank_unit") or ""
+            rank_by = "revenue" if parts.get("by_revenue") or unit in {"tien", "dong"} else ""
+            if rank_by:
+                unit = ""
+            if not 1 <= top_k <= 100 or (not rank_by and not rules.quantity_ranking):
                 return None
+            if product_group:
+                if not (rules.product_names and rules.ties_by_code):
+                    return None
+                used.extend(("product_names", "ties_by_code"))
+            if unit:
+                if unit in _NOT_UNITS or not rules.unit_quantity:
+                    return None
+                used.append("unit_quantity")
         middle = match.groupdict().get("mid") or ""
         text = text[:match.start()] + " " + middle + " " + text[match.end():]
         for extra in extras:
@@ -350,9 +377,10 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
             leftover = again[2]
     if labelled and intent != "revenue":
         return None
-    if group and intent != "revenue" and not (
-        group[1] == "customer_group" and intent == "average_order" and not share
-    ):
+    if group and intent != "revenue" and (
+            share or (group[1], intent) not in {
+                ("customer_group", "average_order"), ("product_group", "top_products")
+            }):
         return None
     if (shift or staff) and intent not in ("revenue", "order_count"):
         return None
@@ -377,7 +405,7 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
                 "change_percent" if reference else ("shift_change_percent" if shift_compare
                                                     else ("share" if share else "")),
                 tuple(filters),
-                unit=unit, shape="by_filter" if pair else "")
+                unit=unit, shape="by_filter" if pair else "", rank_by=rank_by)
 
 
 def _rows(rules: Rules, *features: str) -> tuple[str, ...]:

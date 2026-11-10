@@ -136,13 +136,25 @@ _AMOUNT_BOUNDARY = r"(?<![\w.,/+\-−])(?<![\d.,+\-−] )"
 _GROUPED_DONG = re.compile(rf"{_AMOUNT_BOUNDARY}(\d{{1,3}}(?:[. ]\d{{3}})+) ?[đd]\b", re.I)
 _MILLIONS = re.compile(rf"{_AMOUNT_BOUNDARY}(\d+) (?:triệu|trieu)(?: (?:đồng|dong|đ|d))?\b"
                        r"(?! +\d)", re.I)
-# In an explicit lower threshold, a whole number with k is thousands of đồng.
-_THOUSANDS_THRESHOLD = re.compile(r"\b(?:từ|tu) +(\d+)k +(?=(?:trở|tro) (?:lên|len|lne)\b)")
+# Parse shorthand in a lower threshold before folding punctuation or diacritics.
+_MONEY_THRESHOLD = re.compile(
+    r"\b(?:từ|tu) +(\d+)(k| +củ|tr[0-9]) +(?=(?:trở|tro) (?:lên|len|lne)\b)"
+)
+
 _ASK_COUNT = r"(?:bao nhieu|bnhiu|bn|nhieu|nhiu|may)"
 _STORE_SUBJECT = re.compile(r"\bquan(?= (?:ban|co|duoc|bi|chot|len|thu|dat|da)\b)")
 _COMPARISON_CUE = r"(?:tang hay giam|tang giam|thay doi|tang truong|hon hay kem)"
 _COLLOQUIAL_ENDING = re.compile(r"\b((?:thế|hè|rứa|nghe|nghen|za)"
                                   r"(?: (?:thế|hè|rứa|nghe|nghen|za))*)\W*$")
+
+
+def _threshold_dong(match: re.Match[str]) -> str:
+    digits, suffix = match.groups()
+    if suffix == "k":
+        return f"tu {digits}000 dong "
+    if suffix.startswith("tr"):
+        return f"tu {digits}{suffix[-1]}00000 dong "
+    return f"tu {digits}000000 dong "
 
 
 def _store_subject(text: str, raw: str, names: tuple[str, ...]) -> str:
@@ -175,7 +187,7 @@ def _closing_wording(text: str, raw: str) -> str:
     suffix = re.escape(fold(ending[1]))
     slot = r"(?:gi|j|nao|phan tram|don(?: hang)?|tien|roi|khong|ko|chua)"
     if re.search(r"\b(?:doanh thu|dthu|tien|don|phan tram)\b", text):
-        slot = rf"(?:{slot}|{_ASK_COUNT})"
+        slot = rf"(?:{slot}|{_ASK_COUNT}|nh(?:at|ut))"
     return re.sub(rf"\b({slot}) {suffix}$", r"\1", text)
 
 
@@ -185,7 +197,7 @@ def _everyday_wording(text: str, original: str, value: str, names: tuple[str, ..
     amounts = _GROUPED_DONG.sub(lambda m: m[1].replace(".", " ") + " dong", raw)
     amounts = _MILLIONS.sub(lambda m: f"{int(m[1]):,}".replace(",", " ") + " 000 000 dong",
                             amounts)
-    amounts = _THOUSANDS_THRESHOLD.sub(lambda m: f"tu {m[1]}000 dong ", amounts)
+    amounts = _MONEY_THRESHOLD.sub(_threshold_dong, amounts)
     if amounts != raw:
         text = normalize_question(amounts)
     text = _store_subject(text, raw, names)
