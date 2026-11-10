@@ -96,6 +96,31 @@ class _Shop(unittest.TestCase):
 
 
 class CustomerIdentityCoverageTests(_Shop):
+    def test_multisheet_identity_proof_reuses_the_matched_tables(self):
+        from openpyxl import load_workbook
+
+        header = FLAT_HEADER[:-1]
+        readme = FLAT_README.replace("ban_hang.csv", "ban_hang.xlsx").replace(
+            "- **Đối tác**: tên khách (Khách lẻ nếu không lưu)\n", "")
+        first = ["1", "2026-01-05", "hoàn thành", "Hàng A", "1", "hộp", "50", "1"]
+        second = ["2", "2026-01-06", "hoàn thành", "Hàng A", "2", "hộp", "100", "2"]
+        for extra_column in (False, True):
+            with self.subTest(extra_column=extra_column):
+                sources = {"ban_hang.xlsx": {
+                    "T1": [["Sổ bán hàng"], header, first],
+                    "T2": [["Sổ bán hàng"], header + (["Người mua"] if extra_column else []),
+                           second + (["A"] if extra_column else [])],
+                }}
+                catalog = self.shop(readme, sources, business=f"case_{extra_column}")
+                with patch("openpyxl.load_workbook", wraps=load_workbook) as opened:
+                    sales, evidence, _ = load_readme_sales(catalog, RULEBOOK)
+                self.assertEqual([sale.order_id for sale in sales], ["1", "2"])
+                # One header preview for both sheets, followed by their two row reads.
+                self.assertEqual(opened.call_count, 3)
+                self.assertTrue(all(call.kwargs["read_only"] for call in opened.call_args_list))
+                self.assertEqual(evidence["tables_without_customer_identity"],
+                                 [] if extra_column else ["ban_hang.xlsx::T1", "ban_hang.xlsx::T2"])
+
     def test_unanswerable_requires_a_complete_schema_and_split_rule(self):
         absence_rule = ("- Không có dữ liệu khác với bằng 0: shop không ghi loại thông tin "
                         "câu hỏi cần, thì không trả lời được, không phải 0.\n")

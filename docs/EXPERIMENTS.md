@@ -568,4 +568,54 @@ Trên 119 câu của `biz_102`, Windows chấm được **119 đúng, 0 sai, 0 a
 So với lượt `068f9b1`, cả 114 câu đúng cũ đều được giữ và 5 câu còn lại đã
 đúng. Lượt predict mất 61,4 giây, đỉnh bộ nhớ cam kết 394,6 MiB với trần
 512 MiB. Smoke qua, unittest chạy 444 ca với 1 skip.
-Full train của code này chờ slot Kaggle. Tài khoản đang dùng đủ 5 phiên CPU.
+Code này chưa có lượt full train trong các artifact đã thu thập.
+
+### Năm lượt Kaggle đã hoàn tất và kiểm tra hồi quy
+
+Các lượt train dưới đây dùng cùng ZIP, rulebook và config baseline. Chấm bằng
+local proxy, ghép theo đúng 3.000 ID.
+
+| Code | Đúng | Sai | Abstain | ID tăng đúng so với main | ID đúng bị mất |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Main `c6283d2` | 2.681 | 0 | 319 | — | — |
+| `068f9b1` | 2.580 | 0 | 420 | 3 | 104 |
+| `4c8f670` | 2.579 | 0 | 421 | 3 | 105 |
+
+A/B 355 câu trên ba shop giữ đủ 114 câu đúng ở `biz_102`, với thời gian cả
+shop từ 313,7 xuống 174,2 giây. `biz_130` tăng từ 106 lên 109 câu đúng nhờ
+ba ca thiếu danh tính. `biz_112` chuyển từ 104 đúng, 14 abstain thành 118
+abstain, có 77 log ghi timeout khi nạp dữ liệu. Đây cũng là 104 ID bị mất
+trong cả hai lượt full train thử. Một ID giá nhập tại `biz_106` mất thêm ở
+`4c8f670`. Shop này không dùng nhánh ưu tiên bảng quy đổi, là đường code duy
+nhất thay đổi giữa hai lượt thử. Artifact không có log theo câu để xác định
+nguyên nhân ở shop này.
+
+Ở bảy biến thể của main `c6283d2`, sai đều bằng 0. So với `ea4ba09`, biến thể
+năm ngắn mất 53 ID đúng, gồm 52 ở `biz_102`, và cách viết chat mất 115 ID,
+gồm 114 ở `biz_102`. Có bốn biến thể khác mất một ID tại `biz_106`. Public
+của main có 353 câu có đáp án trên 1.000, đọc được 14 shop. Public chưa có
+nhãn để chấm độ đúng.
+
+Bản sửa sau đối chiếu gom dò header các sheet cùng workbook và dùng lại
+mapping đã chọn khi kiểm thiếu danh tính khách. Giữ ngưỡng timeout hiện có.
+Trên catalog thật của `biz_112`, số lần mở workbook để phân loại schema giảm
+16 xuống 2, từ 26,740 xuống 1,772 giây, cùng tập và thứ tự bảng. Kiểm bằng
+header nguồn xác nhận đủ 17/17 bảng ở `biz_112` và 3/3 ở `biz_130`. Smoke và
+445 test chạy trên Windows, có 1 skip, đỉnh job 114,6 MiB dưới trần 256 MiB.
+Phiên kiểm 118 câu trên dữ liệu thật được bỏ qua do RAM trống dưới ngưỡng
+đã đặt. Chưa có điểm sau sửa cho 118 câu này hay full train của head #46.
+Lượt 119/119 ở `biz_102` là phép đo cục bộ ở `6d9c8a9`.
+
+Trong 319 abstain của main, 68 có nhãn `unanswerable` và 251 có đáp án cụ thể.
+Phân loại sơ bộ theo từ khóa cho 62 ca giá bán/đơn giá, 36 công nợ, 29 đơn
+vị bán, 26 nhập hàng, 23 nhóm hàng/doanh thu, 20 tồn kho/lô và 99 chưa gán
+chủ đề. `biz_123` có nhiều abstain nhất (44), trong đó 20 có từ khóa công
+nợ và 10 có từ khóa nhập hàng. Kiểm schema SQLite ở chế độ chỉ đọc xác nhận
+có các cột công nợ và nhập hàng mà README nêu. Probe adapter vẫn trả
+`partial` cho mapping công nợ và không chọn được bảng phiếu nhập. Đây là
+đầu mối mapping cần kiểm tiếp trước khi thêm mẫu câu.
+
+[Full train main](https://www.kaggle.com/code/trngquangbodng/datamate-r3-c6283d2-train-cpu) ·
+[Full train 068f9b1](https://www.kaggle.com/code/trngquangbodng/datamate-r3-068f9b1-train-cpu) ·
+[Full train 4c8f670](https://www.kaggle.com/code/trngquangbodng/datamate-r3-4c8f670-train-cpu) ·
+[A/B ba shop](https://www.kaggle.com/code/trngquangbodng/datamate-r3-4c8f670-identity-ab-cpu)

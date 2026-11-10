@@ -25,9 +25,11 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections import Counter, defaultdict
+from contextlib import ExitStack, closing
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from itertools import groupby
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -294,23 +296,34 @@ _PHONE_LEDGER_COLUMNS = {
 }
 
 
-def _header_names(table: Table) -> set[str]:
-    """Header of a table, looking below title rows of an xlsx report if needed."""
-    names = set(table.columns)
-    if table.path.suffix.lower() != ".xlsx" or len(names - {c for c in names
-                                                           if c.startswith("_empty_")}) > 2:
-        return names
-    from openpyxl import load_workbook
+def _table_headers(tables: Iterable[Table]) -> list[tuple[Table, set[str]]]:
+    """Look below title rows while opening at most one workbook at a time."""
+    headers = []
+    for path, group in groupby(tables, key=lambda table: table.path):
+        with ExitStack() as resources:
+            book = None
+            for table in group:
+                names = set(table.columns)
+                if (path.suffix.lower() == ".xlsx"
+                        and sum(not name.startswith("_empty_") for name in names) <= 2):
+                    if book is None:
+                        from openpyxl import load_workbook
 
-    book = load_workbook(table.path, read_only=True, data_only=True, keep_links=False)
-    try:
-        for values in book[table.name].iter_rows(max_row=_HEADER_SCAN_ROWS, values_only=True):
-            cells = {str(v).strip() for v in values if v is not None and str(v).strip()}
-            if len(cells) > 2:
-                return cells
-    finally:
-        book.close()
-    return names
+                        book = resources.enter_context(closing(load_workbook(
+                            path, read_only=True, data_only=True, keep_links=False)))
+                    rows = book[table.name].iter_rows(max_row=_HEADER_SCAN_ROWS, values_only=True)
+                    with closing(rows):
+                        for values in rows:
+                            cells = {str(v).strip() for v in values if v is not None and str(v).strip()}
+                            if len(cells) > 2:
+                                names = cells
+                                break
+                headers.append((table, names))
+    return headers
+
+
+def _header_names(table: Table) -> set[str]:
+    return _table_headers((table,))[0][1]
 
 
 def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Section]:
@@ -321,8 +334,8 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
     """
     text = fold(catalog.readme)
     covered = {filename_key(s.file) for s in documented}
-    headers = [(table, _header_names(table)) for table in catalog.tables
-               if filename_key(table.path.name) not in covered]
+    headers = _table_headers(table for table in catalog.tables
+                             if filename_key(table.path.name) not in covered)
 
     # Handwritten phone ledgers document the semantics in their conventions instead of
     # repeating a column dictionary.  Require the complete convention and exact header
@@ -535,7 +548,7 @@ def parse_day(value: Any, sheet: str = "") -> date:
 # ---------------------------------------------------------------- tables
 
 def _customer_identity_absence(
-    catalog: Catalog, headers: dict[tuple[Path, str], set[str]],
+    catalog: Catalog, roles: dict[str, _Role], headers: dict[tuple[Path, str], set[str]],
 ) -> list[str]:
     """Prove absence only for a catalog fully described by known non-customer columns."""
     non_customer = {
@@ -550,15 +563,13 @@ def _customer_identity_absence(
         "định mức tồn tối thiểu", "định mức tồn tối đa",
     }
     covered = set()
+    selected = [pair for entry in roles.values() for pair in entry.tables]
     for section in parse_sections(catalog.readme):
         for meaning in section.columns.values():
             if (meaning_field(meaning) not in non_customer
                     and fold(meaning) not in {"gia ban hien tai", "gia von"}):
                 return []
-        try:
-            tables = _matching_tables(catalog, section)
-        except ReadmeSalesError:
-            return []
+        tables = [table for documented, table in selected if documented == section]
         if not tables:
             return []
         fields = section.fields.keys()
@@ -604,8 +615,8 @@ def _matching_tables(catalog: Catalog, section: Section) -> list[Table]:
                if t.path in files and (section.sheet is None or t.name == section.sheet)]
     if section.sheet is None and len(matches) > 1:
         documented_columns = set(section.columns)
-        compatible = [table for table in matches
-                      if documented_columns <= _header_names(table)]
+        compatible = [table for table, header in _table_headers(matches)
+                      if documented_columns <= header]
         if compatible:
             matches = compatible
     return matches
@@ -1205,7 +1216,8 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         "readme_conventions": list(conventions.evidence),
     }
     if headers is not None:
-        evidence["tables_without_customer_identity"] = _customer_identity_absence(catalog, headers)
+        evidence["tables_without_customer_identity"] = _customer_identity_absence(
+            catalog, roles, headers)
     if fee_rows and rules.service_fee is None:
         eligible = set()
     return sales, evidence, frozenset(eligible)
