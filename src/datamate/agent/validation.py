@@ -13,6 +13,8 @@ ANSWER_TYPES = {
     "revenue": "number", "order_count": "number", "average_order": "number",
     "cancel_count": "number", "cancel_rate": "percent", "best_day": "date",
     "quantity": "number", "count_where": "number",
+    "top_product_brand": "string", "average_amount_due": "number",
+    "average_phone_revenue": "number",
     "revenue_increasing": "boolean", "top_debt_customers": "table",
     "debt_total": "number", "debt_customer_count": "number", "debt_collected": "number",
     "debt_flow": "list", "debt_age_buckets": "list", "top_staff": "string", "stock": "number", "stock_split": "list",

@@ -15,14 +15,14 @@ from datamate.semantics.planner import plan_question
 from datamate.semantics.rules import read_rules
 
 
-def answer(planned, sales):
+def answer(planned, sales, book=""):
     catalog = Catalog("synthetic", "", ())
     cache = {
         "sales_key": compute._catalog_key(catalog),
-        "sales_rulebook": "",
+        "sales_rulebook": book,
         "sales": (sales, {"tables": [], "sales_rows": len(sales)}),
     }
-    return compute.answer_plan(cache, catalog, planned)
+    return compute.answer_plan(cache, catalog, planned, book)
 
 
 class RankingThresholdWordingTests(unittest.TestCase):
@@ -126,6 +126,16 @@ class RankingThresholdWordingTests(unittest.TestCase):
         self.assertEqual((result.threshold.subject, result.threshold.value),
                          ("order", Decimal(2_500_000)))
 
+    def test_day_dialect_and_threshold_preface_preserve_count_subject(self):
+        day = plan("Tháng 5/2026 có mấy bữa doanh thu từ 750k trở lên?")
+        order = plan("Tôi định đặt ngưỡng thưởng, tháng 5/2026 có mấy đơn doanh thu từ "
+                     "750k trở lên?")
+        self.assertEqual((day.threshold.subject, order.threshold.subject), ("day", "order"))
+        self.assertEqual(day.threshold.value, order.threshold.value)
+        self.assertIsNone(plan("Tháng 5/2026 có bao nhiêu bữa tối doanh thu từ 750k trở lên?"))
+        self.assertIsNone(plan("Tôi định đặt ngưỡng riêng cho khách lẻ, tháng 5/2026 có mấy "
+                               "đơn doanh thu từ 750k trở lên?"))
+
     def test_money_shorthand_does_not_drop_ambiguous_units_or_conditions(self):
         question = "Tháng 5/2026 có mấy đơn có doanh thu từ {} trở lên?"
         for amount in ("1,5k", "1, 5k", "-500k", "500kg", "3tr75", "11 cũ"):
@@ -176,6 +186,7 @@ class RankingThresholdWordingTests(unittest.TestCase):
                                  ("top_products", rank_by, unit))
                 self.assertEqual(result.filters[0].value, "Đồ uống")
                 self.assertEqual(answer(result, sales).answer, expected)
+                self.assertEqual(scoped(f"Tháng 5/2026 nhóm Đồ uống thì {phrasing}?"), result)
                 self.assertIsNone(scoped(text, rulebook("ties") + GROUP))
 
         text = "Trong nhóm Đồ uống tháng 5/2026 mặt hàng nào bán được nhiều ly nhất?"

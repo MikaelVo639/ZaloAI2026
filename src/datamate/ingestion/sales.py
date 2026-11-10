@@ -60,6 +60,8 @@ class Sale:
     # because a shop may sell the same product family in several brands or sizes.
     product_brand: str | None = None
     product_size: str | None = None
+    phone_item_kind: str | None = None
+    order_amount_due: Decimal | None = None
 
 
 def price_per_base_unit(price: Decimal, sold: Decimal | None,

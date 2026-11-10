@@ -150,6 +150,10 @@ def meaning_field(meaning: str) -> str | None:
     # (product).  Keep this check before fold().
     if raw == "hãng":
         return "product_brand"
+    if raw == "tiền phải trả cả đơn sau giảm trừ":
+        return "order_amount_due"
+    if raw == "loại hàng điện thoại":
+        return "phone_item_kind"
     if (raw in {"số / size", "số/size", "size", "kích cỡ"}
             or (raw.startswith("số của sữa") and "size" in raw)):
         return "product_size"
@@ -289,6 +293,9 @@ _BANHANG_COMBINED = (
         "Mã NV bán": "mã nhân viên bán", "Giờ tạo đơn": "giờ đặt đơn",
         "Hình thức thanh toán": "hình thức thanh toán",
     }),
+    ({"Mã H.hóa", "Tên hàng hóa", "Nhóm hàng", "DVT"}, {
+        "Tên hàng hóa": "tên hàng", "Nhóm hàng": "nhóm hàng", "DVT": "đơn vị cơ bản",
+    }),
 )
 POS_PROFILES = (
     ("pos_export_kiotviet.v1", _KIOTVIET),
@@ -355,9 +362,22 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
     )
     phone_required = set(_PHONE_LEDGER_COLUMNS)
     if phone_evidence:
-        sections = [Section(table.path.name, table.name, _PHONE_LEDGER_COLUMNS,
-                            origin="phone_ledger_conventions.v1")
-                    for table, header in headers if phone_required <= header]
+        sections = []
+        for table, header in headers:
+            if phone_required <= header:
+                columns = dict(_PHONE_LEDGER_COLUMNS)
+                if "Khách trả" in header and "da bot va da tru tien thu may cu" in text:
+                    columns["Khách trả"] = "tiền phải trả cả đơn sau giảm trừ"
+                sections.append(Section(table.path.name, table.name, columns,
+                                        origin="phone_ledger_conventions.v1"))
+        ledgers = {section.file for section in sections}
+        if "ghi tat cho ten day du va loai hang" in text:
+            for table, header in headers:
+                if (table.path.name in ledgers and fold(table.name) == "ghi tat"
+                        and {"Ghi tắt", "Tên hàng", "Loại"} <= header):
+                    sections.append(Section(table.path.name, table.name, {
+                        "Ghi tắt": "tên hàng", "Tên hàng": "tên", "Loại": "loại hàng điện thoại",
+                    }, origin="phone_ledger_conventions.v1"))
         if sections:
             return sections
 
@@ -368,6 +388,8 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
         for table, header in headers:
             for required, meanings in lists:
                 if required <= header:
+                    if "Nhóm hàng" in meanings and f"`{table.name}`" not in catalog.readme:
+                        continue
                     columns = {c: m for c, m in meanings.items() if c in header}
                     if "thanh tien sau giam" in map(fold, columns.values()):
                         cost = sale_cost_column(catalog.readme, table, header)
@@ -708,7 +730,7 @@ def _classify(sections: list[Section], catalog: Catalog) -> dict[str, _Role]:
             role = "customers"
         elif (fields & {"product_name", "name"}
               and fields & {"product_id", "base_unit", "product_group",
-                            "product_brand", "product_size"}
+                            "product_brand", "product_size", "phone_item_kind"}
               and not fields & {"order_id", "quantity", "amount"}):
             role = "products"
         else:
@@ -723,7 +745,7 @@ def _classify(sections: list[Section], catalog: Catalog) -> dict[str, _Role]:
         entry.sections.append(section)
         entry.tables.extend((section, table) for table in tables)
     for role, entry in roles.items():
-        signatures = {frozenset(s.fields) for s in entry.sections}
+        signatures = {frozenset(s.fields) - {"order_amount_due"} for s in entry.sections}
         if len(signatures) != 1:
             raise ReadmeSalesError("AMBIGUOUS_ROLE", "Files of one role disagree on fields",
                                    role=role, sources=[s.label for s in entry.sections])
@@ -911,11 +933,14 @@ def _products_index(
                                    role="products")
         record = {"id": key, "name": None if _blank(name) else str(name).strip(),
                   "base_unit": row.get("base_unit"), "group": row.get("product_group"),
-                  "brand": row.get("product_brand"), "size": row.get("product_size")}
+                  "brand": row.get("product_brand"), "size": row.get("product_size"),
+                  "phone_item_kind": row.get("phone_item_kind")}
         if key is not None:
             by_id[key] = record
-        if record["name"]:
-            name_key = _name_key(record["name"])
+        names = {record["name"]}
+        if record["phone_item_kind"]:
+            names.add(_text(row.get("product_name")))  # the phone catalogue documents the abbreviation
+        for name_key in {_name_key(item) for item in names if item}:
             if name_key in by_name:
                 ambiguous.add(name_key)
             by_name[name_key] = record
@@ -1255,6 +1280,8 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
                                               or line.get("product_group")),
                           product_brand=_text((product or {}).get("brand")),
                           product_size=_text((product or {}).get("size")),
+                          phone_item_kind=_text((product or {}).get("phone_item_kind")),
+                          order_amount_due=optional_sale_cost(line.get("order_amount_due")),
                           **context))
         if not is_fee and count_keys:
             eligible.add(index)
