@@ -849,6 +849,44 @@ def _customers_index(roles: dict[str, _Role]) -> dict[str, dict[str, str | None]
     return customers
 
 
+def enrich_sales_from_readme_products(catalog: Catalog, sales: list[Sale]
+                                      ) -> tuple[list[Sale], dict[str, int]]:
+    """Attach documented product unit/group context to an otherwise valid flat export.
+
+    This does not alter the flat adapter's row grain, amounts, statuses, identifiers or
+    quantities.  A product is enriched only through a unique README-described product
+    parent, joined by code when the sale has one and otherwise by an unambiguous name.
+    """
+    sections = parse_sections(catalog.readme)
+    sections += profile_sections(catalog, sections)
+    roles = _classify(sections, catalog)
+    if "products" not in roles:
+        return sales, {"matched_by_code": 0, "matched_by_name": 0, "unmatched": len(sales)}
+    by_id, by_name = _products_index(roles)
+    counts = Counter()
+    enriched: list[Sale] = []
+    for sale in sales:
+        product = by_id.get(sale.product_id or "")
+        if product is not None:
+            counts["matched_by_code"] += 1
+        elif sale.product_name:
+            product = by_name.get(_name_key(sale.product_name))
+            counts["matched_by_name" if product is not None else "unmatched"] += 1
+        else:
+            counts["unmatched"] += 1
+        if product is None:
+            enriched.append(sale)
+            continue
+        base_unit = (_name_key(product["base_unit"])
+                     if not _blank(product.get("base_unit")) else sale.base_unit)
+        enriched.append(replace(
+            sale,
+            base_unit=sale.base_unit or base_unit,
+            product_group=sale.product_group or _text(product.get("group")),
+        ))
+    return enriched, dict(counts)
+
+
 def joined_customer_sources(
     catalog: Catalog, orders: Table,
 ) -> tuple[dict[str, str], dict[str, dict[str, str | None]], str | None]:

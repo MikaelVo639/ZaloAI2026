@@ -160,6 +160,22 @@ _DEBT_PROFILES = (
             "Customer ID": "mã khách", "ten_kh": "tên khách",
         }),
     )),
+    ("debt_pos_sqlite.v1", (
+        ({"MaHoaDon", "NgayLap", "TinhTrang", "TongThanhToan", "PhuongThucTT"}, {
+            "MaHoaDon": "mã đơn", "NgayLap": "ngày bán",
+            "TinhTrang": "trạng thái đơn", "TongThanhToan": "số khách phải trả cho cả đơn",
+            "PhuongThucTT": "hình thức thanh toán", "KenhBanHang": "kênh bán",
+            "MaKhachHang": "mã khách", "KhachDaTra": "đã thanh toán",
+            "ConPhaiThu": "còn nợ cuối dữ liệu",
+        }),
+        ({"MaHoaDon", "NgayGioThu", "SoTienThu"}, {
+            "MaHoaDon": "mã đơn", "NgayGioThu": "thời điểm thu",
+            "SoTienThu": "số tiền trả lần đó",
+        }),
+        ({"MaKhachHang", "TenGoi"}, {
+            "MaKhachHang": "mã khách", "TenGoi": "tên khách",
+        }),
+    )),
 )
 
 _DEBT_PROFILE_CANDIDATES = {
@@ -174,6 +190,12 @@ _DEBT_PROFILE_CANDIDATES = {
         ("payments", {"Mã bill", "Số tiền thu"}, _DEBT_PROFILES[1][1][1][1]),
         ("payments", {"Mã bill", "Thời gian thu"}, _DEBT_PROFILES[1][1][1][1]),
         ("payments", {"Thời gian thu", "Số tiền thu"}, _DEBT_PROFILES[1][1][1][1]),
+    ),
+    "debt_pos_sqlite.v1": (
+        ("orders", {"MaHoaDon", "TongThanhToan"}, _DEBT_PROFILES[2][1][0][1]),
+        ("payments", {"MaHoaDon", "SoTienThu"}, _DEBT_PROFILES[2][1][1][1]),
+        ("payments", {"MaHoaDon", "NgayGioThu"}, _DEBT_PROFILES[2][1][1][1]),
+        ("payments", {"NgayGioThu", "SoTienThu"}, _DEBT_PROFILES[2][1][1][1]),
     ),
 }
 
@@ -665,12 +687,7 @@ def _money_unit(readme: str) -> tuple[str, Decimal, tuple[str, ...]]:
         r"(?:deu )?(?:duoc )?(?:co don vi|(?:tinh|ghi|luu) (?:bang|theo)))"
         r"(?: *[:=] *| +)(?:la +)?"
     )
-    hint = re.compile(
-        r"\bdon vi tien\b|\btien te\b|"
-        r"\b(?:cot tien|so tien|tien)\b.*\b(?:don vi|(?:tinh|ghi|luu) (?:bang|theo))\b|"
-        r"\b(?:nghin|ngan|trieu|ty) dong\b|"
-        r"\b(?:vnd|eur|usd|jpy|gbp|cny|krw|aud|cad|cent|xu)\b"
-    )
+    scaled_currency = re.compile(r"\b(?:nghin|ngan|trieu|ty) (?:dong|vnd)\b")
     accepted = {
         "vnd": "vnd", "dong": "vnd",
         "nghin vnd": "thousand_vnd", "ngan vnd": "thousand_vnd",
@@ -680,7 +697,11 @@ def _money_unit(readme: str) -> tuple[str, Decimal, tuple[str, ...]]:
     units: set[str] = set()
     for line in readme.splitlines():
         text = fold(line)
-        if text not in accepted and not hint.search(text) and not declaration.match(text):
+        # Currency words only count in an explicit declaration or scale.  Looking for
+        # bare tokens such as ``xu`` or ``usd`` caused ordinary Vietnamese text (for
+        # example "Xử lý") to be misread as a money-unit declaration.
+        if (text not in accepted and not declaration.match(text)
+                and not scaled_currency.search(text)):
             continue
         evidence.append(line.strip())
         # Keep operators and punctuation in the unit expression until it is validated.

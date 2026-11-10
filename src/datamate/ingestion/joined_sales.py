@@ -665,6 +665,10 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             product_id=product_id,
             product_name=product_name,
             quantity_base=quantity_base,
+            base_unit=(None if _missing(product["base_unit"])
+                       else str(product["base_unit"]).strip()),
+            product_group=(None if _missing(product["category"])
+                           else str(product["category"]).strip()),
             minute=order["minute"],
             staff_id=order["staff_id"],
             customer_id=order["customer_id"],
