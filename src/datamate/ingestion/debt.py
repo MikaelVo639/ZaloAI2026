@@ -161,12 +161,11 @@ _DEBT_PROFILES = (
         }),
     )),
     ("debt_pos_sqlite.v1", (
-        ({"MaHoaDon", "NgayLap", "TinhTrang", "TongThanhToan", "PhuongThucTT"}, {
-            "MaHoaDon": "mã đơn", "NgayLap": "ngày bán",
-            "TinhTrang": "trạng thái đơn", "TongThanhToan": "số khách phải trả cho cả đơn",
-            "PhuongThucTT": "hình thức thanh toán", "KenhBanHang": "kênh bán",
-            "MaKhachHang": "mã khách", "KhachDaTra": "đã thanh toán",
-            "ConPhaiThu": "còn nợ cuối dữ liệu",
+        ({"MaHoaDon", "NgayLap", "TinhTrang", "TongThanhToan", "PhuongThucTT", "KenhBanHang"}, {
+            "MaHoaDon": "mã đơn", "NgayLap": "ngày bán", "TinhTrang": "trạng thái đơn",
+            "TongThanhToan": "số khách phải trả cho cả đơn", "PhuongThucTT": "hình thức thanh toán",
+            "KenhBanHang": "kênh bán", "MaKhachHang": "mã khách",
+            "ConPhaiThu": "còn nợ cuối dữ liệu", "KhachDaTra": "đã thanh toán",
         }),
         ({"MaHoaDon", "NgayGioThu", "SoTienThu"}, {
             "MaHoaDon": "mã đơn", "NgayGioThu": "thời điểm thu",
@@ -233,7 +232,7 @@ def _profile_sections(catalog: Catalog, documented: list[Section],
                     break
             if matched:
                 continue
-            for role, marker, meanings in _DEBT_PROFILE_CANDIDATES[version]:
+            for role, marker, meanings in _DEBT_PROFILE_CANDIDATES.get(version, ()):
                 if marker <= header:
                     found.append(Section(
                         table.path.name, table.name,
@@ -687,7 +686,19 @@ def _money_unit(readme: str) -> tuple[str, Decimal, tuple[str, ...]]:
         r"(?:deu )?(?:duoc )?(?:co don vi|(?:tinh|ghi|luu) (?:bang|theo)))"
         r"(?: *[:=] *| +)(?:la +)?"
     )
-    scaled_currency = re.compile(r"\b(?:nghin|ngan|trieu|ty) (?:dong|vnd)\b")
+    hint = re.compile(
+        r"\bdon vi tien\b|\btien te\b|"
+        r"\b(?:cot tien|so tien|tien) (?:deu )?(?:duoc )?"
+        r"(?:co don vi|(?:tinh|ghi|luu) (?:bang|theo))\b|"
+        r"\b(?:nghin|ngan|trieu|ty) dong\b|"
+        r"\b(?:vnd|eur|usd|jpy|gbp|cny|krw|aud|cad|cent)\b|\bxu\b(?! ly\b)"
+    )
+    # A bare "Đơn vị" can describe products. Treat it as money only when the
+    # declared value starts with a currency or a scale followed by a currency.
+    short_declaration = re.compile(
+        r"^don vi *[:=] *(?:la +)?(?=`?(?:(?:nghin|ngan|trieu|ty) +)?"
+        r"(?:vnd|dong|eur|usd|jpy|gbp|cny|krw|aud|cad|cent|xu)\b)"
+    )
     accepted = {
         "vnd": "vnd", "dong": "vnd",
         "nghin vnd": "thousand_vnd", "ngan vnd": "thousand_vnd",
@@ -696,21 +707,18 @@ def _money_unit(readme: str) -> tuple[str, Decimal, tuple[str, ...]]:
     evidence: list[str] = []
     units: set[str] = set()
     for line in readme.splitlines():
-        text = fold(line)
-        # Currency words only count in an explicit declaration or scale.  Looking for
-        # bare tokens such as ``xu`` or ``usd`` caused ordinary Vietnamese text (for
-        # example "Xử lý") to be misread as a money-unit declaration.
-        if (text not in accepted and not declaration.match(text)
-                and not scaled_currency.search(text)):
-            continue
-        evidence.append(line.strip())
-        # Keep operators and punctuation in the unit expression until it is validated.
+        # Keep punctuation until the amount expression has been validated.
         normalized = unicodedata.normalize("NFD", line.casefold().replace("đ", "d"))
         normalized = "".join(char for char in normalized if unicodedata.category(char) != "Mn")
         normalized = re.sub(r"^\s*(?:[-*+]|#{1,6})\s+", "", normalized)
         normalized = re.sub(r"\*\*([^*]+)\*\*", r"\1", normalized)
         normalized = " ".join(normalized.split()).removesuffix(".").strip()
-        unit = declaration.sub("", normalized, count=1)
+        text = fold(line)
+        if (text not in accepted and not hint.search(text) and not declaration.match(text)
+                and not short_declaration.match(normalized)):
+            continue
+        evidence.append(line.strip())
+        unit = declaration.sub("", short_declaration.sub("", normalized, count=1), count=1)
         if unit.startswith("`") and unit.endswith("`"):
             unit = unit[1:-1].strip()
         units.add(accepted.get(unit, "unsupported"))
