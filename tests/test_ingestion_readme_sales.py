@@ -686,15 +686,22 @@ class AdapterSelectionTests(_Shop):
                          [("valid", 24), ("valid", 2)])
         self.assertEqual(eligible, frozenset({0, 1}))
 
-    def test_missing_conversion_source_keeps_the_working_flat_adapter(self):
+    def test_unusable_conversion_source_keeps_the_working_flat_adapter(self):
         sales_file = {"01.2026": [REPORT_HEADER, ["O1", "05/01/2026", "Đã hoàn thành",
                                                 "Bia", 1, 240_000, "thùng"]]}
-        catalog = self.shop(REPORT_README, {"DonHang.xlsx": sales_file})
-        sales, evidence, eligible = sales_source.load_business_sales(catalog, RULEBOOK)
-        self.assertEqual(evidence["adapter"], "flat_sales")
-        self.assertEqual(sales[0].amount, 240_000)
-        self.assertIsNone(sales[0].quantity_base)
-        self.assertIsNone(eligible)
+        invalid = {"QuyDoi.xlsx": {"Sheet1": [
+            ["Tên sản phẩm", "Đơn vị quy đổi", "Tỉ lệ quy đổi", "Đơn vị cơ bản"],
+            ["Bia", "thùng", "không rõ", "lon"],
+        ]}}
+        for case, sources in (("missing", {}), ("invalid_factor", invalid)):
+            with self.subTest(case=case):
+                catalog = self.shop(REPORT_README, {"DonHang.xlsx": sales_file, **sources},
+                                    business=case)
+                sales, evidence, eligible = sales_source.load_business_sales(catalog, RULEBOOK)
+                self.assertEqual(evidence["adapter"], "flat_sales")
+                self.assertEqual(sales[0].amount, 240_000)
+                self.assertIsNone(sales[0].quantity_base)
+                self.assertIsNone(eligible)
 
     def test_readme_adapter_is_used_when_flat_headers_are_unknown(self):
         catalog = self.shop(FLAT_README, {"ban_hang.csv": FlatReadmeTests.rows(None)})

@@ -277,7 +277,7 @@ def load_business_sales(
         # in a large workbook would make it scan the same sales again via the README.
         try:
             sales, evidence, eligible = load_readme_sales(catalog, rulebook)
-        except ReadmeSalesError as exc:
+        except (ValueError, OSError) as exc:
             conversion_error = exc
         else:
             return sales, {**evidence, "adapter": "readme_sales"}, eligible
