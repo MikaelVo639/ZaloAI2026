@@ -102,6 +102,35 @@ class PurchasePriceTests(unittest.TestCase):
             load_purchase_lines(self.catalog(BOOK_README.replace(CONVENTION, ""),
                                              {"so_nhap.csv": BOOK_ROWS}))
 
+    def test_purchase_minus_sales_converts_units_and_excludes_invalid_orders(self):
+        from test_ingestion_readme_sales import FLAT_README
+
+        rules = (BOOK
+                 + "| Trạng thái đơn | mỗi đơn có đúng một trong bốn trạng thái: "
+                   "hoàn thành, huỷ, trả hàng, đang giao |\n"
+                 + "| Nhập trừ bán | phần bán là số lượng của đơn tính vào doanh thu, "
+                   "quy về cùng đơn vị với phần nhập |\n")
+        readme = BOOK_README + FLAT_README + (
+            "- **Quy đổi đơn vị**:\n  - Bia Tiger lon: 1 thùng = 10 lon\n")
+        purchases = ("Số phiếu,Ngày nhập,Product,ĐVT,SL nhập,Giá nhập,Thành tiền\n"
+                     "P,03/06/2026,Bia Tiger lon,thùng,1,200000,200000\n"
+                     "OLD,31/05/2026,Bia Tiger lon,lon,5,1,5\n")
+        sales = ("Số HĐ,Ngày tháng,Kết quả,Nội dung,SL,ĐVT,Thành tiền,Quy ra lẻ,Đối tác\n"
+                 "A,04/06/2026,hoàn thành,Bia Tiger lon,4,lon,500,4,Khách lẻ\n"
+                 "B,05/06/2026,huỷ,Bia Tiger lon,9,lon,500,9,Khách lẻ\n"
+                 "C,06/06/2026,trả hàng,Bia Tiger lon,8,lon,500,8,Khách lẻ\n")
+        query = Question("q", "b", "Chênh lệch nhập trừ bán Bia Tiger lon T6/2026 là bao nhiêu lon?",
+                         date(2026, 7, 14))
+        parsed = plan_question(query, read_rules(rules), ["Bia Tiger lon"])
+        self.assertIsNotNone(parsed)
+        files = {"so_nhap.csv": purchases, "ban_hang.csv": sales}
+        candidate = check_executed(compute.answer_plan({}, self.catalog(readme, files),
+                                                       parsed, rules), parsed)
+        self.assertEqual((candidate.type, candidate.answer), ("number", 6), candidate.reason)
+        without_factor = self.catalog(readme.replace("  - Bia Tiger lon: 1 thùng = 10 lon\n", ""),
+                                      files)
+        self.assertEqual(compute.answer_plan({}, without_factor, parsed, rules).type, "abstain")
+
     def test_wordings(self):
         for text, unit in (
             ("Giá nhập bình quân một thùng Bia Tiger lon trong tháng 6 năm 2026 là bao nhiêu?",

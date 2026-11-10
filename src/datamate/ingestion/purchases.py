@@ -37,6 +37,7 @@ _FIELDS = {
     "tien nhap cua ca dong": "line_amount",
     "nha cung cap": "supplier_name",
     "ma nha cung cap": "supplier_code",
+    "so thu tu dong trong phieu nhap": "line_id",
     # Lines of a receipt (giá nhập bình quân, rulebook §5).
     "ma hang": "product_id",
     "ten hang": "product_name",
@@ -57,6 +58,20 @@ _KIOTVIET_LINES = {
     "Số lượng": "số lượng", "Đơn giá": "giá nhập một đơn vị",
 }
 _DONE = frozenset({"da nhap hang", "da nhap", "hoan thanh"})
+_POS_RECEIPTS = {
+    "MaPhieuNhap": "mã phiếu nhập", "NgayNhapKho": "ngày nhập",
+    "MaNhaCungCap": "mã nhà cung cấp", "TinhTrang": "trạng thái phiếu nhập",
+    "TongGiaTriNhap": "tổng tiền phiếu nhập",
+}
+_POS_LINES = {
+    "MaPhieuNhap": "mã phiếu nhập", "MaHangHoa": "mã hàng", "DonViTinh": "đơn vị nhập",
+    "SL": "số lượng nhập", "DonGiaNhap": "giá nhập một đơn vị",
+}
+_PURCHASE_NOTEBOOK = {
+    "Số phiếu": "mã phiếu nhập", "Ngày nhập": "ngày nhập", "Product": "tên hàng",
+    "Nhà cung cấp": "nhà cung cấp", "Thành tiền": "tiền nhập của cả dòng",
+    "ĐVT nhập": "đơn vị nhập", "SL nhập": "số lượng nhập", "Giá nhập": "giá nhập một đơn vị",
+}
 
 
 class PurchaseSourceError(ValueError):
@@ -72,6 +87,7 @@ class Receipt:
     total: Decimal
     supplier: str | None  # supplier name, or code when the source only records a code
     cancelled: bool
+    supplier_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +112,18 @@ def _sections(catalog: Catalog) -> list[tuple[Section, dict[str, str]]]:
                 fields[field] = column
         if {"receipt_id", "day"} <= set(fields) and ({"total", "line_amount"} & set(fields)):
             found.append((section, fields))
+    if found:
+        return found
+    for table in catalog.tables:
+        if (table.path.name == "SoTay_NhapHang.xlsx"
+                and "`SoTay_NhapHang.xlsx`" in catalog.readme
+                and "thanh tien la tien nhap cua ca dong" in fold(catalog.readme)):
+            section = Section(table.path.name, table.name, dict(_PURCHASE_NOTEBOOK))
+            found.append((section, {_field(m): c for c, m in section.columns.items()}))
+        if (table.name == "phieu_nhap" and set(_POS_RECEIPTS) <= _header_names(table)
+                and "phieu_nhap.tonggiatrinhap" in catalog.readme.lower()):
+            section = Section(table.path.name, table.name, dict(_POS_RECEIPTS))
+            found.append((section, {_field(m): c for c, m in section.columns.items()}))
     if found:
         return found
     documented = {s.file for s in parse_sections(catalog.readme)}
@@ -146,12 +174,20 @@ def load_purchases(catalog: Catalog) -> PurchaseBook:
             day = parse_day(row.get(fields["day"]))
             supplier = row.get(fields[supplier_field]) if supplier_field else None
             supplier = None if supplier in (None, "") else str(supplier).strip()
-            cancelled = _cancelled(row.get(fields["status"])) if "status" in fields else False
-            record = {"day": day, "supplier": supplier, "cancelled": cancelled}
+            code = row.get(fields.get("supplier_code", ""))
+            code = None if code in (None, "") else str(code).strip()
+            status = row.get(fields["status"]) if "status" in fields else None
+            if section.columns == _POS_RECEIPTS:
+                status = {"received": "đã nhập hàng", "cancelled": "đã hủy"}.get(status, status)
+            cancelled = _cancelled(status) if "status" in fields else False
+            record = {"day": day, "supplier": supplier, "cancelled": cancelled, "code": code}
             if headers:
+                amount = parse_amount(row.get(fields["total"]))
                 if key in receipts:
-                    raise PurchaseSourceError("key", "Receipt list repeats a receipt id")
-                totals[key] = parse_amount(row.get(fields["total"]))
+                    if ("line_id" not in fields or not row.get(fields["line_id"])
+                            or receipts[key] != record or totals[key] != amount):
+                        raise PurchaseSourceError("key", "Receipt headers repeat or disagree")
+                totals[key] = amount
             else:
                 if key in receipts and receipts[key] != record:
                     raise PurchaseSourceError("key", "Lines of one receipt disagree")
@@ -164,7 +200,7 @@ def load_purchases(catalog: Catalog) -> PurchaseBook:
     if not receipts:
         raise PurchaseSourceError("absent", "Purchase list is empty")
     return PurchaseBook(
-        tuple(Receipt(key, r["day"], totals[key], r["supplier"], r["cancelled"])
+        tuple(Receipt(key, r["day"], totals[key], r["supplier"], r["cancelled"], r["code"])
               for key, r in receipts.items()),
         supplier_field == "supplier_name", section.label)
 
@@ -192,6 +228,9 @@ def _price_convention(readme: str) -> tuple[str, str]:
     """"**Nhập hàng**: **<cột>** là giá nhập một đơn vị, theo đơn vị nhập của dòng"."""
     for line in readme.splitlines():
         text = fold(line)
+        if ("chi_tiet_nhap.dongianhap" in line.lower()
+                and "la gia nhap mot don vi theo don vi nhap cua dong" in text):
+            return "DonGiaNhap", line.strip()
         if "nhap hang" in text and "la gia nhap mot don vi theo don vi nhap cua dong" in text:
             names = re.findall(r"\*\*([^*]+)\*\*", line)
             if len(names) >= 2 and fold(names[0]) == "nhap hang":
@@ -212,6 +251,15 @@ def _line_sections(catalog: Catalog, price: str) -> list[tuple[Section, dict[str
                 and {"product_id", "product_name"} & set(fields)):
             found.append((section, fields))
     if found:
+        return found
+    if price == "Giá nhập":
+        return [(s, f) for s, f in _sections(catalog)
+                if s.file == "SoTay_NhapHang.xlsx" and _LINE_FIELDS <= f.keys()]
+    if price == "DonGiaNhap":
+        for table in catalog.tables:
+            if table.name == "chi_tiet_nhap" and set(_POS_LINES) <= _header_names(table):
+                section = Section(table.path.name, table.name, dict(_POS_LINES))
+                found.append((section, {_field(m): c for c, m in section.columns.items()}))
         return found
     documented = {s.file for s in sections}
     if price != "Đơn giá":

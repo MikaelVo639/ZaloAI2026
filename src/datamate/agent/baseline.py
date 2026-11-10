@@ -33,6 +33,7 @@ class BaselineAgent:
     # Worker tasks; module-level functions so the spawn worker can import them.
     prepare = staticmethod(tasks.prepare_sales)
     prepare_debt = staticmethod(tasks.prepare_debt)
+    prepare_delivery_orders = staticmethod(tasks.prepare_delivery_orders)
     compute = staticmethod(tasks.answer_plan)
     names = staticmethod(tasks.product_names)
     vocabulary = staticmethod(tasks.vocabulary)
@@ -100,8 +101,13 @@ class BaselineAgent:
             if reason or (as_of_date is not None and plan.end > as_of_date):
                 return Candidate(reason=reason or "Requested date is after as_of_date",
                                  evidence=planned)
-        debt = plan.intent == "top_debt_customers" or plan.intent in tasks.DEBT_INTENTS
-        failure = None if plan.intent in tasks.INDEPENDENT_INTENTS else self._prepare(context, debt=debt)
+        failure = None
+        if plan.intent == "delivered_order_count":
+            failure = self._prepare(context, source="delivery_orders")
+        elif plan.intent == "top_debt_customers" or plan.intent in tasks.DEBT_INTENTS:
+            failure = self._prepare(context, source="debt")
+        elif plan.intent not in tasks.INDEPENDENT_INTENTS:
+            failure = self._prepare(context)
         if failure is not None:
             failure.evidence = {**planned, **failure.evidence}
             return failure
@@ -140,9 +146,9 @@ class BaselineAgent:
             context.cache["vocabulary"] = vocabulary
         return context.cache["vocabulary"]
 
-    def _prepare(self, context: BusinessContext, *, debt: bool = False) -> Candidate | None:
+    def _prepare(self, context: BusinessContext, *, source: str = "sales") -> Candidate | None:
         """Load the required source once per worker generation and split rulebook."""
-        cache_key = "worker_debt" if debt else "worker_sales"
+        cache_key = f"worker_{source}"
         rulebook = context.split.rulebook
         state = context.cache.get(cache_key)
         if state is not None and state["rulebook"] != rulebook:
@@ -153,16 +159,19 @@ class BaselineAgent:
                 and state["generation"] == self.worker.generation):
             return None
         # First question of the business, or the worker was replaced after a timeout.
-        task = self.prepare_debt if debt else self.prepare
+        task, step = {
+            "sales": (self.prepare, "Sales ingestion"),
+            "debt": (self.prepare_debt, "Debt ingestion"),
+            "delivery_orders": (self.prepare_delivery_orders, "Delivery ingestion"),
+        }[source]
         result = self.worker.run(task, self.ingestion_timeout,
                                  catalog=context.catalog, rulebook=rulebook)
         evidence: dict[str, Any] = {"ingestion_execution": result.execution()}
-        if result.ok and (debt or result.value["ok"]):
+        if result.ok and (source == "debt" or result.value["ok"]):
             # The debt worker retains typed failures for interpretation with the Plan.
             context.cache[cache_key] = {"ok": True, "generation": self.worker.generation,
                                         "rulebook": rulebook}
             return None
-        step = "Debt ingestion" if debt else "Sales ingestion"
         reason = result.value["reason"] if result.ok else _failure_reason(step, result)
         context.cache[cache_key] = {"ok": False, "reason": reason, "evidence": evidence,
                                     "rulebook": rulebook}

@@ -144,6 +144,9 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     """
     today = question.as_of_date
     text = normalize_question(question.question)
+    if re.search(r"\b(?:giao|cho)(?: thanh)? (?:tu )?(?:\d+|hai) dot tro len\b"
+                 r"|\b(?:giao|cho) it nhat (?:\d+|hai) dot\b", text):
+        return _delivered_orders(text, today, rules)
     package = _package_period(text, today, rules)
     if package:
         return package if isinstance(package, Plan) else None
@@ -152,7 +155,7 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     used: list[str] = []
     filters: list[Filter] = []
     share = False
-    if _PURCHASE_TOTAL.search(text) or _TOP_SUPPLIER.search(text):
+    if _PURCHASE_TOTAL.search(text) or _TOP_SUPPLIER.search(text) or _MAIN_SUPPLIER.search(text):
         return _purchase(text, today, rules)
     if _AVG_PURCHASE_CUE.search(text):
         return _avg_purchase(text, today, rules, names)
@@ -187,6 +190,8 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         used.append("product_names")
     if product and _STOCK_CUE.search(text):
         return _stock_plan(text, today, rules, filters)
+    if product and _PURCHASE_DIFFERENCE.search(text):
+        return _purchase_difference(text, today, rules, filters)
     size = re.search(r"\bsize (m|l)\b", text)
     if size:
         if filters or not rules.size_by_name or len(re.findall(r"\bsize\b", text)) != 1:
@@ -931,30 +936,95 @@ _REFERENCES = (
 
 _PURCHASE_TOTAL = re.compile(
     rf"\btong gia tri cac phieu nhap hang\b|\btong tien hang nhap vao\b|\btong tien nhap hang\b"
-    rf"|\bbo ra {_AMOUNT} tien nhap hang\b|\bnhap hang het {_AMOUNT} tien\b")
+    rf"|\bbo ra {_AMOUNT} tien nhap hang\b|\bnhap hang het {_AMOUNT} tien\b"
+    rf"|\btien nhap hang (?=thang nay tong {_AMOUNT}$)")
 _TOP_SUPPLIER = re.compile(
     r"\bnha cung cap nao duoc cua hang nhap hang (?:nhieu|nhiu) tien nhat\b"
     r"|\bcua hang nhap (?:nhieu|nhiu) tien hang nhat tu nha cung cap nao\b"
     r"|\btien nhap hang tu nha cung cap nao cao nhat\b")
+_MAIN_SUPPLIER = re.compile(r"\bnha cung cap chinh\b")
+_PURCHASE_DIFFERENCE = re.compile(
+    r"\b(?:(?:so|tong) (?P<unit>[a-z]+) nhap tru (?:so|tong) (?P=unit) ban"
+    r"|(?:so nhap tru so|nhap tru) ban)(?: ra)?\b")
+
+
+def _purchase_difference(text: str, today: date, rules: Rules,
+                         filters: list[Filter]) -> Plan | None:
+    if not (rules.purchase_sales_difference and rules.revenue):
+        return None
+    match = _PURCHASE_DIFFERENCE.search(text)
+    resolved = _period(text[:match.start()] + " " + text[match.end():], today, rules)
+    if resolved is None:
+        return None
+    start, end, rest = resolved
+    rest = re.sub(r"\b(?:chenh(?: lech)?|lay|thi duoc)\b", " ", rest)
+    unit = match["unit"] or ""
+    if not unit:
+        amount = re.search(rf"\b{_AMOUNT} ([a-z]+)$", rest.strip())
+        if amount:
+            unit = amount[1]
+            rest = rest.strip()[:amount.start()]
+    if not unit or _FILLERS.sub(" ", rest).strip() or start > min(end, today):
+        return None
+    return Plan("purchase_sales_difference", start, min(end, today),
+                evidence=_rows(rules, "purchase_sales_difference", "revenue", "product_names"),
+                filters=tuple(filters), unit=unit)
+
+
+def _delivered_orders(text: str, today: date, rules: Rules) -> Plan | None:
+    if not (rules.delivered_order_count and rules.calendar_month and rules.threshold_inclusive):
+        return None
+    cutoff = r"\b(?:tinh )?(?:den|toi) (?:het )?(?:hom nay|hnay)\b"
+    if not re.search(cutoff, text):
+        return None
+    text = re.sub(cutoff, " ", text)
+    match = re.search(r"\b(?:giao|cho)(?: thanh)? "
+                      r"(?:tu (\d+|hai) dot tro len|(\d+|hai) dot tro len|it nhat (\d+|hai) dot)\b", text)
+    if not match or not re.search(rf"\b{_AMOUNT} don\b", text):
+        return None
+    minimum = next(group for group in match.groups() if group)
+    minimum = 2 if minimum == "hai" else int(minimum)
+    rest = text[:match.start()] + " " + text[match.end():]
+    if not re.search(r"\bdon dat thang\b", rest):
+        return None
+    resolved = _period(rest, today, rules)
+    if resolved is None:
+        return None
+    start, end, rest = resolved
+    rest = re.sub(rf"\b(?:(?:cac |{_AMOUNT} )?don dat|{_AMOUNT} don)\b", " ", rest)
+    if minimum < 1 or start > today or _FILLERS.sub(" ", rest).strip():
+        return None
+    return Plan("delivered_order_count", start, min(end, today),
+                evidence=_rows(rules, "delivered_order_count", "calendar_month", "threshold_inclusive"),
+                threshold=Threshold("order", "delivery_count", ">=", Decimal(minimum),
+                                    rules.row("threshold_inclusive") or ""),
+                observed_on=today)
 
 
 def _purchase(text: str, today: date, rules: Rules) -> Plan | None:
     """"Tổng tiền nhập hàng tháng M", "nhà cung cấp nào … nhiều tiền nhất" (rulebook §5)."""
-    total, top = _PURCHASE_TOTAL.search(text), _TOP_SUPPLIER.search(text)
-    if bool(total) == bool(top):
+    matches = [(feature, match) for feature, pattern in (
+        ("purchase_total", _PURCHASE_TOTAL), ("top_supplier", _TOP_SUPPLIER),
+        ("main_supplier", _MAIN_SUPPLIER)) if (match := pattern.search(text))]
+    if len(matches) != 1:
         return None
-    intent, feature, match = (("purchase_total", "purchase_total", total) if total
-                              else ("top_supplier", "top_supplier", top))
-    if not getattr(rules, feature) or not rules.purchase_total:
+    intent, match = matches[0]
+    if not getattr(rules, intent) or not rules.purchase_total:
         return None
     rest = text[:match.start()] + " " + text[match.end():]
     resolved = _period(rest, today, rules)
     if resolved is None:
         return None
     start, end, leftover = resolved
+    if intent == "main_supplier":
+        if not re.search(r"\b(?:la ai|la nha cung cap nao)\b", leftover):
+            return None
+        leftover = re.sub(r"\b(?:la ai|la nha cung cap nao|minh)\b", " ", leftover)
+    elif intent == "purchase_total":
+        leftover = re.sub(rf"\btong {_AMOUNT}\b", " ", leftover)
     if _FILLERS.sub(" ", leftover).strip() or start > min(end, today):
         return None
-    rows = ("purchase_total", "top_supplier") if top else ("purchase_total",)
+    rows = ("purchase_total", intent) if intent != "purchase_total" else (intent,)
     return Plan(intent, start, min(end, today), 1, _rows(rules, *rows))
 
 

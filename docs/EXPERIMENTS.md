@@ -1,5 +1,59 @@
 # Thí nghiệm có thể đối chiếu
 
+## Integration — nhóm 19, 21, 23, 24 ngày 10/11/2026
+
+- **19 · Lý do huỷ/trả.** Hai câu được giao hỏi lý do cụ thể. Sổ bán và
+  README của hai nguồn chỉ đủ xác định trạng thái cho mục đích này. Giữ
+  `abstain` khi câu hỏi có điều kiện lý do, với regression cho cả huỷ và trả.
+- **21 · Nhiều đợt giao.** Dùng ngày bán trong sổ đặt đơn để chọn cohort theo
+  mã đơn. Nối sổ giao theo mã đơn, gộp theo cặp mã đơn và số đợt, rồi áp
+  `as_of_date` lên ngày giao. Đợt đã giao của đơn sau đó trả vẫn được tính.
+  `Plan.observed_on` là trường tùy chọn chỉ dùng cho intent này.
+- **23 · Nhập trừ bán.** Nối chi tiết và đầu phiếu nhập theo mã phiếu, sau đó
+  đối chiếu mã hàng với dòng bán. Quy số lượng nhập về đơn vị cơ bản từ bảng
+  quy đổi của shop. Phần bán theo luật doanh thu của split. Số phát sinh tính
+  riêng với tồn kho. Thiếu hệ số, mã hàng không rõ hoặc nguồn bán chưa hỗ trợ
+  thì giữ `abstain`.
+- **24 · Tiền nhập và nhà cung cấp.** Tổng đầu phiếu lặp ở bảng chi tiết
+  được tính một lần khi các dòng đồng nhất về ngày, trạng thái, nhà cung cấp
+  và tổng tiền. Sổ chỉ có thành tiền dòng được cộng theo mã phiếu. Xếp
+  “nhà cung cấp chính” theo số phiếu và “nhập nhiều tiền nhất” theo giá trị
+  phiếu, dùng mã nhà cung cấp khi nguồn có cả mã và tên.
+
+Trong probe public so với checkout trước sửa, bảy câu được giao chuyển từ
+`abstain` sang có câu trả lời, gồm ba câu đếm đơn giao, hai câu chênh lệch
+nhập bán và hai câu về phiếu nhập. Hai câu lý do giữ `abstain`.
+Probe đo độ phủ và xem phép tính từ nguồn phát hành, không có nhãn public.
+Trên đủ 1.000 câu public, checkout `bdc509a` trả lời 138 câu và bản sửa
+trả lời 146 câu. Tám thay đổi đều từ `abstain` sang có đáp án, gồm bảy
+câu được giao và một câu tiền nhập dùng cùng adapter. Mốc 420 trong
+tài liệu giao việc thuộc lượt audit khác. Lượt public sau sửa chạy lại
+toàn bộ shop giao hàng sau khi chuyển đọc sổ sang bước ingestion của
+worker. Kết quả chạy lại thay đúng một câu đã hết hạn ở bước tính.
+
+So từng ID trên 3.000 câu train và cùng holdout 630 câu (seed 42,
+validation fraction 0,2). Hai bản dùng baseline CPU và cùng dữ liệu.
+Lượt train được chạy theo business; các bản ghi chồng giữa các shard
+khớp nhau. Nhãn chỉ dùng khi chấm sau inference.
+
+| Tập | Trước sửa, đúng / sai / abstain | Sau sửa, đúng / sai / abstain |
+|---|---:|---:|
+| Train (3.000) | 2.557 / 0 / 443 | 2.576 / 0 / 424 |
+| Holdout (630) | 499 / 0 / 131 | 510 / 0 / 120 |
+
+Toàn bộ thay đổi train là `abstain → correct` theo local proxy. Các kết quả
+chi tiết và submission kiểm tra nằm trong ignored `outputs/runs/mikael-ab/`.
+
+`uv sync --locked`, `uv run datamate smoke` và unittest đã chạy qua.
+Smoke đạt 21 đúng / 0 sai / 3 abstain theo local proxy. Unittest chạy 394
+ca, 393 qua và 1 skip. Trên Windows, cấu hình `safe.directory` chỉ áp
+cho checkout và thư mục test tạm trong tiến trình chạy test.
+
+Thứ tự tích hợp đề xuất là chốt ánh xạ nguồn với Data & Schema, xem
+`Plan` và ngữ pháp với Semantics, rồi xem phép tính và evidence với Agent.
+Evaluation kiểm tra kết quả theo từng câu trên cùng split và manifest
+holdout trước khi merge.
+
 ## AGENT-02 — sửa ngân sách prompt bằng tokenizer thật ngày 05/11/2026
 
 Sau khi có train, chọn 5 câu đủ kỳ dương lịch thuộc **business train** của manifest
