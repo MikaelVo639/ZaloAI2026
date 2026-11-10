@@ -13,10 +13,13 @@ ANSWER_TYPES = {
     "revenue": "number", "order_count": "number", "average_order": "number",
     "cancel_count": "number", "cancel_rate": "percent", "best_day": "date",
     "quantity": "number", "count_where": "number",
+    "top_product_brand": "string", "average_amount_due": "number",
+    "average_phone_revenue": "number",
     "revenue_increasing": "boolean", "top_debt_customers": "table",
     "debt_total": "number", "debt_customer_count": "number", "debt_collected": "number",
     "debt_flow": "list", "debt_age_buckets": "list", "top_staff": "string", "stock": "number", "stock_split": "list",
-    "purchase_total": "number", "top_supplier": "string",
+    "purchase_total": "number", "top_supplier": "string", "main_supplier": "string",
+    "purchase_sales_difference": "number", "delivered_order_count": "number",
     "avg_purchase_price": "number", "daily_sale_price": "number",
     "unsold_count": "number", "delivery_count": "number",
     "gross_profit": "number", "top_gross_profit": "string", "net_profit": "number",
@@ -155,6 +158,12 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
                 _check_debt_table(candidate, plan)
             if plan.intent == "cancel_rate" and not 0 <= candidate.answer <= 100:
                 raise ValueError("Cancellation percentage outside [0, 100]")
+            if plan.intent == "delivered_order_count":
+                count, bound = candidate.answer, evidence.get("cohort_size")
+                if (type(count) is not int or type(bound) is not int or not 0 <= count <= bound
+                        or evidence.get("observed_on") != plan.observed_on.isoformat()
+                        or evidence.get("minimum_trips") != int(plan.threshold.value)):
+                    raise ValueError("Delivery evidence disagrees with the order cohort or cutoff")
             if plan.intent == "count_where":
                 bound = (evidence.get("customers_bought") if plan.threshold.subject == "customer"
                          else evidence.get("inputs", {}).get("selected_rows"))

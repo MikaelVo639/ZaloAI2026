@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from datamate.agent.baseline import BaselineAgent
 from datamate.agent.business_measures import (
     gross_profit,
     net_profit,
@@ -14,7 +15,7 @@ from datamate.agent.business_measures import (
 )
 from datamate.agent.compute import answer_plan
 from datamate.agent.validation import check_executed
-from datamate.contracts import Question
+from datamate.contracts import BusinessContext, Question, Split
 from datamate.ingestion.catalog import build_catalog
 from datamate.ingestion.sales import Sale
 from datamate.semantics.planner import plan_question
@@ -101,6 +102,43 @@ class BusinessMeasureTests(unittest.TestCase):
             self.assertEqual((candidate.type, candidate.answer), ("number", 2))
             source.write_text(header + data + "A,2,02/04/2026,returned\n", encoding="utf-8")
             self.assertEqual(answer_plan({}, catalog, question, RULEBOOK).type, "abstain")
+
+    def test_delivered_order_cohort_uses_placement_month_and_observation_date(self):
+        book = RULEBOOK.replace("số đợt có ngày giao", "tính đến hết hôm nay. số đợt có ngày giao")
+        book += "| Quá N, hơn N, trên N, dưới N | không gồm N. Từ N trở lên thì gồm N |\n"
+        question = Question("q", "shop", "Tới hôm nay, mấy đơn đặt tháng 3/2026 đã được "
+                            "chở thành 2 đợt trở lên?", TODAY)
+        query = plan_question(question, read_rules(book))
+        self.assertEqual((query.start, query.end, query.observed_on),
+                         (date(2026, 3, 1), date(2026, 3, 31), TODAY))
+        with TemporaryDirectory() as folder:
+            shop = Path(folder) / "shop"
+            shop.mkdir()
+            (shop / "README.md").write_text(
+                "## Cột trong `delivery.csv`\n- **ID**: mã đơn\n- **Trip**: đợt giao\n"
+                "- **Day**: ngày giao\n"
+                "## Cột trong `sales.csv`\n- **ID**: mã đơn\n- **Day**: ngày bán\n"
+                "- **Qty**: số lượng\n- **Money**: thành tiền sau giảm\n", encoding="utf-8")
+            (shop / "sales.csv").write_text(
+                "ID,Day,Qty,Money\nA,30/03/2026,1,100\nA,10/04/2026,-1,-100\n"
+                "B,31/03/2026,1,100\nC,01/04/2026,1,100\n", encoding="utf-8")
+            (shop / "delivery.csv").write_text(
+                "ID,Trip,Day\nA,1,30/03/2026\nA,1,30/03/2026\nA,2,30/04/2026\n"
+                "B,1,01/04/2026\nB,2,01/05/2026\nC,1,01/04/2026\nC,2,02/04/2026\n",
+                encoding="utf-8")
+            root = Path(folder)
+            context = BusinessContext(Split(root, (question,), book, root / "calendar.csv"),
+                                      build_catalog(root, "shop"))
+            agent = BaselineAgent()
+            self.addCleanup(agent.close)
+            candidate = agent.answer(question, context)
+            self.assertEqual((candidate.type, candidate.answer), ("number", 1), candidate.reason)
+            self.assertTrue(context.cache["worker_delivery_orders"]["ok"])
+
+    def test_reason_qualifiers_never_become_plain_status_counts(self):
+        for text in ("Tháng 4/2026 có mấy đơn bị huỷ vì giao trễ?",
+                     "Tháng 4/2026 có mấy đơn khách trả lại vì gọi nhầm món?"):
+            self.assertIsNone(plan(text))
 
     def test_expiry_and_stock_value_use_end_of_day_sources(self):
         with TemporaryDirectory() as folder:

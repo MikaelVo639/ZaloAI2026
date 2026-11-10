@@ -145,6 +145,18 @@ class Conventions:
 
 
 def meaning_field(meaning: str) -> str | None:
+    raw = unicodedata.normalize("NFC", meaning).casefold().strip().removesuffix(".")
+    # Accents are semantic here: ``hãng`` (brand) must not collapse onto ``hàng``
+    # (product).  Keep this check before fold().
+    if raw == "hãng":
+        return "product_brand"
+    if raw == "tiền phải trả cả đơn sau giảm trừ":
+        return "order_amount_due"
+    if raw == "loại hàng điện thoại":
+        return "phone_item_kind"
+    if (raw in {"số / size", "số/size", "size", "kích cỡ"}
+            or (raw.startswith("số của sữa") and "size" in raw)):
+        return "product_size"
     text = fold(meaning).strip()
     if any(text.startswith(marker) for marker in _OTHER_LISTS):
         return "_other"
@@ -281,6 +293,9 @@ _BANHANG_COMBINED = (
         "Mã NV bán": "mã nhân viên bán", "Giờ tạo đơn": "giờ đặt đơn",
         "Hình thức thanh toán": "hình thức thanh toán",
     }),
+    ({"Mã H.hóa", "Tên hàng hóa", "Nhóm hàng", "DVT"}, {
+        "Tên hàng hóa": "tên hàng", "Nhóm hàng": "nhóm hàng", "DVT": "đơn vị cơ bản",
+    }),
 )
 POS_PROFILES = (
     ("pos_export_kiotviet.v1", _KIOTVIET),
@@ -347,9 +362,22 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
     )
     phone_required = set(_PHONE_LEDGER_COLUMNS)
     if phone_evidence:
-        sections = [Section(table.path.name, table.name, _PHONE_LEDGER_COLUMNS,
-                            origin="phone_ledger_conventions.v1")
-                    for table, header in headers if phone_required <= header]
+        sections = []
+        for table, header in headers:
+            if phone_required <= header:
+                columns = dict(_PHONE_LEDGER_COLUMNS)
+                if "Khách trả" in header and "da bot va da tru tien thu may cu" in text:
+                    columns["Khách trả"] = "tiền phải trả cả đơn sau giảm trừ"
+                sections.append(Section(table.path.name, table.name, columns,
+                                        origin="phone_ledger_conventions.v1"))
+        ledgers = {section.file for section in sections}
+        if "ghi tat cho ten day du va loai hang" in text:
+            for table, header in headers:
+                if (table.path.name in ledgers and fold(table.name) == "ghi tat"
+                        and {"Ghi tắt", "Tên hàng", "Loại"} <= header):
+                    sections.append(Section(table.path.name, table.name, {
+                        "Ghi tắt": "tên hàng", "Tên hàng": "tên", "Loại": "loại hàng điện thoại",
+                    }, origin="phone_ledger_conventions.v1"))
         if sections:
             return sections
 
@@ -360,6 +388,8 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
         for table, header in headers:
             for required, meanings in lists:
                 if required <= header:
+                    if "Nhóm hàng" in meanings and f"`{table.name}`" not in catalog.readme:
+                        continue
                     columns = {c: m for c, m in meanings.items() if c in header}
                     if "thanh tien sau giam" in map(fold, columns.values()):
                         cost = sale_cost_column(catalog.readme, table, header)
@@ -698,8 +728,10 @@ def _classify(sections: list[Section], catalog: Catalog) -> dict[str, _Role]:
         elif ("customer_id" in fields and "customer_group" in fields
               and not fields & {"order_id", "amount", "quantity"}):
             role = "customers"
-        elif ("product_id" in fields and fields & {"product_name", "name"}
-              and not fields & {"order_id", "quantity"}):
+        elif (fields & {"product_name", "name"}
+              and fields & {"product_id", "base_unit", "product_group",
+                            "product_brand", "product_size", "phone_item_kind"}
+              and not fields & {"order_id", "quantity", "amount"}):
             role = "products"
         else:
             continue
@@ -713,7 +745,7 @@ def _classify(sections: list[Section], catalog: Catalog) -> dict[str, _Role]:
         entry.sections.append(section)
         entry.tables.extend((section, table) for table in tables)
     for role, entry in roles.items():
-        signatures = {frozenset(s.fields) for s in entry.sections}
+        signatures = {frozenset(s.fields) - {"order_amount_due"} for s in entry.sections}
         if len(signatures) != 1:
             raise ReadmeSalesError("AMBIGUOUS_ROLE", "Files of one role disagree on fields",
                                    role=role, sources=[s.label for s in entry.sections])
@@ -892,18 +924,23 @@ def _products_index(
         return by_id, by_name
     ambiguous: set[str] = set()
     for _sheet, _ordinal, row in _role_rows(roles["products"], headers):
-        if _blank(row.get("product_id")):
+        name = row.get("name", row.get("product_name"))
+        if _blank(row.get("product_id")) and _blank(name):
             continue
-        key = str(row["product_id"]).strip()
-        if key in by_id:
+        key = None if _blank(row.get("product_id")) else str(row["product_id"]).strip()
+        if key is not None and key in by_id:
             raise ReadmeSalesError("DUPLICATE_PARENT_KEY", "Product list repeats a code",
                                    role="products")
-        name = row.get("name", row.get("product_name"))
         record = {"id": key, "name": None if _blank(name) else str(name).strip(),
-                  "base_unit": row.get("base_unit"), "group": row.get("product_group")}
-        by_id[key] = record
-        if record["name"]:
-            name_key = _name_key(record["name"])
+                  "base_unit": row.get("base_unit"), "group": row.get("product_group"),
+                  "brand": row.get("product_brand"), "size": row.get("product_size"),
+                  "phone_item_kind": row.get("phone_item_kind")}
+        if key is not None:
+            by_id[key] = record
+        names = {record["name"]}
+        if record["phone_item_kind"]:
+            names.add(_text(row.get("product_name")))  # the phone catalogue documents the abbreviation
+        for name_key in {_name_key(item) for item in names if item}:
             if name_key in by_name:
                 ambiguous.add(name_key)
             by_name[name_key] = record
@@ -927,6 +964,46 @@ def _customers_index(roles: dict[str, _Role]) -> dict[str, dict[str, str | None]
         customers[key] = {"group": _text(row.get("customer_group")),
                           "name": _text(row.get("customer_name", row.get("name")))}
     return customers
+
+
+def enrich_sales_from_readme_products(catalog: Catalog, sales: list[Sale]
+                                      ) -> tuple[list[Sale], dict[str, int]]:
+    """Attach documented product attributes to an otherwise valid flat export.
+
+    This does not alter the flat adapter's row grain, amounts, statuses, identifiers or
+    quantities.  A product is enriched only through a unique README-described product
+    parent, joined by code when the sale has one and otherwise by an unambiguous name.
+    """
+    sections = parse_sections(catalog.readme)
+    sections += profile_sections(catalog, sections)
+    roles = _classify(sections, catalog)
+    if "products" not in roles:
+        return sales, {"matched_by_code": 0, "matched_by_name": 0, "unmatched": len(sales)}
+    by_id, by_name = _products_index(roles)
+    counts = Counter()
+    enriched: list[Sale] = []
+    for sale in sales:
+        if sale.product_id and not sale.product_id_is_name:
+            product = by_id.get(sale.product_id)
+            counts["matched_by_code" if product is not None else "unmatched"] += 1
+        elif sale.product_name:
+            product = by_name.get(_name_key(sale.product_name))
+            counts["matched_by_name" if product is not None else "unmatched"] += 1
+        else:
+            counts["unmatched"] += 1
+        if product is None:
+            enriched.append(sale)
+            continue
+        base_unit = (_name_key(product["base_unit"])
+                     if not _blank(product.get("base_unit")) else sale.base_unit)
+        enriched.append(replace(
+            sale,
+            base_unit=sale.base_unit or base_unit,
+            product_group=sale.product_group or _text(product.get("group")),
+            product_brand=sale.product_brand or _text(product.get("brand")),
+            product_size=sale.product_size or _text(product.get("size")),
+        ))
+    return enriched, dict(counts)
 
 
 def joined_customer_sources(
@@ -1201,6 +1278,10 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
                           product_id_is_name=product_id_is_name,
                           product_group=_text((product or {}).get("group")
                                               or line.get("product_group")),
+                          product_brand=_text((product or {}).get("brand")),
+                          product_size=_text((product or {}).get("size")),
+                          phone_item_kind=_text((product or {}).get("phone_item_kind")),
+                          order_amount_due=optional_sale_cost(line.get("order_amount_due")),
                           **context))
         if not is_fee and count_keys:
             eligible.add(index)
