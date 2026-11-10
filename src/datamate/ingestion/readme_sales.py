@@ -28,6 +28,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from datamate.contracts import Catalog, Table
@@ -533,6 +534,54 @@ def parse_day(value: Any, sheet: str = "") -> date:
 
 # ---------------------------------------------------------------- tables
 
+def _customer_identity_absence(
+    catalog: Catalog, headers: dict[tuple[Path, str], set[str]],
+) -> list[str]:
+    """Prove absence only for a catalog fully described by known non-customer columns."""
+    non_customer = {
+        "order_id", "date", "status", "product_id", "product_name", "name",
+        "quantity", "quantity_base", "unit", "base_unit", "amount", "unit_price",
+        "product_group", "unit_cost_at_sale",
+    }
+    product_metadata = {
+        "bảo hành", "ghi chú", "loại hàng hóa", "mã hh liên quan", "mã vạch ean",
+        "mô tả sản phẩm", "trọng lượng", "tồn lớn nhất", "tồn nhỏ nhất", "vị trí",
+        "mẫu ghi chú", "thương hiệu", "vị trí kệ", "được bán trực tiếp",
+        "định mức tồn tối thiểu", "định mức tồn tối đa",
+    }
+    covered = set()
+    for section in parse_sections(catalog.readme):
+        for meaning in section.columns.values():
+            if (meaning_field(meaning) not in non_customer
+                    and fold(meaning) not in {"gia ban hien tai", "gia von"}):
+                return []
+        try:
+            tables = _matching_tables(catalog, section)
+        except ReadmeSalesError:
+            return []
+        if not tables:
+            return []
+        fields = section.fields.keys()
+        product_list = (
+            "product_id" in fields and bool(fields & {"name", "product_name"})
+            and not fields & {"order_id", "amount", "date", "quantity"}
+        )
+        for table in tables:
+            key = (table.path, table.name)
+            if key not in headers:
+                return []
+            header = headers[key]
+            extras = header - section.columns.keys()
+            if product_list:
+                extras = {name for name in extras if name.casefold() not in product_metadata}
+            if extras or section.columns.keys() - header:
+                return []
+            covered.add(key)
+    if covered != {(table.path, table.name) for table in catalog.tables}:
+        return []
+    return sorted(table.key for table in catalog.tables)
+
+
 def _matching_tables(catalog: Catalog, section: Section) -> list[Table]:
     wanted = filename_key(section.file)
     placeholder = re.compile(r"<[^<>]+>")
@@ -660,10 +709,15 @@ def _classify(sections: list[Section], catalog: Catalog) -> dict[str, _Role]:
     return roles
 
 
-def _role_rows(entry: _Role) -> Iterator[tuple[str, int, dict[str, Any]]]:
+def _role_rows(
+    entry: _Role, headers: dict[tuple[Path, str], set[str]] | None = None,
+) -> Iterator[tuple[str, int, dict[str, Any]]]:
     for section, table in entry.tables:
         fields = section.fields
+        key = (table.path, table.name)
         for ordinal, raw in _records(table, section.columns):
+            if headers is not None and key not in headers:
+                headers[key] = {name for name in raw if not re.fullmatch(r"_empty_\d+", name)}
             row = {key: raw.get(column) for key, column in fields.items()}
             row["_header_repeat"] = bool(fields) and all(
                 _name_key(row.get(key)) == _name_key(column)
@@ -805,13 +859,15 @@ def _orders_index(roles: dict[str, _Role], rules: _Rules
     return orders, counts
 
 
-def _products_index(roles: dict[str, _Role]) -> tuple[dict[str, dict], dict[str, dict]]:
+def _products_index(
+    roles: dict[str, _Role], headers: dict[tuple[Path, str], set[str]] | None = None,
+) -> tuple[dict[str, dict], dict[str, dict]]:
     by_id: dict[str, dict[str, Any]] = {}
     by_name: dict[str, dict[str, Any]] = {}
     if "products" not in roles:
         return by_id, by_name
     ambiguous: set[str] = set()
-    for _sheet, _ordinal, row in _role_rows(roles["products"]):
+    for _sheet, _ordinal, row in _role_rows(roles["products"], headers):
         if _blank(row.get("product_id")):
             continue
         key = str(row["product_id"]).strip()
@@ -901,7 +957,10 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
                 conventions: Conventions) -> tuple[list[Sale], dict[str, Any], frozenset[int]]:
     line_fields = set(roles["lines"].sections[0].fields)
     orders, order_counts = _orders_index(roles, rules)
-    products_by_id, products_by_name = _products_index(roles)
+    headers: dict[tuple[Path, str], set[str]] | None = None
+    if set(roles) <= {"lines", "products"} and not line_fields & {"customer_id", "customer_name"}:
+        headers = {}
+    products_by_id, products_by_name = _products_index(roles, headers)
     conversions, conversion_complete = _conversion_table(roles, conventions)
     customer_groups = _customers_index(roles)
     has_order_ids = "order_id" in line_fields
@@ -919,7 +978,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
     order_keys = [k for k in ("order_id", "date", "status", "status_note") if k in line_fields]
     count_keys = [k for k in ("quantity", "quantity_base") if k in line_fields]
     previous_sheet: str | None = None
-    for sheet, ordinal, row in _role_rows(roles["lines"]):
+    for sheet, ordinal, row in _role_rows(roles["lines"], headers):
         counts["line_rows_raw"] += 1
         if sheet != previous_sheet:
             group = {}
@@ -1144,6 +1203,8 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         "rules": list(rules.evidence),
         "readme_conventions": list(conventions.evidence),
     }
+    if headers is not None:
+        evidence["tables_without_customer_identity"] = _customer_identity_absence(catalog, headers)
     if fee_rows and rules.service_fee is None:
         eligible = set()
     return sales, evidence, frozenset(eligible)

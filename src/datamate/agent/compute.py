@@ -1353,6 +1353,21 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         if outside:
             return Candidate(reason="No sales in period; business coverage is not established",
                              evidence=evidence)
+    needs_customer = plan.intent == "top_customers" or (
+        plan.intent == "count_where" and plan.threshold is not None
+        and plan.threshold.subject == "customer"
+    )
+    tables = source.get("tables_without_customer_identity")
+    if needs_customer and tables:
+        absence_rule = next(
+            (line for line in rulebook.splitlines()
+             if "shop khong ghi loai thong tin cau hoi can thi khong tra loi duoc" in fold(line)),
+            "",
+        )
+        if absence_rule:
+            evidence["coverage_source"] = {"tables": tables, "rule": absence_rule}
+            return Candidate("unanswerable", None, 1.0,
+                             "Nguồn đã kiểm tra không ghi mã hoặc tên khách", evidence)
     if plan.intent in SALES_MEASURE_INTENTS:
         return _answer_sales_measure(cache, catalog, plan, rulebook, sales, evidence)
     product_call = ""

@@ -8,6 +8,8 @@ from decimal import Decimal
 from pathlib import Path
 
 from datamate.agent import sales_source
+from datamate.agent.compute import answer_plan
+from datamate.contracts import Plan
 from datamate.ingestion.catalog import build_catalog
 from datamate.ingestion.readme_sales import (
     ReadmeSalesError,
@@ -90,6 +92,42 @@ class _Shop(unittest.TestCase):
                         worksheet.append(row)
                 book.save(path)
         return build_catalog(self.data, business)
+
+
+class CustomerIdentityCoverageTests(_Shop):
+    def test_unanswerable_requires_a_complete_schema_and_split_rule(self):
+        absence_rule = ("- Không có dữ liệu khác với bằng 0: shop không ghi loại thông tin "
+                        "câu hỏi cần, thì không trả lời được, không phải 0.\n")
+        readme = FLAT_README.replace(
+            "- **Đối tác**: tên khách (Khách lẻ nếu không lưu)\n", "")
+        row = ["1", "2026-01-05", "hoàn thành", "Hàng A", "1", "hộp", "50", "1"]
+        plan = Plan("top_customers", date(2026, 1, 1), date(2026, 1, 31),
+                    top_k=1, rank_by="revenue")
+        files = {"ban_hang.csv": [FLAT_HEADER[:-1], row]}
+        cases = (
+            ("complete", readme, files, RULEBOOK + absence_rule, "unanswerable"),
+            ("title_and_product_metadata",
+             readme.replace("ban_hang.csv", "ban_hang.xlsx") + """
+## Cột trong `san_pham.csv`
+- **Mã**: mã hàng
+- **Tên**: tên hàng
+""",
+             {"ban_hang.xlsx": {"Tháng 1": [["Sổ bán hàng"], FLAT_HEADER[:-1], row]},
+              "san_pham.csv": [["Mã", "Tên", "Mô tả sản phẩm"], ["A", "Hàng A", "Hộp"]]},
+             RULEBOOK + absence_rule, "unanswerable"),
+            ("missing_rule", readme, files, RULEBOOK, "abstain"),
+            ("unknown_source", readme, {**files, "extra.csv": [["Người mua"], ["A"]]},
+             RULEBOOK + absence_rule, "abstain"),
+            ("blank_identity", FLAT_README,
+             {"ban_hang.csv": [FLAT_HEADER, row + [""]]}, RULEBOOK + absence_rule, "abstain"),
+        )
+        for name, description, sources, rules, expected in cases:
+            with self.subTest(name=name):
+                catalog = self.shop(description, sources, business=name)
+                result = answer_plan({}, catalog, plan, rules)
+                self.assertEqual(result.type, expected, result.reason)
+                self.assertEqual(bool(result.evidence.get("coverage_source")),
+                                 expected == "unanswerable")
 
 
 class ParsingTests(unittest.TestCase):
