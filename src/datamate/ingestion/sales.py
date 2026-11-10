@@ -55,6 +55,10 @@ class Sale:
     # "hình thức thanh toán" of the order, as written in the file (e.g. "cash", "Tiền mặt").
     # Matching a question word to it goes through the README's description of the labels.
     payment_method: str | None = None
+    # Optional product-catalog attributes.  They are kept separate from the display name
+    # because a shop may sell the same product family in several brands or sizes.
+    product_brand: str | None = None
+    product_size: str | None = None
 
 
 def parse_minute(value: Any) -> int | None:

@@ -355,6 +355,77 @@ JOINED_README = """# Dữ liệu shop
 
 
 class JoinedReadmeTests(_Shop):
+    def test_name_only_catalog_supplies_group_brand_size_and_base_unit(self):
+        readme = """# Shop
+## Cột trong `sales.csv`
+- **Mã đơn**: mã đơn
+- **Ngày**: ngày bán
+- **Trạng thái**: trạng thái đơn
+- **Tên hàng**: tên hàng
+- **SL**: số lượng
+- **ĐVT**: đơn vị tính
+- **Thành tiền**: thành tiền sau giảm
+- **SL cơ bản**: số lượng đã đổi ra đơn vị cơ bản
+## Cột trong `catalog.csv`
+- **Tên hàng**: tên hàng
+- **Nhóm**: nhóm hàng
+- **Hãng**: hãng
+- **Số / Size**: số / size
+- **ĐVT**: đơn vị cơ bản
+"""
+        catalog = self.shop(readme, {
+            "sales.csv": [
+                ["Mã đơn", "Ngày", "Trạng thái", "Tên hàng", "SL", "ĐVT",
+                 "Thành tiền", "SL cơ bản"],
+                ["O1", "01/01/2026", "completed", "Bỉm M", 2, "bịch", 200, 2],
+            ],
+            "catalog.csv": [
+                ["Tên hàng", "Nhóm", "Hãng", "Số / Size", "ĐVT"],
+                ["Bỉm M", "Bỉm tã", "Bobby", "M", "bịch"],
+            ],
+        })
+        sales, evidence, _eligible = load_readme_sales(catalog, RULEBOOK)
+        self.assertEqual(evidence["product_join"], {"by_name": 1})
+        self.assertEqual(
+            (sales[0].product_group, sales[0].product_brand,
+             sales[0].product_size, sales[0].base_unit),
+            ("Bỉm tã", "Bobby", "M", "bich"),
+        )
+
+    def test_name_only_catalog_does_not_guess_between_duplicate_names(self):
+        readme = """# Shop
+## Cột trong `sales.csv`
+- **Mã đơn**: mã đơn
+- **Ngày**: ngày bán
+- **Trạng thái**: trạng thái đơn
+- **Tên hàng**: tên hàng
+- **SL**: số lượng
+- **ĐVT**: đơn vị tính
+- **Thành tiền**: thành tiền sau giảm
+- **SL cơ bản**: số lượng đã đổi ra đơn vị cơ bản
+## Cột trong `catalog.csv`
+- **Tên hàng**: tên hàng
+- **Nhóm**: nhóm hàng
+- **Hãng**: hãng
+- **ĐVT**: đơn vị cơ bản
+"""
+        catalog = self.shop(readme, {
+            "sales.csv": [
+                ["Mã đơn", "Ngày", "Trạng thái", "Tên hàng", "SL", "ĐVT",
+                 "Thành tiền", "SL cơ bản"],
+                ["O1", "01/01/2026", "completed", "Trùng tên", 1, "cái", 10, 1],
+            ],
+            "catalog.csv": [
+                ["Tên hàng", "Nhóm", "Hãng", "ĐVT"],
+                ["Trùng tên", "A", "Hãng 1", "cái"],
+                ["Trùng tên", "B", "Hãng 2", "cái"],
+            ],
+        })
+        sales, evidence, _eligible = load_readme_sales(catalog, RULEBOOK)
+        self.assertEqual(evidence["product_join"], {"name_not_in_list": 1})
+        self.assertIsNone(sales[0].product_group)
+        self.assertIsNone(sales[0].product_brand)
+
     def files(self, orders=None, lines=None, lots=None):
         return {
             "don.csv": [["Mã CT", "Ngày", "Xử lý", "Tiền hàng"],

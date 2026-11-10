@@ -142,6 +142,14 @@ class Conventions:
 
 
 def meaning_field(meaning: str) -> str | None:
+    raw = unicodedata.normalize("NFC", meaning).casefold().strip().removesuffix(".")
+    # Accents are semantic here: ``hãng`` (brand) must not collapse onto ``hàng``
+    # (product).  Keep this check before fold().
+    if raw == "hãng":
+        return "product_brand"
+    if (raw in {"số / size", "số/size", "size", "kích cỡ"}
+            or (raw.startswith("số của sữa") and "size" in raw)):
+        return "product_size"
     text = fold(meaning).strip()
     if any(text.startswith(marker) for marker in _OTHER_LISTS):
         return "_other"
@@ -638,8 +646,10 @@ def _classify(sections: list[Section], catalog: Catalog) -> dict[str, _Role]:
         elif ("customer_id" in fields and "customer_group" in fields
               and not fields & {"order_id", "amount", "quantity"}):
             role = "customers"
-        elif ("product_id" in fields and fields & {"product_name", "name"}
-              and not fields & {"order_id", "quantity"}):
+        elif (fields & {"product_name", "name"}
+              and fields & {"product_id", "base_unit", "product_group",
+                            "product_brand", "product_size"}
+              and not fields & {"order_id", "quantity", "amount"}):
             role = "products"
         else:
             continue
@@ -812,16 +822,18 @@ def _products_index(roles: dict[str, _Role]) -> tuple[dict[str, dict], dict[str,
         return by_id, by_name
     ambiguous: set[str] = set()
     for _sheet, _ordinal, row in _role_rows(roles["products"]):
-        if _blank(row.get("product_id")):
+        name = row.get("name", row.get("product_name"))
+        if _blank(row.get("product_id")) and _blank(name):
             continue
-        key = str(row["product_id"]).strip()
-        if key in by_id:
+        key = None if _blank(row.get("product_id")) else str(row["product_id"]).strip()
+        if key is not None and key in by_id:
             raise ReadmeSalesError("DUPLICATE_PARENT_KEY", "Product list repeats a code",
                                    role="products")
-        name = row.get("name", row.get("product_name"))
         record = {"id": key, "name": None if _blank(name) else str(name).strip(),
-                  "base_unit": row.get("base_unit"), "group": row.get("product_group")}
-        by_id[key] = record
+                  "base_unit": row.get("base_unit"), "group": row.get("product_group"),
+                  "brand": row.get("product_brand"), "size": row.get("product_size")}
+        if key is not None:
+            by_id[key] = record
         if record["name"]:
             name_key = _name_key(record["name"])
             if name_key in by_name:
@@ -1114,6 +1126,8 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
                           product_id_is_name=product_id_is_name,
                           product_group=_text((product or {}).get("group")
                                               or line.get("product_group")),
+                           product_brand=_text((product or {}).get("brand")),
+                           product_size=_text((product or {}).get("size")),
                           **context))
         if not is_fee and count_keys:
             eligible.add(index)
