@@ -196,6 +196,8 @@ class JoinedSalesTests(unittest.TestCase):
                           Decimal("1500000.0"), Decimal("40")])
         self.assertEqual(sales[0].quantity_base, Decimal("48"))
         self.assertEqual(sales[0].product_id, "P001")
+        self.assertEqual(sales[0].base_unit, "can")
+        self.assertEqual(sales[0].product_group, "Drink")
         self.assertEqual(evidence["counts"]["detail_rows_raw"], 5)
         self.assertEqual(evidence["counts"]["sales_rows"], 5)
         self.assertEqual(evidence["join"]["join_expansion"], 0)

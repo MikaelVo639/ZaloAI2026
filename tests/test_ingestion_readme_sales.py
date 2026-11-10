@@ -629,6 +629,39 @@ class NoteStatusTests(unittest.TestCase):
 
 
 class AdapterSelectionTests(_Shop):
+    def test_flat_sales_get_documented_base_unit_without_changing_the_adapter(self):
+        readme = """# Flat export
+## Cột trong `sales.csv`
+- **order_id**: mã đơn
+- **order_date**: ngày bán
+- **status**: trạng thái đơn
+- **line_amount**: thành tiền sau giảm
+- **product_name**: tên hàng
+- **quantity_base**: số lượng đã đổi ra đơn vị cơ bản
+
+## Cột trong `products.csv`
+- **sku**: mã hàng
+- **name**: tên
+- **unit**: đơn vị cơ bản
+- **group**: nhóm hàng
+"""
+        catalog = self.shop(readme, {
+            "sales.csv": [
+                ["order_id", "order_date", "status", "line_amount", "product_name",
+                 "quantity_base"],
+                ["O1", "2026-01-01", "completed", "20", "Thước", "2"],
+            ],
+            "products.csv": [
+                ["sku", "name", "unit", "group"],
+                ["P1", "Thước", "cái", "Dụng cụ"],
+            ],
+        })
+        sales, evidence, _ = sales_source.load_business_sales(catalog, RULEBOOK)
+        self.assertEqual(evidence["adapter"], "flat_sales")
+        self.assertEqual((sales[0].base_unit, sales[0].product_group),
+                         ("cai", "Dụng cụ"))
+        self.assertEqual(evidence["product_context"]["matched_by_name"], 1)
+
     def test_readme_adapter_is_used_when_flat_headers_are_unknown(self):
         catalog = self.shop(FLAT_README, {"ban_hang.csv": FlatReadmeTests.rows(None)})
         sales, evidence, eligible = sales_source.load_business_sales(catalog, RULEBOOK)
