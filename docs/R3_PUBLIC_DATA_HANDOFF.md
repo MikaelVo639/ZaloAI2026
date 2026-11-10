@@ -12,16 +12,8 @@ claim that a public answer is correct. All implementation tests use synthetic fi
 - Existing code-based questions are safe: sales retain the README-described seller code in
   `Sale.staff_id`.
 - Seven of the nine audited questions already answer by an explicit code on current `main`.
-- The two name-based questions are `dev_006` and currently abstain in grammar. Its reviewed POS
-  directory maps:
-
-  | Code | Display name |
-  |---|---|
-  | `NV001` | Võ Trung Hoa |
-  | `NV002` | Từ Hùng Hằng |
-  | `NV003` | Đinh Đạt Đức |
-
-- All three seller codes used by sales exist in the directory; there are no duplicate names.
+- The two name-based questions currently abstain in grammar. The reviewed POS directory contains
+  all three seller codes used by sales, with unique display names.
 - `load_staff_directory()` exposes a name only when it identifies exactly one code. Duplicate
   names are returned in `ambiguous_names` and are not aliases, so a question naming only “An”
   remains abstain when two codes share that name.
@@ -56,14 +48,9 @@ sets for a future closed grammar. Existing base-unit conversion remains unchange
 - Product and customer groups remain separate fields: `Sale.product_group` and
   `Sale.customer_group`. A label must be resolved inside one namespace before planning.
 - The name-only catalogue fix restores all 12 documented product groups for `dev_013`.
-- On the 57-question `dev_013` subset, exactly three former abstentions now answer and no existing
-  answer changes:
-
-  | ID | Source filter | New answer type |
-  |---|---|---|
-  | `q_00c4e24fa228` | product group `đồ dùng` | number |
-  | `q_3e36677e62a9` | product group `sữa bột`, whole-shop denominator | percent |
-  | `q_b6d81403be69` | product group `bình sữa` | number |
+- On the 57-question `dev_013` subset, three former abstentions now answer. Two return a number
+  for a product group and one returns its share of whole-shop revenue. Existing answers match
+  the baseline.
 
 - The share denominator is still whole-shop revenue for the same period, as defined by the current
   rulebook. The Data change does not alter the numerator/denominator calculation.

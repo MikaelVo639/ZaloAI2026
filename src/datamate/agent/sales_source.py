@@ -7,8 +7,10 @@ detected joined schema):
 1. verified order/detail/product CSV signature -> joined adapter;
 2. verified XLSX order/detail/product export with README evidence (DATA-02 mapping)
    -> joined adapter;
-3. flat sales table whose headers match the known aliases -> flat adapter;
-4. lists described column by column in the business README -> README adapter.
+3. documented sales lines with an authoritative unit conversion or product catalogue
+   -> README adapter;
+4. flat sales table whose headers match the known aliases -> flat adapter;
+5. other lists described column by column in the business README -> README adapter.
 
 Joined and README capabilities must be stated by the rulebook of the split being answered.
 """
@@ -28,11 +30,15 @@ from datamate.ingestion.joined_sales import (
     load_joined_sales,
     mapping_for_xlsx_order_detail_product,
 )
-from datamate.ingestion.readme_sales import ReadmeSalesError, load_readme_sales
+from datamate.ingestion.readme_sales import (
+    ReadmeSalesError,
+    enrich_sales_from_readme_products,
+    load_readme_sales,
+    parse_sections,
+)
 from datamate.ingestion.sales import Sale, load_sales
 from datamate.ingestion.status import StatusError, status_policy
 from datamate.semantics.text import fold
-
 
 _JOIN_COLUMNS = {
     "orders": {
@@ -239,6 +245,22 @@ def _joined_result(catalog: Catalog, mapping: MappingSpec, rules: RuleCapabiliti
     return sales, source, frozenset(ranking_eligible)
 
 
+def _needs_documented_context(readme: str) -> bool:
+    fields_by_section = [set(section.fields) for section in parse_sections(readme)]
+    line_fields = {"order_id", "date", "status", "amount", "quantity", "unit"}
+    product_fields = {"product_id", "product_name"}
+    conversion_fields = {"big_unit", "factor", "base_unit"}
+    catalogue_fields = {"product_id", "base_unit", "product_group"}
+    lines = [fields for fields in fields_by_section
+             if line_fields <= fields and fields & product_fields]
+    conversions = any(conversion_fields <= fields and fields & product_fields
+                      for fields in fields_by_section)
+    products = any(catalogue_fields <= fields and fields & {"name", "product_name"}
+                   and not fields & {"order_id", "quantity"} for fields in fields_by_section)
+    return (conversions and any("quantity_base" not in fields for fields in lines)
+            or products and any("quantity_base" in fields for fields in lines))
+
+
 def load_business_sales(
     catalog: Catalog, rulebook: str,
 ) -> tuple[list[Sale], dict[str, Any], frozenset[int] | None]:
@@ -257,10 +279,27 @@ def load_business_sales(
         sales, source, eligible = _joined_result(
             catalog, mapping, _xlsx_rules(rulebook, catalog, mapping))
         return sales, {**source, "adapter": "joined_sales_xlsx"}, eligible
+    context_error = None
+    if _needs_documented_context(catalog.readme):
+        # The flat reader drops the companion conversion or product catalogue.
+        # Use the documented source first and retain the flat fallback on a typed failure.
+        try:
+            sales, evidence, eligible = load_readme_sales(catalog, rulebook)
+        except (ValueError, OSError) as exc:
+            context_error = exc
+        else:
+            return sales, {**evidence, "adapter": "readme_sales"}, eligible
     try:
         sales, evidence = load_sales(catalog)
-        return sales, {**evidence, "adapter": "flat_sales"}, None
+        try:
+            sales, product_context = enrich_sales_from_readme_products(catalog, sales)
+        except ReadmeSalesError as exc:
+            product_context = {"error": str(exc)}
+        return sales, {**evidence, "adapter": "flat_sales",
+                       "product_context": product_context}, None
     except ValueError as flat_error:
+        if context_error is not None:
+            raise ValueError(f"{flat_error}; README adapter: {context_error}") from context_error
         try:
             sales, evidence, eligible = load_readme_sales(catalog, rulebook)
         except ReadmeSalesError as readme_error:

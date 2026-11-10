@@ -1,5 +1,7 @@
 """Average purchase price of one product in a month (rulebook §5). Shops are synthetic."""
+import sqlite3
 import tempfile
+from contextlib import closing
 import unittest
 from datetime import date
 from decimal import Decimal
@@ -11,7 +13,7 @@ from datamate.agent import compute
 from datamate.agent.validation import check_executed
 from datamate.contracts import Question
 from datamate.ingestion import build_catalog
-from datamate.ingestion.purchases import PurchaseSourceError, load_purchase_lines
+from datamate.ingestion.purchases import PurchaseSourceError, load_purchase_lines, load_purchases
 from datamate.semantics.planner import plan_question
 from datamate.semantics.rules import read_rules
 
@@ -101,6 +103,78 @@ class PurchasePriceTests(unittest.TestCase):
         with self.assertRaises(PurchaseSourceError):  # no README price convention
             load_purchase_lines(self.catalog(BOOK_README.replace(CONVENTION, ""),
                                              {"so_nhap.csv": BOOK_ROWS}))
+
+    def test_purchase_minus_sales_converts_units_and_excludes_invalid_orders(self):
+        from test_ingestion_readme_sales import FLAT_README
+
+        rules = (BOOK
+                 + "| Trạng thái đơn | mỗi đơn có đúng một trong bốn trạng thái: "
+                   "hoàn thành, huỷ, trả hàng, đang giao |\n"
+                 + "| Nhập trừ bán | phần bán là số lượng của đơn tính vào doanh thu, "
+                   "quy về cùng đơn vị với phần nhập |\n")
+        readme = BOOK_README + FLAT_README + (
+            "- **Quy đổi đơn vị**:\n  - Bia Tiger lon: 1 thùng = 10 lon\n")
+        purchases = ("Số phiếu,Ngày nhập,Product,ĐVT,SL nhập,Giá nhập,Thành tiền\n"
+                     "P,03/06/2026,Bia Tiger lon,thùng,1,200000,200000\n"
+                     "OLD,31/05/2026,Bia Tiger lon,lon,5,1,5\n")
+        sales = ("Số HĐ,Ngày tháng,Kết quả,Nội dung,SL,ĐVT,Thành tiền,Quy ra lẻ,Đối tác\n"
+                 "A,04/06/2026,hoàn thành,Bia Tiger lon,4,lon,500,4,Khách lẻ\n"
+                 "B,05/06/2026,huỷ,Bia Tiger lon,9,lon,500,9,Khách lẻ\n"
+                 "C,06/06/2026,trả hàng,Bia Tiger lon,8,lon,500,8,Khách lẻ\n")
+        query = Question("q", "b", "Chênh lệch nhập trừ bán Bia Tiger lon T6/2026 là bao nhiêu lon?",
+                         date(2026, 7, 14))
+        parsed = plan_question(query, read_rules(rules), ["Bia Tiger lon"])
+        self.assertIsNotNone(parsed)
+        files = {"so_nhap.csv": purchases, "ban_hang.csv": sales}
+        candidate = check_executed(compute.answer_plan({}, self.catalog(readme, files),
+                                                       parsed, rules), parsed)
+        self.assertEqual((candidate.type, candidate.answer), ("number", 6), candidate.reason)
+        without_factor = self.catalog(readme.replace("  - Bia Tiger lon: 1 thùng = 10 lon\n", ""),
+                                      files)
+        self.assertEqual(compute.answer_plan({}, without_factor, parsed, rules).type, "abstain")
+
+        coded_readme = readme.replace("- **Nội dung**: tên hàng\n",
+                                      "- **Nội dung**: tên hàng\n- **Code**: mã hàng\n")
+        header, *sale_rows = sales.splitlines()
+        coded_sales = "\n".join([header + ",Code"] + [row + ",SKU1" for row in sale_rows]) + "\n"
+        coded_catalog = self.catalog(coded_readme, {**files, "ban_hang.csv": coded_sales})
+        code_query = Question("q2", "b", "Chênh lệch nhập trừ bán SKU1 T6/2026 là bao nhiêu lon?",
+                              query.as_of_date)
+        parsed_code = plan_question(code_query, read_rules(rules), ["SKU1"])
+        candidate = compute.answer_plan({}, coded_catalog, parsed_code, rules)
+        self.assertEqual((candidate.type, candidate.answer), ("number", 6), candidate.reason)
+
+    def test_sqlite_receipts_and_lines_match_readme_references(self):
+        readme = (
+            "## File\n- `pos.sqlite`\n\n## Quy ước\n"
+            "- **Nhập hàng**: `chi_tiet_nhap.DonGiaNhap` là giá nhập một đơn vị, "
+            "theo đơn vị nhập của dòng; `phieu_nhap.TongGiaTriNhap` là tổng tiền của cả phiếu nhập.\n"
+        )
+        catalog = self.catalog(readme, {})
+        shop = Path(self.directory.name) / catalog.business_id
+        with closing(sqlite3.connect(shop / "pos.sqlite")) as database:
+            database.executescript("""
+                CREATE TABLE phieu_nhap (MaPhieuNhap, NgayNhapKho, TongGiaTriNhap,
+                                         TinhTrang, MaNhaCungCap);
+                INSERT INTO phieu_nhap VALUES ('N1', '2026-06-02', 100, 'received', 'NCC1');
+                INSERT INTO phieu_nhap VALUES ('N2', '2026-06-03', 450, 'cancelled', 'NCC1');
+                CREATE TABLE chi_tiet_nhap (MaPhieuNhap, MaHangHoa, DonViTinh, SL, DonGiaNhap);
+                INSERT INTO chi_tiet_nhap VALUES ('N1', 'SP1', 'hộp', 2, 50);
+                INSERT INTO chi_tiet_nhap VALUES ('N2', 'SP1', 'hộp', 3, 150);
+                CREATE TABLE nha_cung_cap (MaNhaCungCap, TenGoi);
+                INSERT INTO nha_cung_cap VALUES ('NCC1', 'Cty A');
+            """)
+        catalog = build_catalog(Path(self.directory.name), "b")
+        book = load_purchases(catalog)
+        self.assertTrue(book.supplier_names)
+        self.assertEqual(book.receipts[0].supplier, "Cty A")
+        lines = load_purchase_lines(catalog)
+        self.assertEqual(compute.average_purchase_price(list(lines.lines), date(2026, 6, 1),
+                                                         date(2026, 6, 30)), Decimal(50))
+        (shop / "README.md").write_text(readme.replace("chi_tiet_nhap.DonGiaNhap", "x.DonGiaNhap"),
+                                       encoding="utf-8")
+        with self.assertRaises(PurchaseSourceError):
+            load_purchase_lines(build_catalog(Path(self.directory.name), "b"))
 
     def test_wordings(self):
         for text, unit in (

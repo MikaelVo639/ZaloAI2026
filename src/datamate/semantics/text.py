@@ -18,7 +18,7 @@ GRAMMAR_WORDS = frozenset("""
     don dong duoc gan gi gia gium giup ha hang het hien hoi hom huy khach la le luong mang
     mat may minh moi mon mot nam nao nay nhat nhieu nhiu nhung pham phan quan qua quy roi
     san so tai tam thai thang theo thu ti tien toi tong tram trang tren trong truoc trung
-    tu tuan ty vay ve xem xet
+    tinh ton tu tuan ty vay ve xem xet
     cung doi giam hay hon kem ke ky liet lien ngoai tang top truong voi vs
     con huong khong luon nguoi no phai sau tuc tung xu
     sang chieu tra bot chiu them thieu nha vao
@@ -61,7 +61,7 @@ _TRANSPOSABLE = frozenset("""
 _CLOSING = re.compile(
     r"(?:\s+(?:vay|day|dzay|zay|zi|z|v|a|ak|ah|ha|nhi|nha|nhe|nhen|hen|ne|di|the nhi|roi))+$")
 # Calling someone at the start of a question: "em ơi", "ad ơi", "ủa".
-_CALLING = re.compile(r"^(?:(?:(?:e|em|a|anh|chi|ad|admin|ban|be|shop) )?oi |(?:ui|ua) )+")
+_CALLING = re.compile(r"^(?:(?:(?:e|em|a|anh|chi|ad|admin|ban|be|shop) )?oi |(?:ui|ua|e{2,}) )+")
 # Month/year with a two-digit year: "12/25", "th 3/26". The data years 2020-2039 are all
 # above 12, so "1/26" cannot be a day and a month.
 _SHORT_YEAR = re.compile(r"(?<![\d/])(?:\b(?:thang|thg|th|t) ?)?(\d{1,2})/([23]\d)\b(?![\d/])")
@@ -136,11 +136,25 @@ _AMOUNT_BOUNDARY = r"(?<![\w.,/+\-−])(?<![\d.,+\-−] )"
 _GROUPED_DONG = re.compile(rf"{_AMOUNT_BOUNDARY}(\d{{1,3}}(?:[. ]\d{{3}})+) ?[đd]\b", re.I)
 _MILLIONS = re.compile(rf"{_AMOUNT_BOUNDARY}(\d+) (?:triệu|trieu)(?: (?:đồng|dong|đ|d))?\b"
                        r"(?! +\d)", re.I)
+# Parse shorthand in a lower threshold before folding punctuation or diacritics.
+_MONEY_THRESHOLD = re.compile(
+    r"\b(?:từ|tu) +(\d+)(k| +củ|tr[0-9]) +(?=(?:trở|tro) (?:lên|len|lne)\b)"
+)
+
 _ASK_COUNT = r"(?:bao nhieu|bnhiu|bn|nhieu|nhiu|may)"
 _STORE_SUBJECT = re.compile(r"\bquan(?= (?:ban|co|duoc|bi|chot|len|thu|dat|da)\b)")
 _COMPARISON_CUE = r"(?:tang hay giam|tang giam|thay doi|tang truong|hon hay kem)"
 _COLLOQUIAL_ENDING = re.compile(r"\b((?:thế|hè|rứa|nghe|nghen|za)"
                                   r"(?: (?:thế|hè|rứa|nghe|nghen|za))*)\W*$")
+
+
+def _threshold_dong(match: re.Match[str]) -> str:
+    digits, suffix = match.groups()
+    if suffix == "k":
+        return f"tu {digits}000 dong "
+    if suffix.startswith("tr"):
+        return f"tu {digits}{suffix[-1]}00000 dong "
+    return f"tu {digits}000000 dong "
 
 
 def _store_subject(text: str, raw: str, names: tuple[str, ...]) -> str:
@@ -173,7 +187,7 @@ def _closing_wording(text: str, raw: str) -> str:
     suffix = re.escape(fold(ending[1]))
     slot = r"(?:gi|j|nao|phan tram|don(?: hang)?|tien|roi|khong|ko|chua)"
     if re.search(r"\b(?:doanh thu|dthu|tien|don|phan tram)\b", text):
-        slot = rf"(?:{slot}|{_ASK_COUNT})"
+        slot = rf"(?:{slot}|{_ASK_COUNT}|nh(?:at|ut))"
     return re.sub(rf"\b({slot}) {suffix}$", r"\1", text)
 
 
@@ -183,6 +197,7 @@ def _everyday_wording(text: str, original: str, value: str, names: tuple[str, ..
     amounts = _GROUPED_DONG.sub(lambda m: m[1].replace(".", " ") + " dong", raw)
     amounts = _MILLIONS.sub(lambda m: f"{int(m[1]):,}".replace(",", " ") + " 000 000 dong",
                             amounts)
+    amounts = _MONEY_THRESHOLD.sub(_threshold_dong, amounts)
     if amounts != raw:
         text = normalize_question(amounts)
     text = _store_subject(text, raw, names)

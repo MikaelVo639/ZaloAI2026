@@ -83,7 +83,9 @@ class Plan:
     shape: str = ""
     threshold: Threshold | None = None
     unit: str = ""  # "bán được bao nhiêu <đơn vị>": the base unit asked for (intent quantity)
-    rank_by: str = ""  # top_customers: "revenue" (nhiều tiền) | "order_count" (nhiều đơn)
+    # top_customers: "revenue" | "order_count"; top_products in a group: "" (quantity) | "revenue".
+    rank_by: str = ""
+    observed_on: date | None = None  # delivery order cohort uses a separate observation date
 
 
 # C01 (docs/AGENT_02_CONTRACT.md). Intents asked "đến hết ngày X" (rulebook §2): the answer is

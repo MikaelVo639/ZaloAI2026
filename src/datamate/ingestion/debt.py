@@ -160,6 +160,21 @@ _DEBT_PROFILES = (
             "Customer ID": "mã khách", "ten_kh": "tên khách",
         }),
     )),
+    ("debt_pos_sqlite.v1", (
+        ({"MaHoaDon", "NgayLap", "TinhTrang", "TongThanhToan", "PhuongThucTT", "KenhBanHang"}, {
+            "MaHoaDon": "mã đơn", "NgayLap": "ngày bán", "TinhTrang": "trạng thái đơn",
+            "TongThanhToan": "số khách phải trả cho cả đơn", "PhuongThucTT": "hình thức thanh toán",
+            "KenhBanHang": "kênh bán", "MaKhachHang": "mã khách",
+            "ConPhaiThu": "còn nợ cuối dữ liệu", "KhachDaTra": "đã thanh toán",
+        }),
+        ({"MaHoaDon", "NgayGioThu", "SoTienThu"}, {
+            "MaHoaDon": "mã đơn", "NgayGioThu": "thời điểm thu",
+            "SoTienThu": "số tiền trả lần đó",
+        }),
+        ({"MaKhachHang", "TenGoi"}, {
+            "MaKhachHang": "mã khách", "TenGoi": "tên khách",
+        }),
+    )),
 )
 
 _DEBT_PROFILE_CANDIDATES = {
@@ -174,6 +189,12 @@ _DEBT_PROFILE_CANDIDATES = {
         ("payments", {"Mã bill", "Số tiền thu"}, _DEBT_PROFILES[1][1][1][1]),
         ("payments", {"Mã bill", "Thời gian thu"}, _DEBT_PROFILES[1][1][1][1]),
         ("payments", {"Thời gian thu", "Số tiền thu"}, _DEBT_PROFILES[1][1][1][1]),
+    ),
+    "debt_pos_sqlite.v1": (
+        ("orders", {"MaHoaDon", "TongThanhToan"}, _DEBT_PROFILES[2][1][0][1]),
+        ("payments", {"MaHoaDon", "SoTienThu"}, _DEBT_PROFILES[2][1][1][1]),
+        ("payments", {"MaHoaDon", "NgayGioThu"}, _DEBT_PROFILES[2][1][1][1]),
+        ("payments", {"NgayGioThu", "SoTienThu"}, _DEBT_PROFILES[2][1][1][1]),
     ),
 }
 
@@ -211,7 +232,7 @@ def _profile_sections(catalog: Catalog, documented: list[Section],
                     break
             if matched:
                 continue
-            for role, marker, meanings in _DEBT_PROFILE_CANDIDATES[version]:
+            for role, marker, meanings in _DEBT_PROFILE_CANDIDATES.get(version, ()):
                 if marker <= header:
                     found.append(Section(
                         table.path.name, table.name,
@@ -667,9 +688,16 @@ def _money_unit(readme: str) -> tuple[str, Decimal, tuple[str, ...]]:
     )
     hint = re.compile(
         r"\bdon vi tien\b|\btien te\b|"
-        r"\b(?:cot tien|so tien|tien)\b.*\b(?:don vi|(?:tinh|ghi|luu) (?:bang|theo))\b|"
+        r"\b(?:cot tien|so tien|tien) (?:deu )?(?:duoc )?"
+        r"(?:co don vi|(?:tinh|ghi|luu) (?:bang|theo))\b|"
         r"\b(?:nghin|ngan|trieu|ty) dong\b|"
-        r"\b(?:vnd|eur|usd|jpy|gbp|cny|krw|aud|cad|cent|xu)\b"
+        r"\b(?:vnd|eur|usd|jpy|gbp|cny|krw|aud|cad|cent)\b|\bxu\b(?! ly\b)"
+    )
+    # A bare "Đơn vị" can describe products. Treat it as money only when the
+    # declared value starts with a currency or a scale followed by a currency.
+    short_declaration = re.compile(
+        r"^don vi *[:=] *(?:la +)?(?=`?(?:(?:nghin|ngan|trieu|ty) +)?"
+        r"(?:vnd|dong|eur|usd|jpy|gbp|cny|krw|aud|cad|cent|xu)\b)"
     )
     accepted = {
         "vnd": "vnd", "dong": "vnd",
@@ -679,17 +707,18 @@ def _money_unit(readme: str) -> tuple[str, Decimal, tuple[str, ...]]:
     evidence: list[str] = []
     units: set[str] = set()
     for line in readme.splitlines():
-        text = fold(line)
-        if text not in accepted and not hint.search(text) and not declaration.match(text):
-            continue
-        evidence.append(line.strip())
-        # Keep operators and punctuation in the unit expression until it is validated.
+        # Keep punctuation until the amount expression has been validated.
         normalized = unicodedata.normalize("NFD", line.casefold().replace("đ", "d"))
         normalized = "".join(char for char in normalized if unicodedata.category(char) != "Mn")
         normalized = re.sub(r"^\s*(?:[-*+]|#{1,6})\s+", "", normalized)
         normalized = re.sub(r"\*\*([^*]+)\*\*", r"\1", normalized)
         normalized = " ".join(normalized.split()).removesuffix(".").strip()
-        unit = declaration.sub("", normalized, count=1)
+        text = fold(line)
+        if (text not in accepted and not hint.search(text) and not declaration.match(text)
+                and not short_declaration.match(normalized)):
+            continue
+        evidence.append(line.strip())
+        unit = declaration.sub("", short_declaration.sub("", normalized, count=1), count=1)
         if unit.startswith("`") and unit.endswith("`"):
             unit = unit[1:-1].strip()
         units.add(accepted.get(unit, "unsupported"))

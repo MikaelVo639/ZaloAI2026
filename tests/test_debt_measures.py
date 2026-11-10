@@ -2,6 +2,7 @@
 debt_collected and debt_flow. Rulebook rows and ledgers are synthetic, written for tests.
 """
 import unittest
+from unittest.mock import patch
 from datetime import date
 from decimal import Decimal
 
@@ -95,8 +96,8 @@ class DebtGrammarTests(unittest.TestCase):
 
     def test_unread_conditions_and_missing_rules_abstain(self):
         for text in (
-            "Đến hết ngày 14/07/2026 khách còn nợ bao nhiêu ở nhóm tuổi nợ 0-7 ngày, 8-15 ngày "
-            "và trên 15 ngày?",  # buckets: not decided in the contract
+            "Đến hết ngày 14/07/2026 khách còn nợ bao nhiêu ở nhóm tuổi nợ 0-6 ngày, 7-15 ngày "
+            "và trên 15 ngày?",  # different buckets
             "Đến hết ngày 14/07/2026 khách Trần Thị Lan còn nợ cửa hàng tổng cộng bao nhiêu tiền?",
             "Khách hàng còn nợ cửa hàng tổng cộng bao nhiêu tiền?",  # no snapshot day
             "Đến hết ngày 14/07/2026 khách sỉ còn nợ cửa hàng tổng cộng bao nhiêu tiền?",
@@ -118,6 +119,8 @@ class DebtExecutionTests(unittest.TestCase):
         self.assertEqual(compute.debt_total(LEDGER, day, 12), Decimal(80000))
         self.assertEqual(compute.debt_total(LEDGER, day, 13, inclusive=True), Decimal(80000))
         self.assertEqual(compute.debt_total(LEDGER, day, 13), Decimal(30000))
+        self.assertEqual(compute.debt_age_buckets(LEDGER, day), [0, 70000, 30000])
+        self.assertEqual(compute.debt_age_buckets(LEDGER, date(2026, 7, 9)), [20000, 50000, 30000])
         self.assertEqual(compute.debt_customer_count(LEDGER, day), 1)  # K1; walk-in not counted
         # June: new debt 100k - 40k paid on the day; repaid 30k (10/6).
         self.assertEqual(compute.debt_flow(LEDGER, date(2026, 6, 1), date(2026, 6, 30)),
@@ -145,6 +148,8 @@ class DebtExecutionTests(unittest.TestCase):
             ("Tính đến hết ngày 14/07/2026 khách hàng còn nợ cửa hàng tổng cộng bao nhiêu tiền?",
              100000),
             ("Đến hết ngày 14/07/2026 số khách còn công nợ với cửa hàng là bao nhiêu?", 1),
+            ("Đến hết ngày 14/07/2026 khách còn nợ bao nhiêu ở nhóm tuổi nợ 0–7 ngày, "
+             "8–15 ngày và trên 15 ngày?", [0, 70000, 30000]),
             ("Tháng 6/2026 thu hồi được bao nhiêu tiền công nợ từ khách mua chịu?", 30000),
             ("Tháng 6/2026 khách Trần Thị Lan ghi nợ thêm bao nhiêu và trả nợ được bao nhiêu",
              [60000, 30000]),
@@ -153,6 +158,21 @@ class DebtExecutionTests(unittest.TestCase):
                 result, candidate = self.answer(text)
                 self.assertEqual(candidate.answer, expected)
                 self.assertIs(check_executed(candidate, result), candidate)
+
+    def test_debt_source_absence_requires_inventory_proof_and_split_rule(self):
+        rule = ("- Không có dữ liệu khác với bằng 0: shop không ghi loại thông tin câu hỏi "
+                "cần, thì không trả lời được, không phải 0.\n")
+        result = plan("Đến hết ngày 14/07/2026 khách còn nợ tổng cộng bao nhiêu tiền?")
+        for state, rulebook_text, expected in (
+            ({"code": "absent", "sources_complete": True}, BOOK + rule, "unanswerable"),
+            ({"code": "absent", "sources_complete": True}, BOOK, "abstain"),
+            ({"code": "partial", "sources_complete": False}, BOOK + rule, "abstain"),
+        ):
+            with self.subTest(state=state, expected=expected):
+                with patch.object(compute, "prepare_debt", return_value={
+                        "ok": False, "reason": "source check", "debt_source_error": state}):
+                    candidate = compute.answer_plan({}, Catalog("b", "", ()), result, rulebook_text)
+                self.assertEqual(check_executed(candidate, result).type, expected)
 
     def test_unknown_customer_and_instalments_abstain(self):
         _, candidate = self.answer("Tháng 6/2026 khách Mai ghi nợ thêm bao nhiêu và trả nợ được "

@@ -84,6 +84,37 @@ class PurchaseTests(unittest.TestCase):
             load_purchases(self.catalog(LIST_README, "phieu.csv",
                                         LIST_ROWS.replace("Đã hủy", "Phiếu tạm")))
 
+    def test_repeated_totals_and_supplier_identity(self):
+        readme = LIST_README.replace("- **Mã NCC**", "- **Tên NCC**: nhà cung cấp\n"
+                                     "- **STT**: số thứ tự dòng trong phiếu nhập\n- **Mã NCC**")
+        rows = ("Mã,Ngày,Mã NCC,Tên NCC,STT,Tổng,TT\n"
+                "PN1,02/06/2026,A,Cty An,0,2000000,Đã nhập hàng\n"
+                "PN1,02/06/2026,A,Cty An,2,2000000,Đã nhập hàng\n"
+                "PN1,02/06/2026,A,Cty An,3,2000000,Đã nhập hàng\n"
+                "PN2,03/06/2026,B,Cty Bình,1,3000000,Đã nhập hàng\n")
+        catalog = self.catalog(readme, "phieu.csv", rows)
+        total = compute.answer_plan({}, catalog, plan("Tổng tiền nhập hàng tháng 6/2026?"))
+        self.assertEqual(total.answer, 5_000_000)
+        top = plan("Tháng 6/2026 tiền nhập hàng từ nhà cung cấp nào cao nhất?")
+        self.assertEqual(compute.answer_plan({}, catalog, top).answer, "Cty Bình")
+
+        # A second supplier uses the same display name as A. Grouping by name would
+        # incorrectly rank their combined value above B.
+        rows += "PN3,04/06/2026,C,Cty An,1,1500000,Đã nhập hàng\n"
+        rows += "PN4,05/06/2026,A,Cty An,1,100000,Đã nhập hàng\n"
+        catalog = self.catalog(readme, "phieu.csv", rows)
+        self.assertEqual(compute.answer_plan({}, catalog, top).answer, "Cty Bình")
+        book = BOOK + "| Nhà cung cấp chính | nhà cung cấp có nhiều phiếu nhập nhất, bỏ phiếu huỷ |\n"
+        main = plan_question(Question("q", "b", "Tháng 6/2026 nhà cung cấp chính là ai?",
+                                      date(2026, 7, 14)), read_rules(book))
+        self.assertEqual(compute.answer_plan({}, catalog, main).answer, "Cty An")
+        conflict = self.catalog(readme, "phieu.csv", rows.replace(",2,2000000,", ",2,1000000,"))
+        self.assertEqual(compute.answer_plan({}, conflict, top).type, "abstain")
+        missing_code = self.catalog(readme, "phieu.csv", rows.replace(",C,Cty An,", ",,Cty An,"))
+        self.assertEqual(compute.answer_plan({}, missing_code, main).type, "abstain")
+        missing_line = self.catalog(readme, "phieu.csv", rows.replace(",0,2000000,", ",,2000000,"))
+        self.assertEqual(compute.answer_plan({}, missing_line, top).type, "abstain")
+
     def test_wordings_and_answers(self):
         for text, intent in (
             ("Tổng tiền nhập hàng tháng 6/2026 là bao nhiêu?", "purchase_total"),
@@ -91,6 +122,7 @@ class PurchaseTests(unittest.TestCase):
             ("Tháng 6/2026 nhập hàng hết bao nhiêu tiền?", "purchase_total"),
             ("Tháng 6/2026 tổng giá trị các phiếu nhập hàng là bao nhiêu?", "purchase_total"),
             ("Tháng 6/2026 tiền nhập hàng từ nhà cung cấp nào cao nhất?", "top_supplier"),
+            ("Tháng 6/2026 nhà cung cấp nào có tổng tiền nhập hàng lớn nhất?", "top_supplier"),
         ):
             with self.subTest(text=text):
                 self.assertEqual(plan(text).intent, intent)

@@ -25,14 +25,17 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections import Counter, defaultdict
+from contextlib import ExitStack, closing
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from itertools import groupby
+from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from datamate.contracts import Catalog, Table
 from datamate.ingestion.catalog import iter_rows
-from datamate.ingestion.sales import Sale, parse_date, parse_minute
+from datamate.ingestion.sales import Sale, parse_date, parse_minute, price_per_base_unit
 from datamate.ingestion.source_names import filename_key
 from datamate.ingestion.status import StatusError, status_policy
 from datamate.ingestion.status import order_state as canonical_order_state
@@ -301,23 +304,34 @@ _PHONE_LEDGER_COLUMNS = {
 }
 
 
-def _header_names(table: Table) -> set[str]:
-    """Header of a table, looking below title rows of an xlsx report if needed."""
-    names = set(table.columns)
-    if table.path.suffix.lower() != ".xlsx" or len(names - {c for c in names
-                                                           if c.startswith("_empty_")}) > 2:
-        return names
-    from openpyxl import load_workbook
+def _table_headers(tables: Iterable[Table]) -> list[tuple[Table, set[str]]]:
+    """Look below title rows while opening at most one workbook at a time."""
+    headers = []
+    for path, group in groupby(tables, key=lambda table: table.path):
+        with ExitStack() as resources:
+            book = None
+            for table in group:
+                names = set(table.columns)
+                if (path.suffix.lower() == ".xlsx"
+                        and sum(not name.startswith("_empty_") for name in names) <= 2):
+                    if book is None:
+                        from openpyxl import load_workbook
 
-    book = load_workbook(table.path, read_only=True, data_only=True, keep_links=False)
-    try:
-        for values in book[table.name].iter_rows(max_row=_HEADER_SCAN_ROWS, values_only=True):
-            cells = {str(v).strip() for v in values if v is not None and str(v).strip()}
-            if len(cells) > 2:
-                return cells
-    finally:
-        book.close()
-    return names
+                        book = resources.enter_context(closing(load_workbook(
+                            path, read_only=True, data_only=True, keep_links=False)))
+                    rows = book[table.name].iter_rows(max_row=_HEADER_SCAN_ROWS, values_only=True)
+                    with closing(rows):
+                        for values in rows:
+                            cells = {str(v).strip() for v in values if v is not None and str(v).strip()}
+                            if len(cells) > 2:
+                                names = cells
+                                break
+                headers.append((table, names))
+    return headers
+
+
+def _header_names(table: Table) -> set[str]:
+    return _table_headers((table,))[0][1]
 
 
 def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Section]:
@@ -328,8 +342,8 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
     """
     text = fold(catalog.readme)
     covered = {filename_key(s.file) for s in documented}
-    headers = [(table, _header_names(table)) for table in catalog.tables
-               if filename_key(table.path.name) not in covered]
+    headers = _table_headers(table for table in catalog.tables
+                             if filename_key(table.path.name) not in covered)
 
     # Handwritten phone ledgers document the semantics in their conventions instead of
     # repeating a column dictionary.  Require the complete convention and exact header
@@ -541,6 +555,52 @@ def parse_day(value: Any, sheet: str = "") -> date:
 
 # ---------------------------------------------------------------- tables
 
+def _customer_identity_absence(
+    catalog: Catalog, roles: dict[str, _Role], headers: dict[tuple[Path, str], set[str]],
+) -> list[str]:
+    """Prove absence only for a catalog fully described by known non-customer columns."""
+    non_customer = {
+        "order_id", "date", "status", "product_id", "product_name", "name",
+        "quantity", "quantity_base", "unit", "base_unit", "amount", "unit_price",
+        "product_group", "unit_cost_at_sale",
+    }
+    product_metadata = {
+        "bảo hành", "ghi chú", "loại hàng hóa", "mã hh liên quan", "mã vạch ean",
+        "mô tả sản phẩm", "trọng lượng", "tồn lớn nhất", "tồn nhỏ nhất", "vị trí",
+        "mẫu ghi chú", "thương hiệu", "vị trí kệ", "được bán trực tiếp",
+        "định mức tồn tối thiểu", "định mức tồn tối đa",
+    }
+    covered = set()
+    selected = [pair for entry in roles.values() for pair in entry.tables]
+    for section in parse_sections(catalog.readme):
+        for meaning in section.columns.values():
+            if (meaning_field(meaning) not in non_customer
+                    and fold(meaning) not in {"gia ban hien tai", "gia von"}):
+                return []
+        tables = [table for documented, table in selected if documented == section]
+        if not tables:
+            return []
+        fields = section.fields.keys()
+        product_list = (
+            "product_id" in fields and bool(fields & {"name", "product_name"})
+            and not fields & {"order_id", "amount", "date", "quantity"}
+        )
+        for table in tables:
+            key = (table.path, table.name)
+            if key not in headers:
+                return []
+            header = headers[key]
+            extras = header - section.columns.keys()
+            if product_list:
+                extras = {name for name in extras if name.casefold() not in product_metadata}
+            if extras or section.columns.keys() - header:
+                return []
+            covered.add(key)
+    if covered != {(table.path, table.name) for table in catalog.tables}:
+        return []
+    return sorted(table.key for table in catalog.tables)
+
+
 def _matching_tables(catalog: Catalog, section: Section) -> list[Table]:
     wanted = filename_key(section.file)
     placeholder = re.compile(r"<[^<>]+>")
@@ -563,8 +623,8 @@ def _matching_tables(catalog: Catalog, section: Section) -> list[Table]:
                if t.path in files and (section.sheet is None or t.name == section.sheet)]
     if section.sheet is None and len(matches) > 1:
         documented_columns = set(section.columns)
-        compatible = [table for table in matches
-                      if documented_columns <= _header_names(table)]
+        compatible = [table for table, header in _table_headers(matches)
+                      if documented_columns <= header]
         if compatible:
             matches = compatible
     return matches
@@ -670,11 +730,27 @@ def _classify(sections: list[Section], catalog: Catalog) -> dict[str, _Role]:
     return roles
 
 
-def _role_rows(entry: _Role) -> Iterator[tuple[str, int, dict[str, Any]]]:
+_BASE_PRICE_MEANINGS = {
+    "don gia theo don vi co ban", "don gia don vi co ban",
+    "don gia tinh theo don vi co ban", "don gia cho mot don vi co ban",
+    "don gia mot don vi co ban", "don gia da quy doi ve don vi co ban",
+}
+
+
+def _role_rows(
+    entry: _Role, headers: dict[tuple[Path, str], set[str]] | None = None,
+) -> Iterator[tuple[str, int, dict[str, Any]]]:
     for section, table in entry.tables:
         fields = section.fields
+        key = (table.path, table.name)
+        price_column = fields.get("unit_price", "")
+        price_is_base = fold(section.columns.get(price_column, "")) in _BASE_PRICE_MEANINGS
         for ordinal, raw in _records(table, section.columns):
+            if headers is not None and key not in headers:
+                headers[key] = {name for name in raw if not re.fullmatch(r"_empty_\d+", name)}
             row = {key: raw.get(column) for key, column in fields.items()}
+            if price_is_base:
+                row["_unit_price_is_base"] = True
             row["_header_repeat"] = bool(fields) and all(
                 _name_key(row.get(key)) == _name_key(column)
                 for key, column in fields.items()
@@ -811,17 +887,21 @@ def _orders_index(roles: dict[str, _Role], rules: _Rules
             raise ReadmeSalesError("DUPLICATE_PARENT_KEY", "Order list repeats an order id",
                                    role="orders")
         orders[key] = {**row, "_sheet": sheet}
+    for row in orders.values():
+        row.pop("_cells")
     counts["orders"] = len(orders)
     return orders, counts
 
 
-def _products_index(roles: dict[str, _Role]) -> tuple[dict[str, dict], dict[str, dict]]:
+def _products_index(
+    roles: dict[str, _Role], headers: dict[tuple[Path, str], set[str]] | None = None,
+) -> tuple[dict[str, dict], dict[str, dict]]:
     by_id: dict[str, dict[str, Any]] = {}
     by_name: dict[str, dict[str, Any]] = {}
     if "products" not in roles:
         return by_id, by_name
     ambiguous: set[str] = set()
-    for _sheet, _ordinal, row in _role_rows(roles["products"]):
+    for _sheet, _ordinal, row in _role_rows(roles["products"], headers):
         name = row.get("name", row.get("product_name"))
         if _blank(row.get("product_id")) and _blank(name):
             continue
@@ -859,6 +939,46 @@ def _customers_index(roles: dict[str, _Role]) -> dict[str, dict[str, str | None]
         customers[key] = {"group": _text(row.get("customer_group")),
                           "name": _text(row.get("customer_name", row.get("name")))}
     return customers
+
+
+def enrich_sales_from_readme_products(catalog: Catalog, sales: list[Sale]
+                                      ) -> tuple[list[Sale], dict[str, int]]:
+    """Attach documented product attributes to an otherwise valid flat export.
+
+    This does not alter the flat adapter's row grain, amounts, statuses, identifiers or
+    quantities.  A product is enriched only through a unique README-described product
+    parent, joined by code when the sale has one and otherwise by an unambiguous name.
+    """
+    sections = parse_sections(catalog.readme)
+    sections += profile_sections(catalog, sections)
+    roles = _classify(sections, catalog)
+    if "products" not in roles:
+        return sales, {"matched_by_code": 0, "matched_by_name": 0, "unmatched": len(sales)}
+    by_id, by_name = _products_index(roles)
+    counts = Counter()
+    enriched: list[Sale] = []
+    for sale in sales:
+        if sale.product_id and not sale.product_id_is_name:
+            product = by_id.get(sale.product_id)
+            counts["matched_by_code" if product is not None else "unmatched"] += 1
+        elif sale.product_name:
+            product = by_name.get(_name_key(sale.product_name))
+            counts["matched_by_name" if product is not None else "unmatched"] += 1
+        else:
+            counts["unmatched"] += 1
+        if product is None:
+            enriched.append(sale)
+            continue
+        base_unit = (_name_key(product["base_unit"])
+                     if not _blank(product.get("base_unit")) else sale.base_unit)
+        enriched.append(replace(
+            sale,
+            base_unit=sale.base_unit or base_unit,
+            product_group=sale.product_group or _text(product.get("group")),
+            product_brand=sale.product_brand or _text(product.get("brand")),
+            product_size=sale.product_size or _text(product.get("size")),
+        ))
+    return enriched, dict(counts)
 
 
 def joined_customer_sources(
@@ -913,7 +1033,10 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
                 conventions: Conventions) -> tuple[list[Sale], dict[str, Any], frozenset[int]]:
     line_fields = set(roles["lines"].sections[0].fields)
     orders, order_counts = _orders_index(roles, rules)
-    products_by_id, products_by_name = _products_index(roles)
+    headers: dict[tuple[Path, str], set[str]] | None = None
+    if set(roles) <= {"lines", "products"} and not line_fields & {"customer_id", "customer_name"}:
+        headers = {}
+    products_by_id, products_by_name = _products_index(roles, headers)
     conversions, conversion_complete = _conversion_table(roles, conventions)
     customer_groups = _customers_index(roles)
     has_order_ids = "order_id" in line_fields
@@ -931,7 +1054,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
     order_keys = [k for k in ("order_id", "date", "status", "status_note") if k in line_fields]
     count_keys = [k for k in ("quantity", "quantity_base") if k in line_fields]
     previous_sheet: str | None = None
-    for sheet, ordinal, row in _role_rows(roles["lines"]):
+    for sheet, ordinal, row in _role_rows(roles["lines"], headers):
         counts["line_rows_raw"] += 1
         if sheet != previous_sheet:
             group = {}
@@ -953,6 +1076,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
             # carry no order and no quantity: they are not sales lines.
             counts["summary_rows_skipped"] += 1
             continue
+        cells = row.pop("_cells")
         if has_order_ids:
             if _blank(row.get("order_id")):
                 if not group or rules.blank_cells_inherit is None:
@@ -973,7 +1097,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
                     elif not _blank(row.get(name)):
                         seen_first.setdefault(name, row[name])
             group = {k: row.get(k) for k in _ORDER_FIELDS if k in line_fields}
-            fingerprint = (key, sheet, row["_cells"])
+            fingerprint = (key, sheet, cells)
             if fingerprint in seen and rules.duplicate_rows_once:
                 counts["duplicates_removed"] += 1
                 continue
@@ -982,6 +1106,8 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
             key = f"{sheet}#{ordinal}"
             counts["rows_as_records"] += 1
         lines.append({**row, "_order": key, "_sheet": sheet})
+    seen.clear()
+    first_values.clear()
 
     status_counts: Counter[str] = Counter()
     order_state: dict[str, dict[str, Any]] = {}
@@ -1122,12 +1248,13 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         sales.append(Sale(key, final_day[key], final_status[key], amount, product_id,
                           product_name, quantity_base, minute=final_time[key],
                           quantity_sold=line["_quantity"],
+                          unit_price_base=_line_price_per_base(line, quantity_base),
                           unit_cost_at_sale=optional_sale_cost(line.get("unit_cost_at_sale")),
                           product_id_is_name=product_id_is_name,
                           product_group=_text((product or {}).get("group")
                                               or line.get("product_group")),
-                           product_brand=_text((product or {}).get("brand")),
-                           product_size=_text((product or {}).get("size")),
+                          product_brand=_text((product or {}).get("brand")),
+                          product_size=_text((product or {}).get("size")),
                           **context))
         if not is_fee and count_keys:
             eligible.add(index)
@@ -1158,6 +1285,9 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         "rules": list(rules.evidence),
         "readme_conventions": list(conventions.evidence),
     }
+    if headers is not None:
+        evidence["tables_without_customer_identity"] = _customer_identity_absence(
+            catalog, roles, headers)
     if fee_rows and rules.service_fee is None:
         eligible = set()
     return sales, evidence, frozenset(eligible)
@@ -1187,6 +1317,19 @@ def _base_unit(line: dict[str, Any], product: dict[str, Any] | None,
     if source == "file" and quantity_base is not None and line.get("_quantity") == quantity_base:
         return unit
     return None
+
+
+def _line_price_per_base(line: dict[str, Any], quantity_base: Decimal | None) -> Decimal | None:
+    raw = line.get("unit_price")
+    if _blank(raw):
+        return None
+    try:
+        price = parse_amount(raw)
+    except ValueError:
+        return None
+    if line.get("_unit_price_is_base"):
+        return price if price.is_finite() and price >= 0 else None
+    return price_per_base_unit(price, line["_quantity"], quantity_base)
 
 
 def _base_quantity(line: dict[str, Any], product: dict[str, Any] | None,

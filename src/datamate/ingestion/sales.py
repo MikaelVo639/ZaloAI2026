@@ -55,10 +55,21 @@ class Sale:
     # "hình thức thanh toán" of the order, as written in the file (e.g. "cash", "Tiền mặt").
     # Matching a question word to it goes through the README's description of the labels.
     payment_method: str | None = None
+    unit_price_base: Decimal | None = None  # documented line price per base unit
     # Optional product-catalog attributes.  They are kept separate from the display name
     # because a shop may sell the same product family in several brands or sizes.
     product_brand: str | None = None
     product_size: str | None = None
+
+
+def price_per_base_unit(price: Decimal, sold: Decimal | None,
+                        base: Decimal | None) -> Decimal | None:
+    """Convert a documented price per selling unit using the line's quantity ratio."""
+    if not price.is_finite() or price < 0 or not sold or not base:
+        return None
+    if not sold.is_finite() or not base.is_finite() or sold * base <= 0:
+        return None
+    return price * sold / base
 
 
 def parse_minute(value: Any) -> int | None:
