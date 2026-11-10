@@ -97,6 +97,7 @@ def normalize_question(value: object, *, product_names: Iterable[str] | None = N
     # Central "ni" = "này": "năm ni", "tháng ni", "bữa ni".
     text = re.sub(r"\b(nam|thang|tuan|quy|hom|bua) ni\b", r"\1 nay", text)
     text = re.sub(r"\bbua (nay|qua)\b", r"hom \1", text)
+    text = re.sub(r"\bla chi$", "la gi", text)  # central "là chi" = "là gì", closing a question
     text = re.sub(r"\bth (truoc|roi|nay|lien truoc)\b", r"thang \1", text)  # "th trước"
     text = re.sub(r"\b(thang|tuan) vua (?:roi|qua)\b", r"\1 truoc", text)
     text = re.sub(r"\bthang roi\b", "thang truoc", text)

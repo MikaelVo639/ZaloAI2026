@@ -41,6 +41,37 @@ Inference không được mở answers; tests có kiểm tra ranh giới này. �
 business/schema chưa dùng để thiết kế giải pháp; tự chia holdout sau khi đã xem dữ
 liệu không tự tạo ra một đánh giá mù.
 
+### Nhãn train nghi lỗi
+
+Một câu trả lời đúng luật nhưng lệch nhãn train vẫn được tính là **sai** trong metrics;
+scorer không loại ID nào. Nhóm chỉ chấp nhận câu đó khi có đủ ba điều: rulebook của split
+quy định rõ cách tính, dữ liệu kiểm lại được theo đúng luật đó, và các câu cùng loại trên
+train đều khớp nhãn theo cùng cách tính. Ghi câu vào bảng dưới, báo BTC, và A/B vẫn phải
+0 câu sai mới ngoài các ID trong bảng.
+
+| ID | Shop | Câu hỏi | Hệ thống trả | Vì sao giữ |
+|---|---|---|---|---|
+| `q_02eb42db6665` | `biz_125` | "tháng 5/2025 hàng nào bán chạy nhất" | Bia Sài Gòn Special lon | Xem dưới |
+
+`q_02eb42db6665`: luật "Bán chạy" tính theo số lượng quy về đơn vị cơ bản, không theo
+số dòng hay số tiền, bỏ đơn huỷ và trả. Theo cột "Số lượng lẻ" (README: đã đổi ra đơn
+vị cơ bản), các đơn "Đã hoàn thành" tháng 5/2025 có Special 303 lon, xếp trên mặt hàng
+nhãn chọn (300 lon). Nhãn chỉ khớp khi đếm số dòng, số tiền hoặc số lượng chưa quy đổi.
+Trên 58 câu "bán chạy" train mà hai cách xếp (quy đổi và chưa quy đổi) khác nhau, 57 câu
+khớp cách quy đổi, không câu nào khớp cách chưa quy đổi. Kiểm lại:
+
+```sh
+python - data/raw/train/data/biz_125/ban_hang.csv <<'PY'
+import csv, collections, sys
+total = collections.Counter()
+for r in csv.DictReader(open(sys.argv[1], encoding="utf-8-sig")):
+    day, month, year = r["Ngày bán"].split("/")
+    if (month, year) == ("05", "2025") and r["Trạng thái xử lý"] == "Đã hoàn thành":
+        total[r["Hàng bán"]] += int(r["Số lượng lẻ"])
+print(total.most_common(3))
+PY
+```
+
 ## Docker với network tắt
 
 Tạo demo trước bằng smoke command, sau đó build:

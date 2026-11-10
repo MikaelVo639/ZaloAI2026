@@ -130,7 +130,8 @@ _INTENTS = (
      rf"|{_ONE} {_ORDER} {_AVERAGE}(?P<mid3>.*?) {_MONEY_PER_ORDER}"
      rf"|{_AVERAGE} {_ORDER}(?P<mid4>.*?) (?:gia tri|tri gia) {_AMOUNT}\b", ()),
     ("top_products", None,
-     r"(?:(?P<count>\d+|(?<=\btop )(?:hai|ba|bon|nam|sau)) )?"
+     # Keep a period year separate from the requested ranking count.
+     r"(?:(?P<count>(?<![/\d])\d+|(?<=\btop )(?:hai|ba|bon|nam|sau)) )?"
      r"(?:mat hang|san pham|hang|mon)(?: nao)? "
      rf"{_TOP_SELLING}\b",
      (r"\bla (?:nhung )?(?:mon|hang) nao$",)),
