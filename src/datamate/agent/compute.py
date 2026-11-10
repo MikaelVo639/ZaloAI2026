@@ -884,13 +884,13 @@ def purchase_totals(receipts: tuple[Receipt, ...], start: date, end: date
 
 
 def supplier_ranking(receipts: tuple[Receipt, ...], start: date, end: date,
-                     by_count: bool) -> list[tuple[str, Decimal]]:
+                     by_count: bool, by_code: bool) -> list[tuple[str, Decimal]]:
     scores: dict[str, Decimal] = defaultdict(Decimal)
     names = {}
     for receipt in receipts:
         if receipt.cancelled or not start <= receipt.day <= end:
             continue
-        identity = receipt.supplier_code or receipt.supplier
+        identity = receipt.supplier_code if by_code else receipt.supplier
         if not identity or not receipt.supplier:
             raise ValueError("A receipt is missing its supplier")
         if names.setdefault(identity, receipt.supplier) != receipt.supplier:
@@ -931,7 +931,7 @@ def _answer_purchase(cache: dict[str, Any], catalog: Catalog, plan: Plan) -> Can
                          evidence=evidence)
     by_count = plan.intent == "main_supplier"
     try:
-        ranking = supplier_ranking(book.receipts, plan.start, plan.end, by_count)
+        ranking = supplier_ranking(book.receipts, plan.start, plan.end, by_count, book.supplier_codes)
     except ValueError as exc:
         return Candidate(reason=str(exc), evidence=evidence)
     if not ranking:
@@ -942,7 +942,8 @@ def _answer_purchase(cache: dict[str, Any], catalog: Catalog, plan: Plan) -> Can
     if len(leaders) != 1:
         return Candidate(reason="Several suppliers tie for first place",
                          evidence=evidence)
-    evidence.update(code=_code(f"max(supplier_ranking(receipts, {window}, {by_count}), "
+    evidence.update(code=_code(f"max(supplier_ranking(receipts, {window}, {by_count}, "
+                               f"{book.supplier_codes}), "
                                "key=lambda item: item[1])[0]", supplier_ranking), result=leaders[0])
     return Candidate("string", leaders[0], 1.0, "", evidence)
 
@@ -1042,18 +1043,27 @@ def _answer_purchase_difference(cache: dict[str, Any], catalog: Catalog, plan: P
         return Candidate(reason="Period coverage is missing for purchases or sales")
     name = plan.filters[0].value
     matches = select_product(sales, name)
-    codes = {row.product_id for row in matches if row.product_id}
-    if not matches or len(codes) > 1:
+    codes = {row.product_id for row in matches if row.product_id and not row.product_id_is_name}
+    if (not matches or len(codes) > 1
+            or (codes and any(not row.product_id or row.product_id_is_name for row in matches))):
         return Candidate(reason="Product identity is missing or ambiguous")
     if codes:
         matches = select_product_code(sales, next(iter(codes)))
     units = {fold(row.base_unit) for row in matches if row.base_unit}
     if units != {fold(plan.unit)}:
         return Candidate(reason="Requested unit is not the documented base unit")
-    if any(line.product_id for line in book.lines) and not codes:
-        return Candidate(reason="Cannot join purchase lines to sales by product code")
-    lines = purchase_lines_of(book.lines, name, codes)
-    current = [line for line in lines if plan.start <= line.day <= plan.end and not line.cancelled]
+    period_lines = [line for line in book.lines
+                    if plan.start <= line.day <= plan.end and not line.cancelled]
+    if book.product_codes:
+        if not codes or any(not line.product_id for line in period_lines):
+            return Candidate(reason="Cannot join purchase lines to sales by product code")
+        current = [line for line in period_lines if line.product_id in codes]
+    else:
+        names = {fold(row.product_name) for row in matches if row.product_name}
+        if len(names) != 1:
+            return Candidate(reason="Cannot join purchases to a unique sales product name")
+        name = next(iter(names))
+        current = [line for line in period_lines if fold(line.product_name or "") == name]
     sold = select_valid(matches, plan.start, plan.end)
     if any(row.quantity_base is None or not row.base_unit for row in sold):
         return Candidate(reason="Missing sales quantities or base units")

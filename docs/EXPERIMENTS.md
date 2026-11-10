@@ -49,6 +49,11 @@ Smoke đạt 21 đúng / 0 sai / 3 abstain theo local proxy. Unittest chạy 394
 ca, 393 qua và 1 skip. Trên Windows, cấu hình `safe.directory` chỉ áp
 cho checkout và thư mục test tạm trong tiến trình chạy test.
 
+Rà soát trước PR bổ sung kiểm tra mã nhà cung cấp, khóa hàng, số dòng
+phiếu và giới hạn kết quả theo cohort giao hàng. Chạy lại 50 câu train
+thuộc các intent bị ảnh hưởng và toàn bộ 1.000 câu public, mọi bản ghi
+đều khớp lượt sau sửa ở trên.
+
 Thứ tự tích hợp đề xuất là chốt ánh xạ nguồn với Data & Schema, xem
 `Plan` và ngữ pháp với Semantics, rồi xem phép tính và evidence với Agent.
 Evaluation kiểm tra kết quả theo từng câu trên cùng split và manifest

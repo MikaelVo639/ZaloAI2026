@@ -1,8 +1,8 @@
 """Purchase receipts (phiếu nhập) of one business, from the lists its README describes.
 
-Two documented shapes: a receipt list with the total of each receipt ("tổng tiền phiếu
-nhập", optional "trạng thái phiếu nhập"), or a purchase book whose lines carry "tiền nhập
-của cả dòng" and are summed per receipt. A KiotViet receipt export without a README
+Receipt totals ("tổng tiền phiếu nhập") may appear once per receipt or repeat on documented
+detail rows. Purchase books carrying "tiền nhập của cả dòng" are summed per receipt.
+A KiotViet receipt export without a README
 section is read with the meanings KiotViet-export READMEs give its columns. Anything
 undocumented, inconsistent or with an unknown status raises ``PurchaseSourceError``.
 """
@@ -95,6 +95,7 @@ class PurchaseBook:
     receipts: tuple[Receipt, ...]
     supplier_names: bool  # True when ``supplier`` is a name, False for codes / unknown
     source: str
+    supplier_codes: bool = False
 
 
 def _field(meaning: str) -> str | None:
@@ -183,9 +184,11 @@ def load_purchases(catalog: Catalog) -> PurchaseBook:
             record = {"day": day, "supplier": supplier, "cancelled": cancelled, "code": code}
             if headers:
                 amount = parse_amount(row.get(fields["total"]))
+                line_id = row.get(fields.get("line_id", ""))
+                if "line_id" in fields and (line_id is None or not str(line_id).strip()):
+                    raise PurchaseSourceError("key", "Receipt detail is missing its line number")
                 if key in receipts:
-                    if ("line_id" not in fields or not row.get(fields["line_id"])
-                            or receipts[key] != record or totals[key] != amount):
+                    if "line_id" not in fields or receipts[key] != record or totals[key] != amount:
                         raise PurchaseSourceError("key", "Receipt headers repeat or disagree")
                 totals[key] = amount
             else:
@@ -202,7 +205,7 @@ def load_purchases(catalog: Catalog) -> PurchaseBook:
     return PurchaseBook(
         tuple(Receipt(key, r["day"], totals[key], r["supplier"], r["cancelled"], r["code"])
               for key, r in receipts.items()),
-        supplier_field == "supplier_name", section.label)
+        supplier_field == "supplier_name", section.label, "supplier_code" in fields)
 
 
 @dataclass(frozen=True)
@@ -222,6 +225,7 @@ class PurchaseLines:
     lines: tuple[PurchaseLine, ...]
     source: str
     convention: str
+    product_codes: bool = False
 
 
 def _price_convention(readme: str) -> tuple[str, str]:
@@ -328,4 +332,4 @@ def load_purchase_lines(catalog: Catalog) -> PurchaseLines:
         raise PurchaseSourceError("value", f"Purchase line unreadable: {exc}") from exc
     if not lines:
         raise PurchaseSourceError("absent", "Purchase line list is empty")
-    return PurchaseLines(tuple(lines), section.label, convention)
+    return PurchaseLines(tuple(lines), section.label, convention, "product_id" in fields)

@@ -131,6 +131,17 @@ class PurchasePriceTests(unittest.TestCase):
                                       files)
         self.assertEqual(compute.answer_plan({}, without_factor, parsed, rules).type, "abstain")
 
+        coded_readme = readme.replace("- **Nội dung**: tên hàng\n",
+                                      "- **Nội dung**: tên hàng\n- **Code**: mã hàng\n")
+        header, *sale_rows = sales.splitlines()
+        coded_sales = "\n".join([header + ",Code"] + [row + ",SKU1" for row in sale_rows]) + "\n"
+        coded_catalog = self.catalog(coded_readme, {**files, "ban_hang.csv": coded_sales})
+        code_query = Question("q2", "b", "Chênh lệch nhập trừ bán SKU1 T6/2026 là bao nhiêu lon?",
+                              query.as_of_date)
+        parsed_code = plan_question(code_query, read_rules(rules), ["SKU1"])
+        candidate = compute.answer_plan({}, coded_catalog, parsed_code, rules)
+        self.assertEqual((candidate.type, candidate.answer), ("number", 6), candidate.reason)
+
     def test_wordings(self):
         for text, unit in (
             ("Giá nhập bình quân một thùng Bia Tiger lon trong tháng 6 năm 2026 là bao nhiêu?",

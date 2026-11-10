@@ -156,6 +156,12 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
                 _check_debt_table(candidate, plan)
             if plan.intent == "cancel_rate" and not 0 <= candidate.answer <= 100:
                 raise ValueError("Cancellation percentage outside [0, 100]")
+            if plan.intent == "delivered_order_count":
+                count, bound = candidate.answer, evidence.get("cohort_size")
+                if (type(count) is not int or type(bound) is not int or not 0 <= count <= bound
+                        or evidence.get("observed_on") != plan.observed_on.isoformat()
+                        or evidence.get("minimum_trips") != int(plan.threshold.value)):
+                    raise ValueError("Delivery evidence disagrees with the order cohort or cutoff")
             if plan.intent == "count_where":
                 bound = (evidence.get("customers_bought") if plan.threshold.subject == "customer"
                          else evidence.get("inputs", {}).get("selected_rows"))
