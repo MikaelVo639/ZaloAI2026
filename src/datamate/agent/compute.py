@@ -61,7 +61,7 @@ from datamate.ingestion.stock import (
 )
 from datamate.semantics.payment import FIELDS as PAYMENT_FIELDS
 from datamate.semantics.payment import label_terms
-from datamate.semantics.rules import DEBT_TABLE_FEATURES, read_rules
+from datamate.semantics.rules import DEBT_TABLE_FEATURES, Rules, read_rules
 from datamate.semantics.text import fold
 
 
@@ -358,7 +358,8 @@ INTENTS = (frozenset({"revenue", "order_count", "top_products", "average_order",
                      "top_customers", "count_where", "quantity", "top_staff", "stock", "stock_split",
                      "purchase_total", "top_supplier", "main_supplier", "avg_purchase_price",
                      "delivered_order_count", "purchase_sales_difference", "daily_sale_price"})
-           | C01_INTENTS | DEBT_INTENTS | INDEPENDENT_INTENTS | SALES_MEASURE_INTENTS)
+           | C01_INTENTS | DEBT_INTENTS | INDEPENDENT_INTENTS | SALES_MEASURE_INTENTS
+           | {"top_product_brand", "average_amount_due", "average_phone_revenue"})
 # Plan filters this backend applies, and the intents each one may be combined with.
 FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock", "stock_split",
                                      "avg_purchase_price", "earliest_expiry",
@@ -398,6 +399,18 @@ def unsupported(plan: Plan) -> str:
         return ""
     if plan.observed_on is not None:
         return "Observation date is only supported for delivery order cohorts"
+    if plan.intent in {"top_product_brand", "average_amount_due", "average_phone_revenue"}:
+        if (plan.start > plan.end or plan.top_k != 1 or plan.periods or plan.shape
+                or plan.threshold or plan.comparison or plan.compare_start or plan.compare_end
+                or plan.rank_by):
+            return f"Unsupported fields for {plan.intent}"
+        if plan.intent == "top_product_brand":
+            if (tuple(item.field for item in plan.filters) != ("product_group", "product_size")
+                    or not all(fold(item.value) for item in plan.filters) or not fold(plan.unit)):
+                return "Brand ranking requires a product group, catalogue size and base unit"
+        elif plan.filters or plan.unit:
+            return "Phone ledger averages do not take filters or units"
+        return ""
     if plan.intent == "daily_sale_price":
         if (plan.start != plan.end or len(plan.filters) != 1 or plan.filters[0].field != "product"
                 or not plan.unit or plan.top_k != 1 or plan.periods or plan.shape or plan.threshold
@@ -1562,6 +1575,99 @@ def daily_sale_price(sales: list[Sale], day: date, unit: str) -> Decimal | None:
     return next(iter(prices)) if len(prices) == 1 else None
 
 
+def order_amount_due_totals(rows: list[Sale]) -> tuple[Decimal, int]:
+    amounts: dict[str, Decimal] = {}
+    for row in rows:
+        amount = row.order_amount_due
+        if (not row.order_id or amount is None or not amount.is_finite() or amount < 0
+                or amounts.setdefault(row.order_id, amount) != amount):
+            raise ValueError("Amount due is missing or inconsistent across order lines")
+    return sum(amounts.values(), Decimal(0)), len(amounts)
+
+
+def phone_revenue_totals(rows: list[Sale]) -> tuple[Decimal, int]:
+    amount, units = Decimal(0), 0
+    for row in rows:
+        kind = fold(row.phone_item_kind or "")
+        if kind == "phu kien":
+            continue
+        quantity = row.quantity_sold
+        if (kind not in {"may moi", "may cu"} or quantity is None or not quantity.is_finite()
+                or quantity <= 0 or quantity != quantity.to_integral_value()):
+            raise ValueError("Unknown phone item kind or invalid sold quantity")
+        amount += row.amount
+        units += int(quantity)
+    return amount, units
+
+
+def _answer_phone_average(plan: Plan, sales: list[Sale], rules: Rules,
+                          evidence: dict[str, Any]) -> Candidate:
+    due = plan.intent == "average_amount_due"
+    enabled = (rules.average_amount_due and rules.average_order if due
+               else rules.average_phone_revenue and rules.money_is_revenue)
+    if not (rules.revenue and enabled):
+        return Candidate(reason="Required phone ledger measure rules are absent", evidence=evidence)
+    rows = select_valid(sales, plan.start, plan.end)
+    totals = order_amount_due_totals if due else phone_revenue_totals
+    try:
+        amount, count = totals(rows)
+    except ValueError as exc:
+        return Candidate(reason=str(exc), evidence=evidence)
+    if not count:
+        return Candidate(reason="No valid orders or phones in period", evidence=evidence)
+    value = int(_vnd(amount / count))
+    evidence.update(numerator=str(amount), denominator=count, result=value,
+                    code=_code(f"amount, count = {totals.__name__}(select_valid(sales, "
+                               f"{plan.start!r}, {plan.end!r}))\nint(_vnd(amount / count))",
+                               select_valid, totals, _vnd))
+    return Candidate("number", value, 1.0, "", evidence)
+
+
+def brand_quantity_ranking(rows: list[Sale]) -> list[tuple[str, Decimal]]:
+    totals: dict[str, Decimal] = defaultdict(Decimal)
+    names: dict[str, str] = {}
+    for row in rows:
+        name = row.product_brand
+        quantity = row.quantity_base
+        if not name or not fold(name) or quantity is None or not quantity.is_finite() or quantity < 0:
+            raise ValueError("Brand or base quantity is missing or invalid")
+        key = fold(name)
+        names[key] = min(name, names.get(key, name))
+        totals[key] += quantity
+    return [(names[key], totals[key]) for key in sorted(totals, key=lambda k: (-totals[k], k))]
+
+
+def _answer_brand_ranking(plan: Plan, sales: list[Sale], eligible: frozenset[int] | None,
+                          rules: Rules, evidence: dict[str, Any]) -> Candidate:
+    if not (rules.revenue and rules.quantity_ranking and rules.product_group
+            and rules.catalogue_size and rules.unit_quantity and rules.ties_by_code):
+        return Candidate(reason="Required brand ranking rules are absent", evidence=evidence)
+    rows = select_valid(ranking_candidates(sales, eligible), plan.start, plan.end)
+    if any(not fold(row.product_group or "") for row in rows):
+        return Candidate(reason="A ranked item's group is unknown", evidence=evidence)
+    group, size = (item.value for item in plan.filters)
+    rows = select_group(select_group(rows, "product_group", group), "product_size", size)
+    if any(not fold(row.base_unit or "") for row in rows):
+        return Candidate(reason="A ranked item's base unit is unknown", evidence=evidence)
+    rows = select_base_unit(rows, plan.unit)
+    try:
+        ranking = brand_quantity_ranking(rows)
+    except ValueError as exc:
+        return Candidate(reason=str(exc), evidence=evidence)
+    if not ranking:
+        return Candidate(reason="No sale matches the group, size and unit", evidence=evidence)
+    result = ranking[0][0]
+    window = f"{plan.start!r}, {plan.end!r}"
+    selection = (f"select_group(select_group(select_valid(ranking_candidates(sales, eligible), "
+                 f"{window}), 'product_group', {group!r}), 'product_size', {size!r})")
+    evidence.update(result=result, unit=plan.unit,
+                    ranking=[(name, str(quantity)) for name, quantity in ranking[:2]],
+                    code=_code(f"brand_quantity_ranking(select_base_unit({selection}, "
+                               f"{plan.unit!r}))[0][0]", ranking_candidates, select_valid,
+                               select_group, select_base_unit, brand_quantity_ranking))
+    return Candidate("string", result, 1.0, "", evidence)
+
+
 def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                 rulebook: str = "") -> Candidate:
     reason = unsupported(plan)
@@ -1645,6 +1751,11 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                              "Nguồn đã kiểm tra không ghi mã hoặc tên khách", evidence)
     if plan.intent in SALES_MEASURE_INTENTS:
         return _answer_sales_measure(cache, catalog, plan, rulebook, sales, evidence)
+    if plan.intent in {"average_amount_due", "average_phone_revenue"}:
+        return _answer_phone_average(plan, sales, read_rules(rulebook), evidence)
+    if plan.intent == "top_product_brand":
+        return _answer_brand_ranking(plan, sales, cache.get("ranking_eligible"),
+                                     read_rules(rulebook), evidence)
     product_call = ""
     if plan.filters and plan.filters[0].field == "shift":
         return _answer_shift(plan, sales, rulebook, evidence)

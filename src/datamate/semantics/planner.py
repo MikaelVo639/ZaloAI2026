@@ -1,6 +1,7 @@
 """Semantics: question parsing and rules from the CURRENT split."""
 import calendar
 import re
+import unicodedata
 from collections.abc import Iterable
 from datetime import date, timedelta
 from decimal import Decimal
@@ -211,6 +212,13 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
             return price
     if _DRUG_CUE.search(text):
         return _drug_revenue(question, rules)
+    phone = _phone_average(text, today, rules)
+    if phone is not None:
+        return phone if isinstance(phone, Plan) else None
+    if re.search(r"\bhãng\b", unicodedata.normalize("NFC", question.question).casefold()):
+        brand = _brand_ranking(text, today, rules, vocabulary or {})
+        if brand is not None:
+            return brand if isinstance(brand, Plan) else None
     group = _group(text, vocabulary or {})
     if group is _AMBIGUOUS:
         return None
@@ -341,7 +349,7 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
             pattern = rf"(?:{pattern}|{_GROUP_AVERAGE})"
         if kind == "top_products":
             if product_group:
-                pattern = _GROUP_PRODUCT_RANK
+                pattern = rf"(?:\bthi )?{_GROUP_PRODUCT_RANK}"
             if re.search(r"\btop \d+\b", text):
                 pattern = rf"\btop {pattern}(?: la chi\b)?"
             elif not product_group:
@@ -923,12 +931,17 @@ _AT_LEAST_ORDERS = re.compile(
     r"\b(?:(?:co mat |xuat hien )?o (?:tu )?(\d+) (?:don|bill)(?: hang)? khac nhau tro len"
     r"|(?:co mat |xuat hien )(?:o |trong )it nhat (\d+) (?:don|bill)(?: hang)?(?: khac nhau)?)\b")
 _THRESHOLD_SUBJECTS = (
-    ("day", re.compile(rf"\b(?:dem )?(?:so |co )?(?:{_AMOUNT} )?ngay\b(?! {_DATE}\b)")),
+    ("day", re.compile(rf"\b(?:dem )?(?:so |co )?(?:(?:{_AMOUNT} )?ngay(?! {_DATE}\b)"
+                       rf"|{_AMOUNT} bua)\b")),
     ("order", re.compile(rf"\b(?:dem )?(?:so |co )?(?:{_AMOUNT} )?{_ORDER}\b")),
 )
 _THRESHOLD_WORDS = re.compile(
     rf"\b(?:ma|co|dat|ca ngay|cua hang|ban duoc|ban|tien hang|tien ban|(?:tong )?{_REVENUE}|"
     r"duoc mua|la bao nhieu|la)\b")
+_THRESHOLD_PREFACE = re.compile(
+    r"^(?:minh|toi) (?:tinh|dang|dinh|du dinh) (?:dat|set) nguo(?:ng|g)"
+    r"(?: tang (?:qua|qa)| thuong)?(?: ne)? (?=(?:thang|quy|tuan|ngay)\b)"
+)
 
 
 def _thresholds(text: str, today: date, rules: Rules) -> Plan | None | bool:
@@ -956,6 +969,7 @@ def _thresholds(text: str, today: date, rules: Rules) -> Plan | None | bool:
     else:
         value = Decimal(money.group(1).replace(" ", ""))
         reduced = text[:money.start()] + " " + text[money.end():]
+        reduced = _THRESHOLD_PREFACE.sub("", reduced)
         subject = next((name for name, pattern in _THRESHOLD_SUBJECTS if pattern.search(reduced)),
                        None)
         if subject is None:
@@ -977,6 +991,77 @@ def _thresholds(text: str, today: date, rules: Rules) -> Plan | None | bool:
         return False
     threshold = Threshold(subject, measure, ">=", value, rules.row("threshold_inclusive") or "")
     return Plan("count_where", start, min(end, today), 1, _rows(rules, *used), threshold=threshold)
+
+
+_BRAND_UNITS = re.compile(
+    r"\bso (?P<number>\d+) cua hang nao ban (?:duoc )?(?:nhieu|nhiu) "
+    r"(?P<unit>[a-z]+) nh(?:at|ut)\b"
+)
+_BRAND_FILLERS = re.compile(
+    r"^(?:cho|cko) (?:minh|toi) (?:biet|bit)(?: xiu)?\b|\bgiup(?: minh| toi)?$"
+)
+
+
+def _brand_ranking(text: str, today: date, rules: Rules,
+                   vocabulary: dict[str, Iterable[str]]) -> Plan | bool | None:
+    match = _BRAND_UNITS.search(text)
+    if not match:
+        return None
+    used = ["product_group", "catalogue_size", "unit_quantity", "ties_by_code"]
+    if not (rules.revenue and rules.quantity_ranking and vocabulary.get("product_brand")
+            and all(getattr(rules, feature) for feature in used)):
+        return False
+    group_text = text[:match.start()].rstrip()
+    groups = [name for name in set(vocabulary.get("product_group", ()))
+              if (key := normalize_question(name))
+              and re.search(rf"\b{re.escape(key)}$", group_text)]
+    size = f"so {match['number']}"
+    sizes = [label for label in set(vocabulary.get("product_size", ())) if fold(label) == size]
+    if len(groups) != 1 or len(sizes) != 1 or match["unit"] in _NOT_UNITS:
+        return False
+    reduced = group_text[:-len(normalize_question(groups[0]))] + " " + text[match.end():]
+    resolved = _period(reduced, today, rules, used)
+    if resolved is None:
+        return False
+    start, end, leftover = resolved
+    leftover = _BRAND_FILLERS.sub(" ", re.sub(r"\s+", " ", leftover).strip())
+    if _FILLERS.sub(" ", leftover).strip() or start > today:
+        return False
+    filters = (Filter("product_group", groups[0], rules.row("product_group") or ""),
+               Filter("product_size", sizes[0], rules.row("catalogue_size") or ""))
+    return Plan("top_product_brand", start, min(end, today), evidence=_rows(rules, *used),
+                filters=filters, unit=match["unit"])
+
+
+_DUE_AVERAGE = re.compile(
+    rf"\b(?:tien )?khach phai tra"
+    rf"(?: sau (?:khi )?tru (?:bot|giam gia) va (?:tien )?(?:may cu thu lai|thu may cu))?"
+    rf" (?:binh quan|trung binh) {_ONE} {_ORDER} (?:la )?{_AMOUNT}(?: dong| tien)?\b"
+)
+_PHONE_AVERAGE = re.compile(
+    rf"\b(?:khong|ko) tinh phu kien (?:trung binh|binh quan) {_ONE}"
+    rf" may (?:dien thoai|dt) ban (?:duoc )?{_AMOUNT} tien\b"
+)
+
+
+def _phone_average(text: str, today: date, rules: Rules) -> Plan | bool | None:
+    match = _DUE_AVERAGE.search(text)
+    intent, used = "average_amount_due", ["average_amount_due", "average_order"]
+    if match is None:
+        match = _PHONE_AVERAGE.search(text)
+        if match is None:
+            return None
+        intent, used = "average_phone_revenue", ["average_phone_revenue", "money_is_revenue"]
+    if not rules.revenue or not all(getattr(rules, feature) for feature in used):
+        return False
+    reduced = text[:match.start()] + " " + text[match.end():]
+    resolved = _period(reduced, today, rules, used)
+    if resolved is None:
+        return False
+    start, end, leftover = resolved
+    if _FILLERS.sub(" ", leftover).strip() or start > today:
+        return False
+    return Plan(intent, start, min(end, today), evidence=_rows(rules, *used))
 
 
 # Đợt 3 gói 1: "các đơn trả bằng <hình thức>", "các đơn bán qua / tại <kênh>".

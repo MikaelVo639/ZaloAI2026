@@ -80,6 +80,9 @@ class Rules:
     stock_value: bool = False
     # Đợt 3 gói 1: doanh thu theo hình thức thanh toán ghi trên đơn (ghi nợ, COD riêng)
     payment_revenue: bool = False
+    catalogue_size: bool = False
+    average_amount_due: bool = False
+    average_phone_revenue: bool = False
     # Shifts by order time: (name, first minute, last minute) and the base of "ca chiều so
     # với ca sáng", read from the split's "Ca sáng, ca chiều" row; () when absent or unclear.
     shifts: tuple[tuple[str, int, int], ...] = ()
@@ -178,6 +181,14 @@ def read_rules(rulebook: str) -> Rules:
                              "nam nay neu khong sau hom nay", "nam truoc"),
         average_order=enable("average_order", _find(rows, "trung binh mot don"),
                              "lam tron ve dong", "nua dong lam tron len"),
+        catalogue_size=enable("catalogue_size", "so sua size bim",
+                              "lay theo cot so / size cua danh muc",
+                              "hang de trong cot so / size thi khong xep vao so size nao"),
+        average_amount_due=enable("average_amount_due", "thu may cu",
+                                  "khach phai tra la tien cua don sau bot va sau tru may cu",
+                                  "chi tinh don khong huy khong tra"),
+        average_phone_revenue=enable("average_phone_revenue", "dong may hang",
+                                     "may khach mang toi doi khong phai may ban"),
         cancelled_order=enable("cancelled_order", _find(rows, "don bi huy"),
                                "trang thai huy", "don tra hang khong phai don huy"),
         cancel_rate=enable("cancel_rate", _find(rows, "ti le don huy"),
