@@ -17,7 +17,7 @@ GRAMMAR_WORDS = frozenset("""
     don dong duoc gan gi gia gium giup ha hang het hien hoi hom huy khach la le luong mang
     mat may minh moi mon mot nam nao nay nhat nhieu nhiu nhung pham phan quan qua quy roi
     san so tai tam thai thang theo thu ti tien toi tong tram trang tren trong truoc trung
-    tu tuan ty vay ve xem xet
+    tinh ton tu tuan ty vay ve xem xet
     cung doi giam hay hon kem ke ky liet lien ngoai tang top truong voi vs
     con huong khong luon nguoi no phai sau tuc tung xu
     sang chieu tra bot chiu them thieu nha vao

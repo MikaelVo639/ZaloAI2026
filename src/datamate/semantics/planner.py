@@ -1015,7 +1015,8 @@ def _share(text: str) -> tuple[str, bool]:
 
 
 _SALE_PRICE = (
-    re.compile(rf"gia ban {_ONE} (?P<unit>[a-z][a-z0-9]*)(?: vao)? (?:la )?{_AMOUNT}(?: tien)?"),
+    re.compile(rf"gia ban {_ONE} (?P<unit>[a-z][a-z0-9]*)(?: vao)? "
+               rf"(?:la )?{_AMOUNT}(?: tien)?(?: ta)?"),
     re.compile(rf"(?:cua hang )?ban(?: ra)? (?:(?:voi )?don gia|gia) {_AMOUNT}(?: tien)? "
                rf"{_ONE} (?P<unit>[a-z][a-z0-9]*)"),
 )

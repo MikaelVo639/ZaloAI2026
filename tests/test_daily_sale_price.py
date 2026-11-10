@@ -28,6 +28,7 @@ class DailySalePriceTests(_Shop):
             "Ngày 05/01/2026 cửa hàng bán Bánh quy mè giá bao nhiêu một gói?",
             "Xem giúp hôm 05/01/2026 Bánh quy mè bán ra với đơn giá bao nhiêu tiền một gói?",
             "Cho hỏi giá bán một gói Bánh quy mè vào ngày 05/01/2026 là bn?",
+            "Giá bán một gói Bánh quy mè vào ngày 05/01/2026 là bnhiu ta?",
         ):
             with self.subTest(text=text):
                 self.assertIsNone(self.plan(text, RULEBOOK))

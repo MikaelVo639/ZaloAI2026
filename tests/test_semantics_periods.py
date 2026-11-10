@@ -42,6 +42,7 @@ class PeriodTests(unittest.TestCase):
         self.assertEqual(normalize_question("toongr dthu hnay laf bnhiu vaayj"),
                          "tong dthu hom nay la bnhiu")
         self.assertEqual(normalize_question("bữa qua có bao nhiu ddown"), "hom qua co bao nhiu don")
+        self.assertEqual(normalize_question("tinhs toonf kho"), "tinh ton kho")
         self.assertEqual(normalize_question("Tháng 8 năm 2025, quý 2 năm 2026"),
                          "thang 8/2025 quy 2/2026")
         # "lên", "thuốc"/"thuộc" and the closing "nhỉ" typed in Telex decode like any other
