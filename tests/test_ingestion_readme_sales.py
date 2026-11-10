@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from datamate.agent import sales_source
 from datamate.agent.compute import answer_plan
-from datamate.contracts import Plan
+from datamate.contracts import Catalog, Filter, Plan
 from datamate.ingestion.catalog import build_catalog
 from datamate.ingestion.readme_sales import (
     ReadmeSalesError,
@@ -24,6 +24,7 @@ from datamate.ingestion.readme_sales import (
     parse_quantity,
     parse_sections,
 )
+from datamate.ingestion.sales import Sale
 from datamate.ingestion.status import StatusError
 
 RULEBOOK = """# Synthetic split rules
@@ -93,6 +94,52 @@ class _Shop(unittest.TestCase):
                         worksheet.append(row)
                 book.save(path)
         return build_catalog(self.data, business)
+
+
+class VerifiedSalesCoverageTests(_Shop):
+    def test_monthly_coverage_requires_all_named_sheets_and_respects_explicit_bounds(self):
+        readme = FLAT_README.replace("ban_hang.csv", "sales.xlsx")
+        readme += "\nFile `sales.xlsx` chia mỗi tháng một sheet, tên sheet ghi tháng và năm.\n"
+        row = ["A", "15/01/2026", "Hoàn thành", "Bánh mè", 1, "gói", 100, 1, "Khách lẻ"]
+        missing_rule = ("\n- Không có dữ liệu khác với bằng 0: shop không ghi loại thông tin "
+                        "câu hỏi cần, thì không trả lời được, không phải 0.\n")
+        plan = Plan("revenue", date(2025, 12, 1), date(2025, 12, 31))
+        book = RULEBOOK + missing_rule
+        for name, doc, sheets, rules, expected in (
+            ("monthly", readme, {"T01_2026": [FLAT_HEADER, row]}, book, "unanswerable"),
+            ("within", readme + "\nKhoảng dữ liệu: 2025-12-01 đến 2026-01-31\n",
+             {"01.2026": [FLAT_HEADER, row]}, book, "abstain"),
+            ("undated", readme, {"Sheet1": [FLAT_HEADER, row]}, book, "abstain"),
+            ("no_rule", readme, {"01.2026": [FLAT_HEADER, row]}, RULEBOOK, "abstain"),
+        ):
+            with self.subTest(name=name):
+                catalog = self.shop(doc, {"sales.xlsx": sheets}, business=name)
+                result = answer_plan({}, catalog, plan, rules)
+                self.assertEqual(result.type, expected)
+                if expected == "unanswerable":
+                    self.assertEqual(result.evidence["coverage_source"]["first_sheet_month"],
+                                     "2026-01-01")
+        within_first_sheet = Plan("revenue", date(2026, 1, 1), date(2026, 1, 14))
+        catalog = self.shop(readme, {"sales.xlsx": {"01.2026": [FLAT_HEADER, row]}},
+                            business="first_month")
+        self.assertEqual(answer_plan({}, catalog, within_first_sheet, book).type, "abstain")
+
+    def test_spelling_variants_merge_only_when_all_rows_use_names_as_codes(self):
+        day = date(2026, 1, 15)
+        plan = Plan("revenue", day, day, filters=(Filter("product", "Café A"),))
+        first = Sale("O1", day, "valid", Decimal(100), "Café A", "Café A", Decimal(1),
+                     product_id_is_name=True)
+        for inferred, expected in ((True, "number"), (False, "abstain")):
+            with self.subTest(inferred=inferred):
+                second = Sale("O2", day, "valid", Decimal(200), "CAFE-A", "Café A", Decimal(1),
+                              product_id_is_name=inferred)
+                source = {"tables": ["synthetic"], "sales_rows": 2}
+                with patch("datamate.agent.compute.load_business_sales",
+                           return_value=([first, second], source, None)):
+                    result = answer_plan({}, Catalog("shop", "", ()), plan, RULEBOOK)
+                self.assertEqual(result.type, expected)
+                if inferred:
+                    self.assertEqual(result.answer, 300)
 
 
 class CustomerIdentityCoverageTests(_Shop):

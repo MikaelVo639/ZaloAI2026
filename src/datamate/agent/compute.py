@@ -50,6 +50,7 @@ from datamate.ingestion.purchases import (
 )
 from datamate.ingestion.readme_sales import field_meanings
 from datamate.ingestion.sales import Sale
+from datamate.ingestion.source_names import filename_key
 from datamate.ingestion.stock import (
     StockItem,
     StockSnapshot,
@@ -527,6 +528,8 @@ def unsupported(plan: Plan) -> str:
 def outside_data(sales: list[Sale], start: date, end: date, readme: str) -> str:
     """"" if the window overlaps the sales; "unanswerable" if README coverage excludes it."""
     days = [s.day for s in sales]
+    if not days:
+        return "unknown"
     if not (end < min(days) or start > max(days)):
         return ""
     # Absence of sales alone does not establish the business's coverage.
@@ -536,6 +539,44 @@ def outside_data(sales: list[Sale], start: date, end: date, readme: str) -> str:
         if end < first or start > last:
             return "unanswerable"
     return "unknown"
+
+
+def _monthly_sales_start(catalog: Catalog, source: dict[str, Any]) -> tuple[date, dict] | None:
+    """Infer the first covered month only from documented and loaded monthly sales sheets."""
+    if source.get("adapter") != "readme_sales":
+        return None
+    roles = source.get("sources", {})
+    if "orders" in roles and "lines" in roles:
+        return None  # No single documented role establishes the dates.
+    files = {filename_key(label.split("::", 1)[0])
+             for label in roles.get("orders", roles.get("lines", ()))}
+    for line in catalog.readme.splitlines():
+        if "chia moi thang mot sheet ten sheet ghi thang va nam" not in fold(line):
+            continue
+        declared = {filename_key(name) for name in re.findall(r"`([^`]+)`", line)}
+        if not files or declared != files:
+            continue
+        tables = [t for t in catalog.tables if filename_key(t.path.name) in declared]
+        if ({filename_key(t.path.name) for t in tables} != declared
+                or len({t.path for t in tables}) != len(declared)
+                or any(t.path.suffix.lower() != ".xlsx" or t.key not in source["tables"]
+                       for t in tables)):
+            return None
+        months: set[date] = set()
+        for table in tables:
+            match = re.fullmatch(r"(?:T)?(0?[1-9]|1[0-2])[._-](20\d{2})",
+                                 table.name, flags=re.IGNORECASE)
+            if match is None:
+                return None
+            month, year = map(int, match.groups())
+            months.add(date(year, month, 1))
+        first, last = min(months), max(months)
+        if (len(months) != len(tables)
+                or len(months) != (last.year - first.year) * 12 + last.month - first.month + 1):
+            return None
+        return first, {"readme_line": line, "first_sheet_month": first.isoformat(),
+                       "tables": sorted(t.key for t in tables)}
+    return None
 
 
 def select_product(sales: list[Sale], value: str) -> list[Sale]:
@@ -1394,6 +1435,14 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                              reason="Kỳ hỏi nằm hoàn toàn ngoài khoảng dữ liệu ghi trong README",
                              evidence=evidence)
         if outside:
+            rule = _absence_rule(rulebook)
+            monthly = (_monthly_sales_start(catalog, source)
+                       if rule and not COVERAGE.search(catalog.readme) else None)
+            if monthly and window_end < monthly[0] <= min(s.day for s in sales):
+                evidence["coverage_source"] = {**monthly[1], "rule": rule}
+                return Candidate("unanswerable", None, 1.0,
+                                 "Kỳ hỏi trước tháng đầu của các sheet bán hàng đã xác minh",
+                                 evidence)
             return Candidate(reason="No sales in period; business coverage is not established",
                              evidence=evidence)
     needs_customer = plan.intent == "top_customers" or (
@@ -1432,10 +1481,12 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         matched = select_product(sales, value)
         codes = {s.product_id for s in matched}
         evidence["inputs"].update(product_rows=len(matched), product_codes=sorted(map(str, codes)))
-        if len(codes) != 1:
+        names_only = (len(codes) > 1 and all(s.product_id_is_name for s in matched)
+                      and None not in codes and len({fold(c) for c in codes}) == 1)
+        if len(codes) != 1 and not names_only:
             return Candidate(reason="Product filter matches no product or several product codes",
                              evidence=evidence)
-        code = next(iter(codes))
+        code = None if names_only else next(iter(codes))
         if code is not None:
             # Rulebook "Tên gọi": a file with codes identifies the product by its code, so
             # every spelling of that product's name counts ("30ml" and "30 ml").
