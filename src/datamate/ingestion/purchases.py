@@ -15,13 +15,13 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
-from datamate.contracts import Catalog
+from datamate.contracts import Catalog, Table
 from datamate.ingestion.readme_sales import (
     ReadmeSalesError,
     Section,
-    _header_names,
     _matching_tables,
     _records,
+    _table_headers,
     parse_amount,
     parse_day,
     parse_quantity,
@@ -56,7 +56,23 @@ _KIOTVIET_LINES = {
     "Mã nhập hàng": "mã phiếu nhập", "Mã hàng": "mã hàng", "ĐVT": "đơn vị tính",
     "Số lượng": "số lượng", "Đơn giá": "giá nhập một đơn vị",
 }
-_DONE = frozenset({"da nhap hang", "da nhap", "hoan thanh"})
+_SQLITE_RECEIPTS = {
+    "MaPhieuNhap": "mã phiếu nhập", "NgayNhapKho": "ngày nhập",
+    "TongGiaTriNhap": "tổng tiền phiếu nhập", "TinhTrang": "trạng thái phiếu nhập",
+    "MaNhaCungCap": "mã nhà cung cấp",
+}
+_SQLITE_LINES = {
+    "MaPhieuNhap": "mã phiếu nhập", "MaHangHoa": "mã hàng",
+    "DonViTinh": "đơn vị nhập", "SL": "số lượng nhập", "DonGiaNhap": "giá nhập một đơn vị",
+}
+_SQLITE_RECEIPT_EVIDENCE = "phieu nhap tonggiatrinhap la tong tien cua ca phieu nhap"
+_NOTEBOOK_LINES = {
+    "Số phiếu": "mã phiếu nhập", "Ngày nhập": "ngày nhập",
+    "Product": "tên hàng", "ĐVT nhập": "đơn vị nhập", "SL nhập": "số lượng nhập",
+    "Giá nhập": "giá nhập một đơn vị", "Thành tiền": "tiền nhập của cả dòng",
+    "Nhà cung cấp": "nhà cung cấp",
+}
+_DONE = frozenset({"da nhap hang", "da nhap", "hoan thanh", "received"})
 
 
 class PurchaseSourceError(ValueError):
@@ -86,9 +102,36 @@ def _field(meaning: str) -> str | None:
     return _FIELDS.get(text)
 
 
+def _purchase_headers(catalog: Catalog, documented: set[str],
+                      signature: dict[str, str]) -> list[tuple[Table, set[str]]]:
+    """Use catalog headers first; preview titles only in a plausible purchase workbook."""
+    return _table_headers(
+        table for table in catalog.tables
+        if table.path.name not in documented and (
+            signature.keys() <= set(table.columns)
+            or "nhap" in fold(f"{table.path.stem} {table.name}")
+        )
+    )
+
+
+def _profile(table: Table, meanings: dict[str, str],
+             origin: str) -> tuple[Section, dict[str, str]]:
+    section = Section(table.path.name, table.name, meanings, origin=origin)
+    return section, {_FIELDS[fold(meaning)]: column for column, meaning in meanings.items()}
+
+
+def _sqlite_profiles(catalog: Catalog, table_name: str,
+                     meanings: dict[str, str]) -> list[tuple[Section, dict[str, str]]]:
+    return [_profile(table, meanings, "purchase_sqlite_pos.v1")
+            for table in catalog.tables
+            if table.path.suffix.lower() in {".sqlite", ".sqlite3", ".db"}
+            and table.name == table_name and meanings.keys() <= set(table.columns)]
+
+
 def _sections(catalog: Catalog) -> list[tuple[Section, dict[str, str]]]:
     found = []
-    for section in parse_sections(catalog.readme):
+    sections = parse_sections(catalog.readme)
+    for section in sections:
         fields = {}
         for column, meaning in section.columns.items():
             field = _field(meaning)
@@ -98,21 +141,40 @@ def _sections(catalog: Catalog) -> list[tuple[Section, dict[str, str]]]:
             found.append((section, fields))
     if found:
         return found
-    documented = {s.file for s in parse_sections(catalog.readme)}
-    for table in catalog.tables:
-        if table.path.name not in documented and set(_KIOTVIET_RECEIPTS) <= _header_names(table):
-            section = Section(table.path.name, table.name, dict(_KIOTVIET_RECEIPTS))
-            found.append((section, {_field(m): c for c, m in _KIOTVIET_RECEIPTS.items()}))
+    documented = {section.file for section in sections}
+    text = fold(catalog.readme)
+    if _SQLITE_RECEIPT_EVIDENCE in text:
+        found.extend(_sqlite_profiles(catalog, "phieu_nhap", _SQLITE_RECEIPTS))
+    for table, header in _purchase_headers(catalog, documented, _KIOTVIET_RECEIPTS):
+        if _KIOTVIET_RECEIPTS.keys() <= header:
+            found.append(_profile(table, _KIOTVIET_RECEIPTS, "purchase_kiotviet.v1"))
+        elif (_NOTEBOOK_LINES.keys() <= header and table.path.stem.startswith("SoTay_")
+              and "thanh tien la tien nhap cua ca dong" in text):
+            found.append(_profile(table, _NOTEBOOK_LINES, "purchase_notebook.v1"))
     return found
 
 
 def _cancelled(label: object) -> bool:
     text = fold(str(label or ""))
-    if "huy" in text.split():
+    if "huy" in text.split() or text in {"cancelled", "canceled"}:
         return True
     if text in _DONE:
         return False
     raise PurchaseSourceError("status", "Unknown purchase receipt status")
+
+
+def _sqlite_supplier_names(catalog: Catalog, source: Section) -> dict[str, str]:
+    tables = [table for table in catalog.tables if table.path.name == source.file
+              and table.name == "nha_cung_cap" and {"MaNhaCungCap", "TenGoi"} <= set(table.columns)]
+    if len(tables) != 1:
+        return {}
+    names: dict[str, str] = {}
+    for _, row in _records(tables[0], ("MaNhaCungCap", "TenGoi")):
+        code, name = (str(row.get(column) or "").strip() for column in ("MaNhaCungCap", "TenGoi"))
+        if not code or not name or code in names:
+            return {}
+        names[code] = name
+    return names if len(set(names.values())) == len(names) else {}
 
 
 def load_purchases(catalog: Catalog) -> PurchaseBook:
@@ -163,10 +225,14 @@ def load_purchases(catalog: Catalog) -> PurchaseBook:
         raise PurchaseSourceError("value", f"Purchase value unreadable: {exc}") from exc
     if not receipts:
         raise PurchaseSourceError("absent", "Purchase list is empty")
+    supplier_names = (_sqlite_supplier_names(catalog, section)
+                      if section.origin == "purchase_sqlite_pos.v1" else {})
     return PurchaseBook(
-        tuple(Receipt(key, r["day"], totals[key], r["supplier"], r["cancelled"])
+        tuple(Receipt(key, r["day"], totals[key],
+                      supplier_names.get(r["supplier"]) if supplier_names else r["supplier"],
+                      r["cancelled"])
               for key, r in receipts.items()),
-        supplier_field == "supplier_name", section.label)
+        supplier_field == "supplier_name" or bool(supplier_names), section.label)
 
 
 @dataclass(frozen=True)
@@ -191,11 +257,13 @@ class PurchaseLines:
 def _price_convention(readme: str) -> tuple[str, str]:
     """"**Nhập hàng**: **<cột>** là giá nhập một đơn vị, theo đơn vị nhập của dòng"."""
     for line in readme.splitlines():
-        text = fold(line)
-        if "nhap hang" in text and "la gia nhap mot don vi theo don vi nhap cua dong" in text:
-            names = re.findall(r"\*\*([^*]+)\*\*", line)
-            if len(names) >= 2 and fold(names[0]) == "nhap hang":
-                return names[1].strip(), line.strip()
+        heading, separator, description = line.partition(":")
+        if not separator or fold(heading) != "nhap hang":
+            continue
+        match = re.match(r"\s*(?:\*\*([^*]+)\*\*|`([^`]+)`)", description)
+        if match and fold(description[match.end():]).startswith(
+                "la gia nhap mot don vi theo don vi nhap cua dong"):
+            return (match.group(1) or match.group(2)).strip(), line.strip()
     raise PurchaseSourceError("absent", "README states no purchase unit price convention")
 
 
@@ -213,13 +281,17 @@ def _line_sections(catalog: Catalog, price: str) -> list[tuple[Section, dict[str
             found.append((section, fields))
     if found:
         return found
-    documented = {s.file for s in sections}
-    if price != "Đơn giá":
-        return found
-    for table in catalog.tables:
-        if table.path.name not in documented and set(_KIOTVIET_LINES) <= _header_names(table):
-            section = Section(table.path.name, table.name, dict(_KIOTVIET_LINES))
-            found.append((section, {_field(m): c for c, m in _KIOTVIET_LINES.items()}))
+    documented = {section.file for section in sections}
+    if price == "chi_tiet_nhap.DonGiaNhap" and _SQLITE_RECEIPT_EVIDENCE in fold(catalog.readme):
+        return _sqlite_profiles(catalog, "chi_tiet_nhap", _SQLITE_LINES)
+    if price == "Đơn giá":
+        for table, header in _purchase_headers(catalog, documented, _KIOTVIET_LINES):
+            if _KIOTVIET_LINES.keys() <= header:
+                found.append(_profile(table, _KIOTVIET_LINES, "purchase_kiotviet.v1"))
+    elif price == "Giá nhập" and "thanh tien la tien nhap cua ca dong" in fold(catalog.readme):
+        for table, header in _purchase_headers(catalog, documented, _NOTEBOOK_LINES):
+            if _NOTEBOOK_LINES.keys() <= header and table.path.stem.startswith("SoTay_"):
+                found.append(_profile(table, _NOTEBOOK_LINES, "purchase_notebook.v1"))
     return found
 
 

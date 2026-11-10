@@ -18,7 +18,7 @@ GRAMMAR_WORDS = frozenset("""
     don dong duoc gan gi gia gium giup ha hang het hien hoi hom huy khach la le luong mang
     mat may minh moi mon mot nam nao nay nhat nhieu nhiu nhung pham phan quan qua quy roi
     san so tai tam thai thang theo thu ti tien toi tong tram trang tren trong truoc trung
-    tu tuan ty vay ve xem xet
+    tinh ton tu tuan ty vay ve xem xet
     cung doi giam hay hon kem ke ky liet lien ngoai tang top truong voi vs
     con huong khong luon nguoi no phai sau tuc tung xu
     sang chieu tra bot chiu them thieu nha vao
@@ -61,7 +61,7 @@ _TRANSPOSABLE = frozenset("""
 _CLOSING = re.compile(
     r"(?:\s+(?:vay|day|dzay|zay|zi|z|v|a|ak|ah|ha|nhi|nha|nhe|nhen|hen|ne|di|the nhi|roi))+$")
 # Calling someone at the start of a question: "em ơi", "ad ơi", "ủa".
-_CALLING = re.compile(r"^(?:(?:(?:e|em|a|anh|chi|ad|admin|ban|be|shop) )?oi |(?:ui|ua) )+")
+_CALLING = re.compile(r"^(?:(?:(?:e|em|a|anh|chi|ad|admin|ban|be|shop) )?oi |(?:ui|ua|e{2,}) )+")
 # Month/year with a two-digit year: "12/25", "th 3/26". The data years 2020-2039 are all
 # above 12, so "1/26" cannot be a day and a month.
 _SHORT_YEAR = re.compile(r"(?<![\d/])(?:\b(?:thang|thg|th|t) ?)?(\d{1,2})/([23]\d)\b(?![\d/])")

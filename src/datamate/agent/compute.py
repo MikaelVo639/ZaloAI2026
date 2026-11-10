@@ -50,6 +50,7 @@ from datamate.ingestion.purchases import (
 )
 from datamate.ingestion.readme_sales import field_meanings
 from datamate.ingestion.sales import Sale
+from datamate.ingestion.source_names import filename_key
 from datamate.ingestion.stock import (
     StockItem,
     StockSnapshot,
@@ -341,7 +342,8 @@ def share_percent(part: Decimal, whole: Decimal) -> float | None:
 
 C01_INTENTS = frozenset({"revenue_increasing", "top_debt_customers"})
 # Contract C01 §7: further debt questions on the same D01 ledger.
-DEBT_INTENTS = frozenset({"debt_total", "debt_customer_count", "debt_collected", "debt_flow"})
+DEBT_INTENTS = frozenset({"debt_total", "debt_customer_count", "debt_collected", "debt_flow",
+                          "debt_age_buckets"})
 DEBT_MEASURE_FEATURES = ("debt_orders", "debt_at_date", "debt_excluded", "customer_identity")
 LOT_INTENTS = frozenset({"earliest_expiry", "expiring_lot_count", "expiring_lot_cost",
                          "expiring_product_count", "expiring_products"})
@@ -351,7 +353,7 @@ INDEPENDENT_INTENTS = LOT_INTENTS | {"stock", "stock_split", "delivery_count", "
 INTENTS = (frozenset({"revenue", "order_count", "top_products", "average_order",
                      "cancel_count", "cancel_rate", "best_day",
                      "top_customers", "count_where", "quantity", "top_staff", "stock", "stock_split",
-                     "purchase_total", "top_supplier", "avg_purchase_price"})
+                     "purchase_total", "top_supplier", "avg_purchase_price", "daily_sale_price"})
            | C01_INTENTS | DEBT_INTENTS | INDEPENDENT_INTENTS | SALES_MEASURE_INTENTS)
 # Plan filters this backend applies, and the intents each one may be combined with.
 FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock", "stock_split",
@@ -379,6 +381,12 @@ def unsupported(plan: Plan) -> str:
     """
     if plan.intent not in INTENTS:
         return f"Intent {plan.intent!r} not supported by baseline agent"
+    if plan.intent == "daily_sale_price":
+        if (plan.start != plan.end or len(plan.filters) != 1 or plan.filters[0].field != "product"
+                or not plan.unit or plan.top_k != 1 or plan.periods or plan.shape or plan.threshold
+                or plan.comparison or plan.compare_start or plan.compare_end or plan.rank_by):
+            return "Daily sale price requires one product, base unit and day"
+        return ""
     if plan.intent in MONTHLY_MEASURE_INTENTS and (
             plan.start.day != 1 or plan.start > plan.end or
             (plan.start.year, plan.start.month) != (plan.end.year, plan.end.month)):
@@ -394,7 +402,7 @@ def unsupported(plan: Plan) -> str:
         if (plan.comparison or plan.compare_start is not None or plan.periods or plan.shape
                 or plan.unit or plan.rank_by or plan.top_k != 1):
             return f"Unsupported fields for {plan.intent}"
-        snapshot = plan.intent in ("debt_total", "debt_customer_count")
+        snapshot = plan.intent in ("debt_total", "debt_customer_count", "debt_age_buckets")
         if snapshot and plan.start != plan.end:
             return "Debt balance is a snapshot at one day"
         if plan.intent == "debt_flow":
@@ -526,6 +534,8 @@ def unsupported(plan: Plan) -> str:
 def outside_data(sales: list[Sale], start: date, end: date, readme: str) -> str:
     """"" if the window overlaps the sales; "unanswerable" if README coverage excludes it."""
     days = [s.day for s in sales]
+    if not days:
+        return "unknown"
     if not (end < min(days) or start > max(days)):
         return ""
     # Absence of sales alone does not establish the business's coverage.
@@ -535,6 +545,44 @@ def outside_data(sales: list[Sale], start: date, end: date, readme: str) -> str:
         if end < first or start > last:
             return "unanswerable"
     return "unknown"
+
+
+def _monthly_sales_start(catalog: Catalog, source: dict[str, Any]) -> tuple[date, dict] | None:
+    """Infer the first covered month only from documented and loaded monthly sales sheets."""
+    if source.get("adapter") != "readme_sales":
+        return None
+    roles = source.get("sources", {})
+    if "orders" in roles and "lines" in roles:
+        return None  # No single documented role establishes the dates.
+    files = {filename_key(label.split("::", 1)[0])
+             for label in roles.get("orders", roles.get("lines", ()))}
+    for line in catalog.readme.splitlines():
+        if "chia moi thang mot sheet ten sheet ghi thang va nam" not in fold(line):
+            continue
+        declared = {filename_key(name) for name in re.findall(r"`([^`]+)`", line)}
+        if not files or declared != files:
+            continue
+        tables = [t for t in catalog.tables if filename_key(t.path.name) in declared]
+        if ({filename_key(t.path.name) for t in tables} != declared
+                or len({t.path for t in tables}) != len(declared)
+                or any(t.path.suffix.lower() != ".xlsx" or t.key not in source["tables"]
+                       for t in tables)):
+            return None
+        months: set[date] = set()
+        for table in tables:
+            match = re.fullmatch(r"(?:T)?(0?[1-9]|1[0-2])[._-](20\d{2})",
+                                 table.name, flags=re.IGNORECASE)
+            if match is None:
+                return None
+            month, year = map(int, match.groups())
+            months.add(date(year, month, 1))
+        first, last = min(months), max(months)
+        if (len(months) != len(tables)
+                or len(months) != (last.year - first.year) * 12 + last.month - first.month + 1):
+            return None
+        return first, {"readme_line": line, "first_sheet_month": first.isoformat(),
+                       "tables": sorted(t.key for t in tables)}
+    return None
 
 
 def select_product(sales: list[Sale], value: str) -> list[Sale]:
@@ -624,6 +672,16 @@ def debt_total(ledger: DebtLedger, day: date, min_age: int | None = None,
     return total
 
 
+def debt_age_buckets(ledger: DebtLedger, day: date) -> list[int]:
+    """Balance for orders aged 0–7, 8–15, and over 15 days, in that order."""
+    totals = [Decimal(0), Decimal(0), Decimal(0)]
+    for order, remaining in open_debts(ledger, day):
+        age = (day - order.day).days
+        index = int(age > 7) + int(age > 15)
+        totals[index] += remaining
+    return [int(_vnd(total)) for total in totals]
+
+
 def debt_customer_count(ledger: DebtLedger, day: date) -> int:
     """Customers (not walk-in) who still owe at the end of ``day``."""
     keys = {_debt_key(order, ledger) for order, _ in open_debts(ledger, day)}
@@ -667,17 +725,25 @@ def _debt_customer(ledger: DebtLedger, name: str) -> tuple[str | None, int]:
     return (next(iter(keys)), 1) if len(keys) == 1 else (None, len(keys))
 
 
+def _absence_rule(rulebook: str) -> str:
+    return next(
+        (line for line in rulebook.splitlines()
+         if "shop khong ghi loai thong tin cau hoi can thi khong tra loi duoc" in fold(line)),
+        "",
+    )
+
+
 def _answer_debt_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                          rulebook: str) -> Candidate:
     rules = read_rules(rulebook)
     needed = list(DEBT_MEASURE_FEATURES)
-    if plan.intent in ("debt_total", "debt_customer_count"):
+    if plan.intent in ("debt_total", "debt_customer_count", "debt_age_buckets"):
         needed.append("until_end_of_day")
     if plan.intent in ("debt_customer_count", "debt_flow"):
         needed.append("debt_by_customer")
     if plan.intent in ("debt_collected", "debt_flow"):
         needed.append("debt_flow_rule")
-    if plan.threshold is not None:
+    if plan.threshold is not None or plan.intent == "debt_age_buckets":
         needed.append("debt_age")
     evidence: dict[str, Any] = {"intent": plan.intent, "start": plan.start.isoformat(),
                                 "end": plan.end.isoformat()}
@@ -692,7 +758,14 @@ def _answer_debt_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                          evidence=evidence)
     prepared = prepare_debt(cache, catalog, rulebook)
     if not prepared["ok"]:
-        evidence["debt_source_error"] = prepared["debt_source_error"]
+        diagnostic = prepared["debt_source_error"]
+        evidence["debt_source_error"] = diagnostic
+        rule = _absence_rule(rulebook)
+        if rule and diagnostic.get("code") == "absent" and diagnostic.get("sources_complete") is True:
+            evidence["coverage_source"] = {
+                "sources": [table.key for table in catalog.tables], "rule": rule,
+            }
+            return Candidate("unanswerable", None, 1.0, prepared["reason"], evidence)
         return Candidate(reason=prepared["reason"], evidence=evidence)
     ledger = cache["debt"]
     evidence["ledger"] = ledger.lineage
@@ -708,6 +781,11 @@ def _answer_debt_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         evidence.update(code=_code(f"_vnd(debt_total(ledger, {day}, {age!r}, {inclusive!r}))",
                                    open_debts, debt_total, _vnd), result=value)
         return Candidate("number", value, 1.0, "", evidence)
+    if plan.intent == "debt_age_buckets":
+        value = debt_age_buckets(ledger, plan.end)
+        evidence.update(code=_code(f"debt_age_buckets(ledger, {day})",
+                                   open_debts, debt_age_buckets, _vnd), result=value)
+        return Candidate("list", value, 1.0, "", evidence)
     if plan.intent == "debt_customer_count":
         value = debt_customer_count(ledger, plan.end)
         evidence.update(code=_code(f"debt_customer_count(ledger, {day})", open_debts,
@@ -1301,6 +1379,12 @@ def _answer_sales_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
     return Candidate(kind, value, 1.0, "", evidence)
 
 
+def daily_sale_price(sales: list[Sale], day: date, unit: str) -> Decimal | None:
+    prices = {s.unit_price_base if s.base_unit and fold(s.base_unit) == unit else None
+              for s in select_period(sales, day, day)}
+    return next(iter(prices)) if len(prices) == 1 else None
+
+
 def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                 rulebook: str = "") -> Candidate:
     reason = unsupported(plan)
@@ -1357,8 +1441,27 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                              reason="Kỳ hỏi nằm hoàn toàn ngoài khoảng dữ liệu ghi trong README",
                              evidence=evidence)
         if outside:
+            rule = _absence_rule(rulebook)
+            monthly = (_monthly_sales_start(catalog, source)
+                       if rule and not COVERAGE.search(catalog.readme) else None)
+            if monthly and window_end < monthly[0] <= min(s.day for s in sales):
+                evidence["coverage_source"] = {**monthly[1], "rule": rule}
+                return Candidate("unanswerable", None, 1.0,
+                                 "Kỳ hỏi trước tháng đầu của các sheet bán hàng đã xác minh",
+                                 evidence)
             return Candidate(reason="No sales in period; business coverage is not established",
                              evidence=evidence)
+    needs_customer = plan.intent == "top_customers" or (
+        plan.intent == "count_where" and plan.threshold is not None
+        and plan.threshold.subject == "customer"
+    )
+    tables = source.get("tables_without_customer_identity")
+    if needs_customer and tables:
+        absence_rule = _absence_rule(rulebook)
+        if absence_rule:
+            evidence["coverage_source"] = {"tables": tables, "rule": absence_rule}
+            return Candidate("unanswerable", None, 1.0,
+                             "Nguồn đã kiểm tra không ghi mã hoặc tên khách", evidence)
     if plan.intent in SALES_MEASURE_INTENTS:
         return _answer_sales_measure(cache, catalog, plan, rulebook, sales, evidence)
     product_call = ""
@@ -1386,10 +1489,12 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         matched = select_product(sales, value)
         codes = {s.product_id for s in matched}
         evidence["inputs"].update(product_rows=len(matched), product_codes=sorted(map(str, codes)))
-        if len(codes) != 1:
+        names_only = (len(codes) > 1 and all(s.product_id_is_name for s in matched)
+                      and None not in codes and len({fold(c) for c in codes}) == 1)
+        if len(codes) != 1 and not names_only:
             return Candidate(reason="Product filter matches no product or several product codes",
                              evidence=evidence)
-        code = next(iter(codes))
+        code = None if names_only else next(iter(codes))
         if code is not None:
             # Rulebook "Tên gọi": a file with codes identifies the product by its code, so
             # every spelling of that product's name counts ("30ml" and "30 ml").
@@ -1399,6 +1504,20 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         product_call = (f"select_product_code(sales, {code!r})" if code is not None
                         else f"select_product(sales, {value!r})")
     source_expr = product_call or "sales"
+    if plan.intent == "daily_sale_price":
+        if not read_rules(rulebook).daily_sale_price:
+            return Candidate(reason="Split rulebook does not define daily sale price", evidence=evidence)
+        value = daily_sale_price(sales, plan.start, plan.unit)
+        if value is None:
+            return Candidate(reason="Missing, inconsistent or mismatched base-unit prices",
+                             evidence=evidence)
+        result = int(value) if value == value.to_integral_value() else float(value)
+        evidence.update(result=result, unit=plan.unit,
+                        code=_code(f"daily_sale_price({source_expr}, "
+                                   f"date.fromisoformat({plan.start.isoformat()!r}), {plan.unit!r})",
+                                   daily_sale_price, select_period, select_product,
+                                   select_product_code))
+        return Candidate("number", result, 1.0, "", evidence)
     window = f"date.fromisoformat({plan.start.isoformat()!r}), date.fromisoformat({plan.end.isoformat()!r})"
     if plan.shape or plan.intent in ("top_customers", "count_where", "quantity"):
         full = cache["sales"][0]
