@@ -136,6 +136,8 @@ _AMOUNT_BOUNDARY = r"(?<![\w.,/+\-−])(?<![\d.,+\-−] )"
 _GROUPED_DONG = re.compile(rf"{_AMOUNT_BOUNDARY}(\d{{1,3}}(?:[. ]\d{{3}})+) ?[đd]\b", re.I)
 _MILLIONS = re.compile(rf"{_AMOUNT_BOUNDARY}(\d+) (?:triệu|trieu)(?: (?:đồng|dong|đ|d))?\b"
                        r"(?! +\d)", re.I)
+# In an explicit lower threshold, a whole number with k is thousands of đồng.
+_THOUSANDS_THRESHOLD = re.compile(r"\b(?:từ|tu) +(\d+)k +(?=(?:trở|tro) (?:lên|len|lne)\b)")
 _ASK_COUNT = r"(?:bao nhieu|bnhiu|bn|nhieu|nhiu|may)"
 _STORE_SUBJECT = re.compile(r"\bquan(?= (?:ban|co|duoc|bi|chot|len|thu|dat|da)\b)")
 _COMPARISON_CUE = r"(?:tang hay giam|tang giam|thay doi|tang truong|hon hay kem)"
@@ -183,6 +185,7 @@ def _everyday_wording(text: str, original: str, value: str, names: tuple[str, ..
     amounts = _GROUPED_DONG.sub(lambda m: m[1].replace(".", " ") + " dong", raw)
     amounts = _MILLIONS.sub(lambda m: f"{int(m[1]):,}".replace(",", " ") + " 000 000 dong",
                             amounts)
+    amounts = _THOUSANDS_THRESHOLD.sub(lambda m: f"tu {m[1]}000 dong ", amounts)
     if amounts != raw:
         text = normalize_question(amounts)
     text = _store_subject(text, raw, names)

@@ -108,9 +108,10 @@ _INTENTS = (
      rf"|{_REVENUE} (?:trung binh|binh quan) (?:tren )?{_ONE} {_ORDER}"
      rf"|trung binh {_ONE} {_ORDER}(?P<mid>.*?) mang ve {_AMOUNT} {_REVENUE}", ()),
     ("top_products", None,
-     r"(?:(\d+) )?(?:mat hang|san pham|hang|mon)(?: nao)? "
-     r"(?:ban chay|ban duoc nhieu|ban duoc nhiu|ban nhieu|ban nhiu|chay) nhat",
-     ()),
+     r"(?:(?P<count>\d+|(?<=\btop )(?:hai|ba|bon|nam|sau)) )?"
+     r"(?:mat hang|san pham|hang|mon)(?: nao)? "
+     r"(?:ban chay|ban duoc nhieu|ban duoc nhiu|ban nhieu|ban nhiu|chay) nh(?:at|ut)\b",
+     (r"\bla (?:nhung )?(?:mon|hang) nao$",)),
     ("quantity", "unit_quantity",
      rf"\bban(?: ra| duoc)?(?: tong cong)? {_AMOUNT} (?P<unit>[a-z0-9]+)\b"
      rf"|\bso (?P<unit2>[a-z0-9]+) (?:ban ra|ban duoc|ban)\b",
@@ -123,17 +124,20 @@ _INTENTS = (
 )
 
 
+_DAY_QUESTION = re.compile(r"\b(?:(?:roi )?vao )?(?:ngay ?|hom )(?:nao|mo)\b")
+
+
 def _best_day(text: str) -> str | None:
     """'Ngày nào doanh thu cao nhất' (also after 'bán được nhiều tiền' became 'doanh thu')."""
-    if not re.search(r"\bngay nao\b", text):
+    reduced, matched = _DAY_QUESTION.subn(" ", text, count=1)
+    if not matched:
         return None
-    reduced = re.sub(r"\bngay nao\b", " ", text, count=1)
-    revenue = re.search(rf"\b(?:xet theo )?{_REVENUE}\b", reduced)
+    revenue = re.search(rf"\b(?:(?:xet|tinh) theo |dat )?{_REVENUE}\b", reduced)
     if not revenue:
         return None
     reduced = reduced[:revenue.start()] + " " + reduced[revenue.end():]
     # "thấp nhất" leaves "thap" behind, so the leftover check rejects it.
-    best = re.search(r"\bban dat nhat\b|\b(?:cao|nhieu) nhat\b|\bnhat\b", reduced)
+    best = re.search(r"\b(?:ban dat|cao|nhieu) nh(?:at|ut)\b|\bnhat\b", reduced)
     if not best:
         return None
     return reduced[:best.start()] + " " + reduced[best.end():]
@@ -321,7 +325,8 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
             return None
         intent = kind
         if kind == "top_products":
-            top_k = int(match.group(1) or 1)
+            count = match.group("count") or "1"
+            top_k = int(count) if count.isdecimal() else _COUNT_WORD[count]
             if not rules.quantity_ranking or not 1 <= top_k <= 100:
                 return None
         middle = match.groupdict().get("mid") or ""
@@ -771,12 +776,13 @@ def _debt_measure(text: str, today: date, rules: Rules) -> Plan | None | bool:
 # ---------------------------------------------------------------- SEM-02: customers
 _CUSTOMER = r"(?:khach hang|khach)"
 _TOP_CUSTOMERS = re.compile(
-    rf"(?<![/\d])\b(?:ai la )?(?:top )?(?:(\d+) )?{_CUSTOMER}(?: nao)? "
+    rf"(?<![/\d])\b(?:ai la )?(?:top )?(?:(\d+) )?{_CUSTOMER}(?: nao| mo)? "
     r"(?P<what>co tong tien mua cao nhat|mua (?:nhieu|nhiu) tien nhat|chi tieu (?:nhieu|nhiu) nhat"
-    r"|chi (?:nhieu|nhiu) tien nhat|mua (?:nhieu|nhiu) don(?: hang)? nhat"
-    r"|co so don mua (?:nhieu|nhiu) nhat"
-    r"|mua (?:nhieu|nhiu) lan nhat tinh theo so don(?: hang)?)\b")
+    r"|chi (?:nhieu|nhiu) tien nhat|(?:mua|co) (?:nhieu|nhiu) don(?: hang)? nh(?:at|ut)"
+    r"|co so don mua (?:nhieu|nhiu) nh(?:at|ut)"
+    r"|mua (?:nhieu|nhiu) lan nh(?:at|ut) (?:tinh|dem) theo so don(?: hang)?)\b")
 _WHO_BY_REVENUE = re.compile(r"\bai mua hang (?:nhieu|nhiu) tien nhat\b")
+_WHO_BY_ORDERS = re.compile(r"\bai mua (?:nhieu|nhiu) don(?: hang)? nh(?:at|ut)\b")
 _CUSTOMER_PERCENT = re.compile(rf"\bphan tram {_CUSTOMER}\b")
 _BOUGHT_CUSTOMERS = re.compile(rf"\b(?:trong )?so {_CUSTOMER} (?:da|co) mua(?: hang)?\b")
 _AT_LEAST = re.compile(r"\b(?:mua )?(?:tu (\d+) don(?: hang)? tro (?:len|leen)|it nhat (\d+) don(?: hang)?)\b")
@@ -788,10 +794,11 @@ _CUSTOMER_WORDS = re.compile(
 
 
 def _customers(text: str, today: date, rules: Rules) -> Plan | None | bool:
-    if not re.search(rf"\b{_CUSTOMER}\b|\bai la\b", text) and not _WHO_BY_REVENUE.search(text):
-        return None
     top = _TOP_CUSTOMERS.search(text)
-    who = _WHO_BY_REVENUE.search(text) if not top else None
+    who_orders = _WHO_BY_ORDERS.search(text) if not top else None
+    who = who_orders or (_WHO_BY_REVENUE.search(text) if not top else None)
+    if not (top or who or re.search(rf"\b{_CUSTOMER}\b|\bai la\b", text)):
+        return None
     at_least = _AT_LEAST.search(text)
     if not (top or who or at_least):
         return None
@@ -803,7 +810,7 @@ def _customers(text: str, today: date, rules: Rules) -> Plan | None | bool:
     comparison = ""
     if top or who:
         match = top or who
-        rank_by = "order_count" if top and "don" in top.group("what") else "revenue"
+        rank_by = "order_count" if who_orders or (top and "don" in top.group("what")) else "revenue"
         if rank_by == "revenue":
             if not rules.customer_by_revenue:
                 return False
@@ -845,12 +852,12 @@ def _customers(text: str, today: date, rules: Rules) -> Plan | None | bool:
 
 # ---------------------------------------------------------------- SEM-02: thresholds
 _MONEY_VALUE = r"(\d{1,3}(?: \d{3})+|\d+)"
-_AT_LEAST_MONEY = re.compile(rf"\b(?:dat )?(?:tu )?{_MONEY_VALUE} (?:dong |d |vnd )?tro len\b")
+_AT_LEAST_MONEY = re.compile(rf"\b(?:dat )?(?:tu )?{_MONEY_VALUE} (?:dong |d |vnd )?tro (?:len|lne)\b")
 _AT_LEAST_ORDERS = re.compile(
     r"\b(?:(?:co mat |xuat hien )?o (?:tu )?(\d+) (?:don|bill)(?: hang)? khac nhau tro len"
     r"|(?:co mat |xuat hien )(?:o |trong )it nhat (\d+) (?:don|bill)(?: hang)?(?: khac nhau)?)\b")
 _THRESHOLD_SUBJECTS = (
-    ("day", re.compile(rf"\b(?:dem )?(?:so |co )?(?:{_AMOUNT} )?ngay\b")),
+    ("day", re.compile(rf"\b(?:dem )?(?:so |co )?(?:{_AMOUNT} )?ngay\b(?! {_DATE}\b)")),
     ("order", re.compile(rf"\b(?:dem )?(?:so |co )?(?:{_AMOUNT} )?{_ORDER}\b")),
 )
 _THRESHOLD_WORDS = re.compile(
