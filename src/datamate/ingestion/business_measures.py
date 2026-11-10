@@ -11,6 +11,8 @@ from datamate.ingestion.readme_sales import (
     _matching_tables,
     _records,
     parse_amount,
+    parse_day as parse_sales_day,
+    parse_quantity,
     parse_sections,
 )
 from datamate.ingestion.sales import parse_number
@@ -55,6 +57,32 @@ def load_deliveries(catalog: Catalog) -> tuple[dict[tuple[str, int], date], list
     if not sources:
         raise ValueError("No documented order/trip/date delivery source")
     return deliveries, sources
+
+
+def load_delivery_order_dates(catalog: Catalog) -> tuple[dict[str, date], list[str]]:
+    """Read dates from the documented sales ledger without interpreting status labels."""
+    sections = [s for s in parse_sections(catalog.readme)
+                if {"order_id", "date", "quantity", "amount"} <= s.fields.keys()]
+    if len(sections) != 1:
+        raise ValueError("No unique documented sales ledger for delivery order dates")
+    section = sections[0]
+    order, day, quantity = (section.fields[k] for k in ("order_id", "date", "quantity"))
+    dates = {}
+    tables = _matching_tables(catalog, section)
+    for table in tables:
+        for _, row in _records(table, (order, day, quantity)):
+            code = str(row.get(order) or "").strip()
+            raw_day, raw_quantity = row.get(day), row.get(quantity)
+            if not code or raw_day in (None, "") or raw_quantity in (None, ""):
+                continue
+            if parse_quantity(raw_quantity) <= 0:
+                continue
+            placed = parse_sales_day(raw_day, table.name)
+            if dates.setdefault(code, placed) != placed:
+                raise ValueError("Sales ledger gives conflicting placement dates")
+    if not dates:
+        raise ValueError("No order placement dates in the documented sales ledger")
+    return dates, [table.key for table in tables]
 
 
 def load_expenses(catalog: Catalog) -> tuple[list[tuple[date, Decimal]], str]:

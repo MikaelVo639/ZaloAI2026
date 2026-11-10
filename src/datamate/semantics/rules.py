@@ -68,6 +68,9 @@ class Rules:
     prescription_revenue: bool = False # prescription status comes from the drug catalog
     unsold_count: bool = False
     delivery_count: bool = False
+    delivered_order_count: bool = False
+    main_supplier: bool = False
+    purchase_sales_difference: bool = False
     gross_profit: bool = False
     top_gross_profit: bool = False
     net_profit: bool = False
@@ -252,6 +255,11 @@ def read_rules(rulebook: str) -> Rules:
                               "tong tien cac phieu nhap", "ngay phieu", "bo phieu huy"),
         top_supplier=enable("top_supplier", _find(rows, "tien nhap hang trong ky"),
                             "nha cung cap nhap nhieu nhat", "tien nhap cao nhat"),
+        main_supplier=enable("main_supplier", "nha cung cap chinh",
+                             "nhieu phieu nhap nhat", "bo phieu huy"),
+        purchase_sales_difference=enable("purchase_sales_difference",
+                                         _find(rows, "nhap tru ban") or _find(rows, "chenh nhap va ban"),
+                                         "don tinh vao doanh thu", "cung don vi"),
         price_effect=enable("price_effect", _find(rows, "hieu ung tang gia"),
                             "so luong don vi co ban", "n ngay ke tu d", "tinh ca d",
                             "n ngay ngay truoc d", "bo don huy va don tra"),
@@ -270,6 +278,9 @@ def read_rules(rulebook: str) -> Rules:
                             "trong ky khong co don nao"),
         delivery_count=enable("delivery_count", "giao nhieu dot", "ngay giao trong thang",
                               "moi dot cua moi don", "sau do tra hang"),
+        delivered_order_count=enable("delivered_order_count", "giao nhieu dot",
+                                     "tinh den het hom nay", "moi dot cua moi don",
+                                     "sau do tra hang"),
         gross_profit=enable("gross_profit", "lai gop", "doanh thu", "so luong nhan voi",
                             "gia von ghi tren dong ban", "mot don vi ban"),
         top_gross_profit=enable("top_gross_profit", "hang loi nhat", "tong lai gop"),
