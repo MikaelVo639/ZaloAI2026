@@ -138,7 +138,7 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
         if "result" not in evidence or evidence["result"] != candidate.answer:
             raise ValueError("Answer differs from execution output")
         if plan is not None:
-            if plan.shape == "series":
+            if plan.shape in ("series", "by_filter"):
                 expected = "list"
             elif plan.shape == "best_period":
                 expected = "date"
@@ -204,6 +204,10 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
                 elif plan.intent == "expiring_products":
                     if not all(isinstance(x, str) and x for x in candidate.answer):
                         raise ValueError("Expiring products must be catalogue names")
+                elif plan.shape == "by_filter":
+                    if (len(candidate.answer) != len(plan.filters)
+                            or not all(type(x) is int and x >= 0 for x in candidate.answer)):
+                        raise ValueError("Revenue per label disagrees with the Plan filters")
                 elif (not 1 <= len(candidate.answer) <= plan.top_k
                       or not all(isinstance(x, str) and x for x in candidate.answer)):
                     raise ValueError("Ranking list outside Plan limits")

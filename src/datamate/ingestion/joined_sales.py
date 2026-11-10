@@ -11,7 +11,11 @@ from typing import Any, Mapping
 from datamate.contracts import Catalog, Table
 from datamate.ingestion.catalog import iter_rows
 from datamate.ingestion.inventory import _sha256
-from datamate.ingestion.readme_sales import optional_sale_cost, sale_cost_column
+from datamate.ingestion.readme_sales import (
+    joined_customer_sources,
+    optional_sale_cost,
+    sale_cost_column,
+)
 from datamate.ingestion.sales import Sale, parse_date, parse_minute
 from datamate.semantics.text import fold
 
@@ -441,6 +445,9 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
     before_hashes = {table.path: _sha256(table.path) for table in selected}
     status_lookup = _status_lookup(rule_capabilities)
     diagnostics: list[dict[str, Any]] = []
+    customer_fields, customers, customer_error = joined_customer_sources(catalog, orders_table)
+    if customer_error:
+        diagnostics.append({"code": customer_error, "severity": "warning", "role": "customers"})
 
     orders: dict[str, dict[str, Any]] = {}
     status_counts: Counter[str] = Counter()
@@ -483,6 +490,18 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             )
         except ValueError:
             header_total_parse_failures += 1
+        customer = {key: str(raw[column]).strip() for key, column in customer_fields.items()
+                    if not _missing(raw.get(column))}
+        customer_id = customer.get("customer_id")
+        customer_name = None
+        customer_group = None
+        if customer_id or "customer_id" not in customer_fields:
+            listed = customers.get(customer_id or "", {})
+            customer_name = customer.get("customer_name") or listed.get("name")
+            order_group = customer.get("customer_group")
+            listed_group = listed.get("group")
+            if not (order_group and listed_group and fold(order_group) != fold(listed_group)):
+                customer_group = order_group or listed_group
         orders[order_id] = {
             "day": day,
             "minute": (parse_minute(raw.get(mapping.orders.fields["time"]))
@@ -491,11 +510,15 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
                          or _missing(raw.get(mapping.orders.fields["staff_id"]))
                          else str(raw.get(mapping.orders.fields["staff_id"])).strip()),
             "status": canonical_status,
+            "customer_id": customer_id,
+            "customer_name": customer_name,
+            "customer_group": customer_group,
             "total_due": total_due,
             "row_ordinal": row_ordinal,
             "payment_method": (
-                raw.get(mapping.orders.fields["payment_method"])
-                if "payment_method" in mapping.orders.fields else None
+                None if "payment_method" not in mapping.orders.fields
+                or _missing(raw.get(mapping.orders.fields["payment_method"]))
+                else str(raw.get(mapping.orders.fields["payment_method"])).strip()
             ),
         }
         status_counts[canonical_status] += 1
@@ -644,9 +667,13 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             quantity_base=quantity_base,
             minute=order["minute"],
             staff_id=order["staff_id"],
+            customer_id=order["customer_id"],
+            customer_name=order["customer_name"],
+            customer_group=order["customer_group"],
             quantity_sold=quantity,
             unit_cost_at_sale=optional_sale_cost(
                 raw.get(mapping.details.fields.get("unit_cost_at_sale", ""))),
+            payment_method=order["payment_method"],
         ))
         line_amounts_by_order[order_id] = line_amounts_by_order.get(order_id, Decimal(0)) + amount
         lineage.append({
@@ -759,4 +786,6 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
         "lineage": lineage,
         "diagnostics": diagnostics,
     }
+    if customer_fields:
+        evidence["customer_order_columns"] = customer_fields
     return sales, evidence

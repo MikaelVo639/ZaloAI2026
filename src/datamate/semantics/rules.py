@@ -77,6 +77,8 @@ class Rules:
     expiring_lots: bool = False
     expiry_list_order: bool = False
     stock_value: bool = False
+    # Đợt 3 gói 1: doanh thu theo hình thức thanh toán ghi trên đơn (ghi nợ, COD riêng)
+    payment_revenue: bool = False
     # Shifts by order time: (name, first minute, last minute) and the base of "ca chiều so
     # với ca sáng", read from the split's "Ca sáng, ca chiều" row; () when absent or unclear.
     shifts: tuple[tuple[str, int, int], ...] = ()
@@ -303,6 +305,11 @@ def read_rules(rulebook: str) -> Rules:
                             "khong phan biet hoa thuong"),
         best_staff=enable("best_staff", _find(rows, "nhan vien ban gioi nhat"), "theo doanh thu",
                           "khong theo so don"),
+        payment_revenue=enable("payment_revenue",
+                               _find(rows, "doanh thu theo hinh thuc thanh toan"),
+                               "ghi tren don", "khong theo lan tra no ve sau",
+                               "don ghi no khong tinh vao tien mat hay chuyen khoan",
+                               "cod la hinh thuc rieng"),
         rule_rows=tuple(features.items()),
     )
 

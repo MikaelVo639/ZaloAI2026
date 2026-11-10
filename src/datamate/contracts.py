@@ -46,7 +46,9 @@ class Catalog:
 
 @dataclass(frozen=True)
 class Filter:
-    field: str  # "product" | "product_group" | "customer_group" | "customer" (C01: debt_flow)
+    # "product" | "product_group" | "customer_group" | "customer" (C01: debt_flow)
+    # | "payment" | "channel" | "ingredient" | "prescription" (đợt 3; see FILTERABLE in compute)
+    field: str
     value: str  # canonical value from the business data (e.g. product name as written)
     rule: str = ""  # rulebook row that defines how the filter is read
 
@@ -81,7 +83,8 @@ class Plan:
     shape: str = ""
     threshold: Threshold | None = None
     unit: str = ""  # "bán được bao nhiêu <đơn vị>": the base unit asked for (intent quantity)
-    rank_by: str = ""  # top_customers: "revenue" (nhiều tiền) | "order_count" (nhiều đơn)
+    # top_customers: "revenue" | "order_count"; top_products in a group: "" (quantity) | "revenue".
+    rank_by: str = ""
     observed_on: date | None = None  # delivery order cohort uses a separate observation date
 
 

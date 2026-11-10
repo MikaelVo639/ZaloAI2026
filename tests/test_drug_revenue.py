@@ -68,6 +68,21 @@ class DrugRevenueTests(unittest.TestCase):
         self.assertIsNotNone(plain)
         self.assertEqual((typed.filters, typed.comparison), (plain.filters, plain.comparison))
 
+    def test_doctor_prescription_wording_reads_as_ke_don(self):
+        # "Cần đơn bác sĩ" is what "kê đơn" means; "không cần đơn bác sĩ" is "không kê đơn".
+        for text, value in (
+            ("Tháng 3/2026 bán hàng không cần đơn bác sĩ được bao nhiêu tiền?", "non_rx"),
+            ("thang 3/2026 ban hang ko can toa bac si duoc bao nhieu tien z", "non_rx"),
+            ("Tháng 3/2026 bán thuốc cần đơn bác sĩ được bao nhiêu tiền?", "rx"),
+        ):
+            with self.subTest(text=text):
+                result = plan(text)
+                self.assertEqual([(f.field, f.value) for f in result.filters],
+                                 [("prescription", value)])
+        # Without the rulebook row there is no prescription label to read.
+        self.assertIsNone(plan("Tháng 3/2026 bán hàng không cần đơn bác sĩ được bao nhiêu tiền?",
+                               book=rulebook() + MONEY))
+
     def test_formula_and_exact_join(self):
         cases = (
             ("Doanh thu thuốc hoạt chất Paracetamol tháng 3/2026 là bao nhiêu?", "number", 150),

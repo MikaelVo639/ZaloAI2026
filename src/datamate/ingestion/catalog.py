@@ -105,6 +105,14 @@ def build_catalog(data_root: Path, business_id: str, sample_size: int = 3) -> Ca
                         sample = tuple(dict(zip(columns, values))
                                        for values in itertools.islice(reader, sample_size))
                         tables.append(Table(path, sheet.title, columns, sample))
+                    elif first:
+                        # Some reviewed ledgers intentionally leave row 1 blank and put
+                        # their real (sometimes multi-row) header below it.  Preserve the
+                        # sheet in the catalog with sentinel columns; schema-aware adapters
+                        # can then locate the documented header without guessing here.
+                        preview = tuple(itertools.islice(reader, 14))
+                        if any(any(value is not None for value in row) for row in preview):
+                            tables.append(Table(path, sheet.title, _headers(first), ()))
                     reader.close()
             finally:
                 book.close()

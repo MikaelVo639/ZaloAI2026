@@ -62,7 +62,9 @@ class BaselineAgent:
         if "rules" not in context.cache:
             context.cache["rules"] = read_rules(context.split.rulebook)
         rules = context.cache["rules"]
-        plan = plan_question(question, rules)
+        # Wording rewrites may depend on catalogue names. Give the original grammar
+        # its normal first pass before trying rewrites with business context.
+        plan = plan_question(question, rules, everyday_wording=False)
         if plan is None and rules.earliest_expiry and lot_product_question(question):
             result = self.worker.run(tasks.lot_names, self.question_timeout,
                                      catalog=context.catalog, day=question.as_of_date)
@@ -90,6 +92,8 @@ class BaselineAgent:
                     increases, source = context.cache["price_history"]
                     plan = plan_question(question, rules, names, vocabulary,
                                          price_increases=increases, price_source=source)
+            else:
+                plan = plan_question(question, rules)
         return plan
 
     def _answer_plan(self, plan: Plan, context: BusinessContext, *,

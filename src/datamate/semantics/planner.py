@@ -26,6 +26,10 @@ _FILLERS = re.compile(
 _ORDER = r"(?:don|bill|order)(?: hang)?"
 _REVENUE = r"(?:doanh thu|dthu)"
 _ONE = r"(?:mot|moi|1)"
+_GROUP_AVERAGE = (
+    rf"\btrung binh {_ONE} {_ORDER} (?:la )?{_AMOUNT} {_REVENUE}\b"
+    rf"|\b(?:mua )?trung binh {_AMOUNT} {_REVENUE} {_ONE} {_ORDER}\b"
+)
 _UNSOLD = re.compile(
     r"\b(?:mat hang|san pham|hang|mon) (?:(?:bi )?(?:e|ees)(?: han| den muc)?|van dang ban ma)\b"
     r"|\b(?:khong|ko|k|hong|hok) ban (?:ra )?(?:duoc|dc|d c) (?:cai|mon|lan) nao\b")
@@ -86,6 +90,11 @@ def _package_period(text: str, today: date, rules: Rules) -> Plan | bool:
     if _FILLERS.sub(" ", leftover).strip() or start > today:
         return True
     return Plan(intent, start, min(end, today), evidence=_rows(rules, *used))
+
+
+_TOP_SELLING = r"(?:ban chay|ban duoc nhieu|ban duoc nhiu|ban nhieu|ban nhiu|chay) nh(?:at|ut)"
+
+
 # (intent, rule feature that must be enabled, pattern, fragments also removed). First match
 # wins, so specific intents come before the generic "doanh thu" / "số đơn" ones.
 _INTENTS = (
@@ -102,9 +111,10 @@ _INTENTS = (
      rf"|{_REVENUE} (?:trung binh|binh quan) (?:tren )?{_ONE} {_ORDER}"
      rf"|trung binh {_ONE} {_ORDER}(?P<mid>.*?) mang ve {_AMOUNT} {_REVENUE}", ()),
     ("top_products", None,
-     r"(?:(\d+) )?(?:mat hang|san pham|hang|mon)(?: nao)? "
-     r"(?:ban chay|ban duoc nhieu|ban duoc nhiu|ban nhieu|ban nhiu|chay) nhat",
-     ()),
+     r"(?:(?P<count>\d+|(?<=\btop )(?:hai|ba|bon|nam|sau)) )?"
+     r"(?:mat hang|san pham|hang|mon)(?: nao)? "
+     rf"{_TOP_SELLING}\b",
+     (r"\bla (?:nhung )?(?:mon|hang) nao$",)),
     ("quantity", "unit_quantity",
      rf"\bban(?: ra| duoc)?(?: tong cong)? {_AMOUNT} (?P<unit>[a-z0-9]+)\b"
      rf"|\bso (?P<unit2>[a-z0-9]+) (?:ban ra|ban duoc|ban)\b",
@@ -117,33 +127,62 @@ _INTENTS = (
 )
 
 
+_GROUP_PRODUCT_RANK = (
+    r"(?:(?<![/\d])(?P<group_count>\d+|(?<=\btop )(?:hai|ba|bon|nam|sau)) )?"
+    r"(?:mat hang|san pham|hang|mon)(?: nao)? "
+    r"(?:(?P<by_revenue>(?:co )?(?:doanh thu|dthu) (?:(?:cao|lon|nhieu) )?nh(?:at|ut))"
+    r"|ban (?:duoc )?(?:nhieu|nhiu) (?P<rank_unit>[a-z]+) nh(?:at|ut)"
+    rf"|{_TOP_SELLING})\b"
+)
+_DAY_QUESTION = re.compile(r"\b(?:(?:roi )?vao )?(?:ngay ?|hom |bua )(?:nao|mo)\b")
+
+
 def _best_day(text: str) -> str | None:
     """'Ngày nào doanh thu cao nhất' (also after 'bán được nhiều tiền' became 'doanh thu')."""
-    if not re.search(r"\bngay nao\b", text):
+    reduced, matched = _DAY_QUESTION.subn(" ", text, count=1)
+    if not matched:
         return None
-    reduced = re.sub(r"\bngay nao\b", " ", text, count=1)
-    revenue = re.search(rf"\b(?:xet theo )?{_REVENUE}\b", reduced)
+    revenue = re.search(rf"\b(?:(?:xet|tinh) theo |dat )?{_REVENUE}\b", reduced)
     if not revenue:
         return None
     reduced = reduced[:revenue.start()] + " " + reduced[revenue.end():]
     # "thấp nhất" leaves "thap" behind, so the leftover check rejects it.
-    best = re.search(r"\bban dat nhat\b|\b(?:cao|nhieu) nhat\b|\bnhat\b", reduced)
+    best = re.search(r"\b(?:(?:ban dat|(?:len )?cao|nhieu) )?nh(?:at|ut)\b", reduced)
     if not best:
         return None
-    return reduced[:best.start()] + " " + reduced[best.end():]
+    rest = reduced[:best.start()] + " " + reduced[best.end():]
+    return re.sub(r"\bngay ma\b", " ", rest, count=1)
 
 
 def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
                   vocabulary: dict[str, Iterable[str]] | None = None, *,
                   price_increases: dict[tuple[str, Decimal], date] | None = None,
-                  price_source: str = "") -> Plan | None:
+                  price_source: str = "", everyday_wording: bool = True) -> Plan | None:
     """Closed grammar: leftover filters/comparisons cause abstention.
 
     `names` are product names/codes of the business (from the Agent's data); a question
     naming exactly one of them gets a product filter. Without names, it abstains as before.
     """
-    today = question.as_of_date
+    names = tuple(names)
     text = normalize_question(question.question)
+    plan = _plan_question(question, text, rules, names, vocabulary, price_increases, price_source)
+    if plan is not None or not everyday_wording:
+        return plan
+    labels = tuple(label for field in ("product_group", "customer_group")
+                   for label in (vocabulary or {}).get(field, ()))
+    rewritten = normalize_question(question.question, product_names=names + labels,
+                                   as_of_year=question.as_of_date.year)
+    if rewritten == text:
+        return None
+    return _plan_question(question, rewritten, rules, names, vocabulary, price_increases,
+                          price_source)
+
+
+def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str, ...],
+                   vocabulary: dict[str, Iterable[str]] | None,
+                   price_increases: dict[tuple[str, Decimal], date] | None,
+                   price_source: str) -> Plan | None:
+    today = question.as_of_date
     if re.search(r"\b(?:giao|cho)(?: thanh)? (?:tu )?(?:\d+|hai) dot tro len\b"
                  r"|\b(?:giao|cho) it nhat (?:\d+|hai) dot\b", text):
         return _delivered_orders(text, today, rules)
@@ -177,6 +216,30 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
             if not getattr(rules, f"{field}_share"):
                 return None
             used.append(f"{field}_share")
+    pair = False
+    labelled = _labels(text, vocabulary or {})
+    if labelled is False:
+        return None
+    if labelled:
+        if group:
+            return None
+        text, clauses = labelled
+        for field, value in clauses:
+            if field == "payment" and not rules.payment_revenue:
+                return None
+            filters.append(Filter(field, value, rules.row("payment_revenue") or ""
+                                  if field == "payment" else ""))
+        if clauses[0][0] == "payment":
+            used.append("payment_revenue")
+        if len(clauses) == 2:
+            if not rules.list_in_question_order:
+                return None
+            used.append("list_in_question_order")
+            pair = True
+            text = _PAIR_WORDS.sub(" ", text)
+            text = re.sub(rf"\b{_REVENUE}\b", " ", text) + " doanh thu"
+        else:
+            text, share = _share(text)
     text, product = _product(text, names)
     text = re.sub(r"\s+", " ", text).strip()  # removing a name leaves double spaces
     if group and product:
@@ -244,6 +307,9 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         if special is False:
             return None
         if special:
+            if filters and (special.intent == "top_customers" or (
+                    special.threshold is not None and special.threshold.subject == "customer")):
+                return None
             return special
     intent = ""
     top_k = 1
@@ -259,8 +325,13 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
             used.append("best_staff")
     elif best_day is not None:
         intent, text = "best_day", best_day
-    unit = ""
+    unit = rank_by = ""
+    product_group = bool(group and group[1] == "product_group")
     for kind, feature, pattern, extras in () if intent else _INTENTS:
+        if kind == "average_order" and group and group[1] == "customer_group":
+            pattern = rf"(?:{pattern}|{_GROUP_AVERAGE})"
+        if kind == "top_products" and product_group:
+            pattern = _GROUP_PRODUCT_RANK
         match = re.search(pattern, text)
         if not match:
             continue
@@ -273,9 +344,23 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
             return None
         intent = kind
         if kind == "top_products":
-            top_k = int(match.group(1) or 1)
-            if not rules.quantity_ranking or not 1 <= top_k <= 100:
+            parts = match.groupdict()
+            count = parts.get("group_count") or parts.get("count") or "1"
+            top_k = int(count) if count.isdecimal() else _COUNT_WORD[count]
+            unit = parts.get("rank_unit") or ""
+            rank_by = "revenue" if parts.get("by_revenue") or unit in {"tien", "dong"} else ""
+            if rank_by:
+                unit = ""
+            if not 1 <= top_k <= 100 or (not rank_by and not rules.quantity_ranking):
                 return None
+            if product_group:
+                if not (rules.product_names and rules.ties_by_code):
+                    return None
+                used.extend(("product_names", "ties_by_code"))
+            if unit:
+                if unit in _NOT_UNITS or not rules.unit_quantity:
+                    return None
+                used.append("unit_quantity")
         middle = match.groupdict().get("mid") or ""
         text = text[:match.start()] + " " + middle + " " + text[match.end():]
         for extra in extras:
@@ -295,7 +380,12 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         again = _period(leftover, today, rules)
         if again is not None and again[:2] == (start, end):
             leftover = again[2]
-    if group and intent != "revenue":
+    if labelled and intent != "revenue":
+        return None
+    if group and intent != "revenue" and (
+            share or (group[1], intent) not in {
+                ("customer_group", "average_order"), ("product_group", "top_products")
+            }):
         return None
     if (shift or staff) and intent not in ("revenue", "order_count"):
         return None
@@ -320,7 +410,7 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
                 "change_percent" if reference else ("shift_change_percent" if shift_compare
                                                     else ("share" if share else "")),
                 tuple(filters),
-                unit=unit)
+                unit=unit, shape="by_filter" if pair else "", rank_by=rank_by)
 
 
 def _rows(rules: Rules, *features: str) -> tuple[str, ...]:
@@ -719,28 +809,41 @@ def _debt_measure(text: str, today: date, rules: Rules) -> Plan | None | bool:
 # ---------------------------------------------------------------- SEM-02: customers
 _CUSTOMER = r"(?:khach hang|khach)"
 _TOP_CUSTOMERS = re.compile(
-    rf"\b(?:ai la )?(?:top )?(?:(\d+) )?{_CUSTOMER}(?: nao)? "
+    rf"(?<![/\d])\b(?:ai la )?(?:top )?(?:(\d+) )?{_CUSTOMER}(?: nao| mo)? "
     r"(?P<what>co tong tien mua cao nhat|mua (?:nhieu|nhiu) tien nhat|chi tieu (?:nhieu|nhiu) nhat"
-    r"|chi (?:nhieu|nhiu) tien nhat|mua (?:nhieu|nhiu) don(?: hang)? nhat)\b")
-_AT_LEAST = re.compile(r"\b(?:mua )?(?:tu (\d+) don(?: hang)? tro len|it nhat (\d+) don(?: hang)?)\b")
+    r"|chi (?:nhieu|nhiu) tien nhat|(?:mua|co) (?:nhieu|nhiu) don(?: hang)? nh(?:at|ut)"
+    r"|co so don mua (?:nhieu|nhiu) nh(?:at|ut)"
+    r"|mua (?:nhieu|nhiu) lan nh(?:at|ut) (?:tinh|dem) theo so don(?: hang)?)\b")
+_WHO_BY_REVENUE = re.compile(r"\bai mua hang (?:nhieu|nhiu) tien nhat\b")
+_WHO_BY_ORDERS = re.compile(r"\bai mua (?:nhieu|nhiu) don(?: hang)? nh(?:at|ut)\b")
+_CUSTOMER_PERCENT = re.compile(rf"\bphan tram {_CUSTOMER}\b")
+_BOUGHT_CUSTOMERS = re.compile(rf"\b(?:trong )?so {_CUSTOMER} (?:da|co) mua(?: hang)?\b")
+_AT_LEAST = re.compile(r"\b(?:mua )?(?:tu (\d+) don(?: hang)? tro (?:len|leen)|it nhat (\d+) don(?: hang)?)\b")
 _CUSTOMER_WORDS = re.compile(
-    rf"\b(?:trong so {_CUSTOMER} (?:da|co) mua(?: hang)?|so {_CUSTOMER} da mua(?: hang)?|"
+    rf"\b(?:trong so {_CUSTOMER} (?:da|co) mua(?: hang)?|(?:dem )?so {_CUSTOMER} da mua(?: hang)?|"
+    rf"dem so {_CUSTOMER} da|"
     rf"so {_CUSTOMER}|{_CUSTOMER}|chiem|t[iy] le|(?:{_AMOUNT} )?phan tram|la (?:nhung )?ai|ai|"
     r"cho cua hang)\b")
 
 
 def _customers(text: str, today: date, rules: Rules) -> Plan | None | bool:
-    if not re.search(rf"\b{_CUSTOMER}\b|\bai la\b", text):
-        return None
     top = _TOP_CUSTOMERS.search(text)
-    at_least = _AT_LEAST.search(text)
-    if not top and not at_least:
+    who_orders = _WHO_BY_ORDERS.search(text) if not top else None
+    who = who_orders or (_WHO_BY_REVENUE.search(text) if not top else None)
+    if not (top or who or re.search(rf"\b{_CUSTOMER}\b|\bai la\b", text)):
         return None
+    at_least = _AT_LEAST.search(text)
+    if not (top or who or at_least):
+        return None
+    if (top or who) and at_least:
+        return False
     if not (rules.customer_identity and rules.customers_bought):
         return False
     used = ["customer_identity", "customers_bought"]
-    if top:
-        rank_by = "order_count" if "don" in top.group("what") else "revenue"
+    comparison = ""
+    if top or who:
+        match = top or who
+        rank_by = "order_count" if who_orders or (top and "don" in top.group("what")) else "revenue"
         if rank_by == "revenue":
             if not rules.customer_by_revenue:
                 return False
@@ -748,9 +851,9 @@ def _customers(text: str, today: date, rules: Rules) -> Plan | None | bool:
         if not rules.ties_by_code:
             return False
         used.append("ties_by_code")
-        top_k = int(top.group(1) or 1)
-        reduced = text[:top.start()] + " " + text[top.end():]
-        threshold, comparison = None, ""
+        top_k = int(top.group(1) or 1) if top else 1
+        reduced = text[:match.start()] + " " + text[match.end():]
+        threshold = None
         intent = "top_customers"
     else:
         number = int(at_least.group(1) or at_least.group(2))
@@ -760,9 +863,11 @@ def _customers(text: str, today: date, rules: Rules) -> Plan | None | bool:
             used.append("threshold_inclusive")
         reduced = text[:at_least.start()] + " " + text[at_least.end():]
         comparison = "share" if re.search(r"\bphan tram\b|\bt[iy] le\b", reduced) else ""
-        if comparison and not re.search(rf"\b(?:so|trong so) {_CUSTOMER} (?:da|co) mua\b|"
-                                        rf"\bphan tram {_CUSTOMER}\b", reduced):
-            return False  # a share of what? only "of the customers who bought" is defined
+        if comparison:
+            if not (_BOUGHT_CUSTOMERS.search(reduced) or _CUSTOMER_PERCENT.search(reduced)):
+                return False  # only the customers who bought are a defined denominator
+            # The denominator phrase can be the subject ("of those who bought, what %…").
+            reduced = _BOUGHT_CUSTOMERS.sub(" ", reduced)
         threshold = Threshold("customer", "order_count", ">=", Decimal(number),
                               rules.row("threshold_inclusive") or "")
         top_k, rank_by, intent = 1, "", "count_where"
@@ -780,10 +885,12 @@ def _customers(text: str, today: date, rules: Rules) -> Plan | None | bool:
 
 # ---------------------------------------------------------------- SEM-02: thresholds
 _MONEY_VALUE = r"(\d{1,3}(?: \d{3})+|\d+)"
-_AT_LEAST_MONEY = re.compile(rf"\b(?:dat )?(?:tu )?{_MONEY_VALUE} (?:dong |d |vnd )?tro len\b")
-_AT_LEAST_ORDERS = re.compile(r"\b(?:o |xuat hien o )(?:tu )?(\d+) don(?: hang)? khac nhau tro len\b")
+_AT_LEAST_MONEY = re.compile(rf"\b(?:dat )?(?:tu )?{_MONEY_VALUE} (?:dong |d |vnd )?tro (?:len|lne)\b")
+_AT_LEAST_ORDERS = re.compile(
+    r"\b(?:(?:co mat |xuat hien )?o (?:tu )?(\d+) (?:don|bill)(?: hang)? khac nhau tro len"
+    r"|(?:co mat |xuat hien )(?:o |trong )it nhat (\d+) (?:don|bill)(?: hang)?(?: khac nhau)?)\b")
 _THRESHOLD_SUBJECTS = (
-    ("day", re.compile(rf"\b(?:dem )?(?:so |co )?(?:{_AMOUNT} )?ngay\b")),
+    ("day", re.compile(rf"\b(?:dem )?(?:so |co )?(?:{_AMOUNT} )?ngay\b(?! {_DATE}\b)")),
     ("order", re.compile(rf"\b(?:dem )?(?:so |co )?(?:{_AMOUNT} )?{_ORDER}\b")),
 )
 _THRESHOLD_WORDS = re.compile(
@@ -803,13 +910,13 @@ def _thresholds(text: str, today: date, rules: Rules) -> Plan | None | bool:
         return False
     used = ["threshold_inclusive"]
     if orders:
-        products = re.search(r"\b(?:co )?(?:{0} )?(?:so )?(?:mat hang|san pham)\b".format(_AMOUNT),
+        products = re.search(r"\b(?:dem )?(?:co )?(?:{0} )?(?:so )?(?:mat hang|san pham)\b".format(_AMOUNT),
                              text)
         if not products or not rules.customers_bought:  # "Số đơn ... đếm số đơn có một mặt hàng"
             return False
         used.append("customers_bought")
         subject, measure = "product", "order_count"
-        value = Decimal(orders.group(1))
+        value = Decimal(orders.group(1) or orders.group(2))
         reduced = text[:orders.start()] + " " + text[orders.end():]
         reduced = reduced[:products.start()] + " " + reduced[products.end():] \
             if products.end() <= orders.start() else reduced.replace(products.group(), " ", 1)
@@ -839,10 +946,49 @@ def _thresholds(text: str, today: date, rules: Rules) -> Plan | None | bool:
     return Plan("count_where", start, min(end, today), 1, _rows(rules, *used), threshold=threshold)
 
 
+# Đợt 3 gói 1: "các đơn trả bằng <hình thức>", "các đơn bán qua / tại <kênh>".
+_LABEL_CLAUSE = {
+    "payment": re.compile(r"\b(?:cac )?don(?: hang)? (?:duoc )?(?:tra|thanh toan) bang "),
+    "channel": re.compile(r"\b(?:cac )?don(?: hang)? (?:duoc )?ban (?:qua |tren |(?=tai ))"),
+}
+_PAIR_WORDS = re.compile(
+    r"\b(?:lan luot|moi loai|moi ben|tung loai|ca hai)\b|^so\b|\bvoi\b|\bva\b")
+
+
+def _labels(text: str, vocabulary: dict[str, Iterable[str]]) -> tuple | bool | None:
+    """One or two payment / channel clauses, by the words the shop's labels allow.
+
+    None: no such clause. False: a clause whose label is unknown, ambiguous, of mixed
+    kinds or repeated, or more than two clauses (abstain rather than drop a condition).
+    """
+    clauses = []
+    for field, pattern in _LABEL_CLAUSE.items():
+        terms = sorted((tuple(t.split("|", 1)) for t in vocabulary.get(f"{field}_terms", ())),
+                       key=lambda t: -len(t[0]))
+        for match in pattern.finditer(text):
+            rest = text[match.end():]
+            hit = next(((term, label) for term, label in terms
+                        if re.match(rf"{re.escape(term)}(?!\S)", rest)), None)
+            if hit is None:
+                return False if vocabulary.get(f"{field}_terms") is not None else None
+            clauses.append((match.start(), match.end() + len(hit[0]), field, hit[1]))
+    if not clauses:
+        return None
+    clauses.sort()
+    if (len(clauses) > 2 or len({c[2] for c in clauses}) != 1
+            or len({c[3] for c in clauses}) != len(clauses)
+            or any(a[1] > b[0] for a, b in zip(clauses, clauses[1:]))):
+        return False
+    for start, end, _, _ in reversed(clauses):
+        text = text[:start] + " " + text[end:]
+    return re.sub(r"\s+", " ", text).strip(), [(c[2], c[3]) for c in clauses]
+
+
 _AMBIGUOUS = object()
 _GROUP_PREFIX = {
     "product_group": r"(?:cua )?(?:cac |nhung )?(?:mat hang |san pham |hang )?nhom (?:hang )?",
-    "customer_group": r"(?:(?:cac )?don (?:hang )?)?(?:tu |cua |do )?(?:cac |nhung )?khach(?: hang)? "
+    "customer_group": r"(?:(?<!moi )(?<!mot )(?<!1 )(?:cac )?don (?:hang )?)?"
+                      r"(?:tu |cua |do )?(?:cac |nhung )?khach(?: hang)? "
                       r"(?:thuoc )?nhom ",
 }
 
@@ -1070,7 +1216,12 @@ _PRICE_UP = re.compile(
     rf"|len gia) (?P<new>{_PRICE_VALUE}){_PRICE_SUFFIX}(?:/(?P<unit>[a-z][a-z0-9]*))?\b")
 _EFFECT_UNIT = re.compile(
     r"\bso ([a-z][a-z0-9]*) ban (?:ra|duoc)\b|\b(?:luong ban )?tinh theo (?:so )?([a-z][a-z0-9]*)\b")
-_DRUG_CUE = re.compile(r"\b(?:hoat chat|ke don)\b")
+_DRUG_CUE = re.compile(r"\b(?:hoat chat|ke don|(?:don|toa) (?:cua )?bac si)\b")
+# "Không cần đơn (toa) bác sĩ" is the plain wording of "không kê đơn"; "cần/phải có đơn bác sĩ"
+# is "kê đơn". Read them as the rulebook's terms before matching the closed wordings.
+_NO_PRESCRIPTION = re.compile(
+    r"\b(?:khong|k|ko|hok|hong) (?:can|phai co) (?:don|toa) (?:cua )?bac si\b")
+_PRESCRIPTION = re.compile(r"\b(?:can|phai co) (?:don|toa) (?:cua )?bac si\b")
 _DRUG_NAME = r"(?:cac )?(?:thuoc|hang|mat hang|san pham)"
 _INGREDIENT = rf"{_DRUG_NAME} (?:co )?hoat chat (?P<ingredient>[a-z0-9]+(?: [a-z0-9+]+)*?)"
 _RX = rf"{_DRUG_NAME} (?P<rx>khong |phai )?ke don"
@@ -1098,6 +1249,7 @@ def _drug_revenue(question: Question, rules: Rules) -> Plan | None:
     if marker in fold(question.question) or not rules.revenue:
         return None
     text = normalize_question(question.question.replace("+", f" {marker} ")).replace(marker, "+")
+    text = _PRESCRIPTION.sub("ke don", _NO_PRESCRIPTION.sub("khong ke don", text))
     text = re.sub(r"\b(?:k|ko|hok|hong) (?=ke don\b)", "khong ", text)
     used: list[str] = []
     period = _period(text, question.as_of_date, rules, used)

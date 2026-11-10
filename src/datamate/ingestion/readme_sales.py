@@ -23,6 +23,7 @@ money totals are reconciled where the files allow it. Any failure raises
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
@@ -34,6 +35,7 @@ from datamate.ingestion.catalog import iter_rows
 from datamate.ingestion.sales import Sale, parse_date, parse_minute
 from datamate.ingestion.source_names import filename_key
 from datamate.ingestion.status import StatusError, status_policy
+from datamate.ingestion.status import order_state as canonical_order_state
 from datamate.semantics.text import fold
 
 ADAPTER_VERSION = "readme_sales.v1"
@@ -73,13 +75,27 @@ _PREFIXES = (
     ("he so", "factor"),
     ("so luong khach tra lai", "returned_quantity"),
     ("hinh thuc thanh toan", "payment_method"),
+    ("so thu tu don", "order_id"),
+    ("so hoa don", "order_id"),
+    ("ngay sua", "date"),
+    ("hang ban", "product_name"),
+    ("ten hang", "product_name"),
+    ("cac viec da lam", "product_name"),
+    ("thanh tien cua dong", "amount"),
+    ("tong tien ca phieu", "amount"),
+    ("don gia", "unit_price"),
+    ("ten khach", "customer_name"),
+    ("kenh ban", "channel"),
+    ("tho lam phieu", "staff_id"),
+    ("ghi chu cua don", "status_note"),
+    ("ghi chu", "status_note"),
 )
 # Meanings that mark a list which is not about sales (imports, stock, prices, delivery...).
 _OTHER_LISTS = (
     "ma phieu nhap", "ngay nhap", "ton kho", "ngay bat dau ap dung gia", "ngay giao",
     "han thanh toan", "ma phieu thu", "so luong nhap", "thoi diem thu",
 )
-_ORDER_FIELDS = ("order_id", "date", "status", "customer_name", "customer_id",
+_ORDER_FIELDS = ("order_id", "date", "status", "status_note", "customer_name", "customer_id",
                  "customer_group", "channel", "payment_method", "staff_id", "time")
 
 
@@ -120,6 +136,8 @@ class Conventions:
     conversions: dict[tuple[str, str], tuple[Decimal, str]] = field(default_factory=dict)
     conversion_list: bool = False  # README lists every product that has a larger unit
     returns_as_negative_lines: bool = False
+    sheet_scoped_order_ids: bool = False
+    non_product_adjustments: bool = False
     evidence: tuple[str, ...] = ()
 
 
@@ -135,6 +153,13 @@ def meaning_field(meaning: str) -> str | None:
         if text.startswith(prefix):
             return key
     return None
+
+
+def field_meanings(readme: str, field: str) -> list[str]:
+    """README meanings of every documented column that holds ``field`` (e.g. the label
+    list after "hình thức thanh toán của đơn: …"). Empty when the README documents none."""
+    return [meaning for section in parse_sections(readme)
+            for meaning in section.columns.values() if meaning_field(meaning) == field]
 
 
 def parse_sections(readme: str) -> list[Section]:
@@ -234,17 +259,38 @@ _BANHANG = (
     ({"ma_sp", "Món", "Đơn vị", "Phân loại"}, {
         "ma_sp": "mã hàng", "Món": "tên", "Đơn vị": "đơn vị cơ bản", "Phân loại": "nhóm hàng",
     }),
+    ({"Customer ID", "ten_kh", "Hạng", "Loại hình khách"}, {
+        "Customer ID": "mã khách", "ten_kh": "tên khách", "Hạng": "nhóm khách",
+    }),
     ({"Mã hóa đơn", "SL trả (ĐVT cơ bản)"}, {
         "Mã hóa đơn": "mã đơn", "Lô": "số lô bán",
         "SL trả (ĐVT cơ bản)": "số lượng khách trả lại (đơn vị cơ bản); lớn hơn 0: đơn đó "
                                "có trả hàng",
     }),
 )
+_BANHANG_COMBINED = (
+    ({"Đơn số", "Ngày HĐ", "Trạng thái giao", "Hàng hóa", "S.L", "Thành tiền (đ)"}, {
+        "Đơn số": "mã đơn", "Ngày HĐ": "ngày bán", "Trạng thái giao": "trạng thái đơn",
+        "Hàng hóa": "tên hàng", "S.L": "số lượng", "ĐV": "đơn vị tính",
+        "Giá 1 đv": "đơn giá", "Thành tiền (đ)": "thành tiền sau giảm",
+        "SL (ĐV cơ bản)": "số lượng đã đổi ra đơn vị cơ bản",
+        "Khách hàng (tên)": "tên khách", "Mã khách": "mã khách", "Nguồn": "kênh bán",
+        "Mã NV bán": "mã nhân viên bán", "Giờ tạo đơn": "giờ đặt đơn",
+        "Hình thức thanh toán": "hình thức thanh toán",
+    }),
+)
 POS_PROFILES = (
     ("pos_export_kiotviet.v1", _KIOTVIET),
     ("pos_export_sqlite.v1", _SQLITE_POS),
     ("sales_export_banhang.v1", _BANHANG),
+    ("sales_export_combined.v1", _BANHANG_COMBINED),
 )
+
+_PHONE_LEDGER_COLUMNS = {
+    "STT": "mã đơn", "Ngày": "ngày bán", "Khách": "tên khách",
+    "Hàng": "tên hàng", "SL": "số lượng", "Giá": "đơn giá",
+    "Thành tiền": "thành tiền sau giảm", "Ghi chú": "ghi chú của đơn",
+}
 
 
 def _header_names(table: Table) -> set[str]:
@@ -273,11 +319,28 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
     and an order list among the undocumented tables, otherwise nothing is added.
     """
     text = fold(catalog.readme)
-    if not ("pos" in text.split() or "phan mem ban hang" in text):
-        return []
     covered = {filename_key(s.file) for s in documented}
     headers = [(table, _header_names(table)) for table in catalog.tables
                if filename_key(table.path.name) not in covered]
+
+    # Handwritten phone ledgers document the semantics in their conventions instead of
+    # repeating a column dictionary.  Require the complete convention and exact header
+    # shape before supplying those meanings.
+    phone_evidence = (
+        "cac dong cung stt la mot don" in text
+        and "khach tra la so tien khach tra cho ca don" in text
+        and "ghi chu cua don ghi khach tra lai" in text
+    )
+    phone_required = set(_PHONE_LEDGER_COLUMNS)
+    if phone_evidence:
+        sections = [Section(table.path.name, table.name, _PHONE_LEDGER_COLUMNS,
+                            origin="phone_ledger_conventions.v1")
+                    for table, header in headers if phone_required <= header]
+        if sections:
+            return sections
+
+    if not ("pos" in text.split() or "phan mem ban hang" in text):
+        return []
     for version, lists in POS_PROFILES:
         sections = []
         for table, header in headers:
@@ -293,7 +356,8 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
                     break
         fields = [set(section.fields) for section in sections]
         has_lines = any("amount" in f for f in fields)
-        has_orders = any("order_goods" in f for f in fields)
+        has_orders = (any("order_goods" in f for f in fields)
+                      or any({"order_id", "date", "status", "amount"} <= f for f in fields))
         if has_lines and has_orders:
             return sections
     return []
@@ -332,9 +396,19 @@ def parse_conventions(readme: str, *, strict: bool = False) -> Conventions:
     evidence: list[str] = []
     returns = False
     listed = False
+    sheet_scoped = False
+    non_products = False
     in_conversion = False
     for line in readme.splitlines():
         text = fold(line)
+        if "moi thang mot sheet" in text and not sheet_scoped:
+            sheet_scoped = True
+            evidence.append(line.strip())
+        if ("voucher" in text and "dung" in text and "diem" in text
+                and "phi ship" in text and "khong phai hang" in text
+                and not non_products):
+            non_products = True
+            evidence.append(line.strip())
         if line.startswith("- "):
             in_conversion = "quy doi don vi" in text
             if in_conversion and line.rstrip().endswith(":"):  # the list follows
@@ -352,7 +426,8 @@ def parse_conventions(readme: str, *, strict: bool = False) -> Conventions:
             if strict and key in conversions and conversions[key] != value:
                 raise ValueError("Conflicting README conversion factors")
             conversions[key] = value
-    return Conventions(conversions, listed, returns, tuple(evidence))
+    return Conventions(conversions, listed, returns, sheet_scoped, non_products,
+                       tuple(evidence))
 
 
 def _name_key(value: Any) -> str:
@@ -442,6 +517,11 @@ def parse_day(value: Any, sheet: str = "") -> date:
     if isinstance(value, (int, float)) and not isinstance(value, bool) and 20000 < value < 80000:
         return date(1899, 12, 30) + timedelta(days=int(value))
     text = str(value).strip()
+    vietnamese = re.fullmatch(r"(\d{1,2})\s*(?:thg|thang)\s*(\d{1,2})\s*(20\d{2})",
+                              fold(text))
+    if vietnamese:
+        return date(int(vietnamese.group(3)), int(vietnamese.group(2)),
+                    int(vietnamese.group(1)))
     if re.fullmatch(r"\d{5}", text) and 20000 < int(text) < 80000:
         return date(1899, 12, 30) + timedelta(days=int(text))
     short = re.fullmatch(r"(\d{1,2})/(\d{1,2})", text)
@@ -455,12 +535,31 @@ def parse_day(value: Any, sheet: str = "") -> date:
 
 def _matching_tables(catalog: Catalog, section: Section) -> list[Table]:
     wanted = filename_key(section.file)
-    files = {t.path for t in catalog.tables if filename_key(t.path.name) == wanted}
-    if len(files) > 1:
+    placeholder = re.compile(r"<[^<>]+>")
+    is_template = placeholder.search(wanted) is not None
+    if is_template:
+        parts = placeholder.split(wanted)
+        markers = placeholder.findall(wanted)
+        pattern = "^" + "".join(
+            re.escape(part) + (r"\d+" if index < len(markers) else "")
+            for index, part in enumerate(parts)
+        ) + "$"
+        files = {t.path for t in catalog.tables
+                 if re.fullmatch(pattern, filename_key(t.path.name), re.IGNORECASE)}
+    else:
+        files = {t.path for t in catalog.tables if filename_key(t.path.name) == wanted}
+    if len(files) > 1 and not is_template:
         raise ReadmeSalesError("AMBIGUOUS_SOURCE", "Several files match one README source",
                                source=section.label)
-    return [t for t in catalog.tables
-            if t.path in files and (section.sheet is None or t.name == section.sheet)]
+    matches = [t for t in catalog.tables
+               if t.path in files and (section.sheet is None or t.name == section.sheet)]
+    if section.sheet is None and len(matches) > 1:
+        documented_columns = set(section.columns)
+        compatible = [table for table in matches
+                      if documented_columns <= _header_names(table)]
+        if compatible:
+            matches = compatible
+    return matches
 
 
 def _records(table: Table, columns: Iterable[str], *,
@@ -524,6 +623,7 @@ def _classify(sections: list[Section], catalog: Catalog) -> dict[str, _Role]:
     roles: dict[str, _Role] = {}
     for section in sections:
         fields = set(section.fields)
+        classified_fields = (fields - {"status_note"}) | ({"status"} if "status_note" in fields else set())
         if "_other" in fields:
             continue
         if {"big_unit", "factor"} <= fields:
@@ -532,7 +632,8 @@ def _classify(sections: list[Section], catalog: Catalog) -> dict[str, _Role]:
             role = "lots"
         elif "amount" in fields and fields & {"product_name", "product_id"}:
             role = "lines"
-        elif "order_id" in fields and fields & {"date", "status"} and "quantity" not in fields:
+        elif ("order_id" in classified_fields and classified_fields & {"date", "status"}
+              and "quantity" not in classified_fields):
             role = "orders"
         elif ("customer_id" in fields and "customer_group" in fields
               and not fields & {"order_id", "amount", "quantity"}):
@@ -564,6 +665,10 @@ def _role_rows(entry: _Role) -> Iterator[tuple[str, int, dict[str, Any]]]:
         fields = section.fields
         for ordinal, raw in _records(table, section.columns):
             row = {key: raw.get(column) for key, column in fields.items()}
+            row["_header_repeat"] = bool(fields) and all(
+                _name_key(row.get(key)) == _name_key(column)
+                for key, column in fields.items()
+            )
             # Rulebook §8 compares *every* cell, not only the mapped ones.
             row["_cells"] = tuple(sorted((str(k), repr(v)) for k, v in raw.items()))
             yield table.name, ordinal, row
@@ -587,6 +692,7 @@ class _Rules:
     duplicate_rows_once: str | None
     whole_order_returns: str | None
     service_fee: str | None
+    status_in_notes: str | None
     evidence: tuple[str, ...]
 
 
@@ -601,8 +707,50 @@ def _rules(rulebook: str) -> _Rules:
                             "tinh mot lan")
     returns = _rule_line(rulebook, "don tinh vao doanh thu", "ca don")
     fee = _rule_line(rulebook, "mat hang", "phi phuc vu", "khong xep hang")
-    evidence = tuple(x for x in (*status.evidence, blank, duplicates, returns, fee) if x)
-    return _Rules(status, blank, duplicates, returns, fee, evidence)
+    notes = _rule_line(rulebook, "so khong co cot trang thai", "ghi chu", "hoan thanh")
+    evidence = tuple(x for x in (*status.evidence, blank, duplicates, returns, fee, notes) if x)
+    return _Rules(status, blank, duplicates, returns, fee, notes, evidence)
+
+
+_NOTE_RETURNED = re.compile(r"\b(?:khach tra lai|tra lai hang|tra hang|hoan tra(?: hang)?)\b")
+_NOTE_CANCELLED = re.compile(r"\b(?:cancel|canceled|cancelled)\b")
+# "chưa giao": a README that writes only cancelled / delivering orders in the notes uses it
+# for orders not delivered yet, i.e. the rulebook's "đang giao".
+_NOTE_DELIVERING = re.compile(r"\b(?:dang giao|dang ship|cho giao|chua giao)\b")
+
+
+def _note_state(value: Any) -> str:
+    """Order state named by a free-form note; a note naming no state is "hoàn thành".
+
+    A note that is exactly a status label is read like a status cell. Otherwise the note
+    must mention the state: "huỷ" counts only with its tone mark, because the folded
+    "huy" is also the given name Huy ("giao cho anh Huy"). A note naming two different
+    states is not guessed.
+    """
+    state = canonical_order_state(value)
+    if state is not None:
+        return state
+    raw = unicodedata.normalize("NFC", str(value or "")).lower()
+    text = _name_key(value or "")
+    found = set()
+    if _NOTE_RETURNED.search(text):
+        found.add("tra hang")
+    if "huỷ" in raw or "hủy" in raw or _NOTE_CANCELLED.search(text):
+        found.add("huy")
+    if _NOTE_DELIVERING.search(text):
+        found.add("dang giao")
+    if len(found) > 1:
+        raise StatusError(f"Order note names several states: {value!r}")
+    return found.pop() if found else "hoan thanh"
+
+
+def _resolve_status(value: Any, rules: _Rules, *, from_note: bool) -> str:
+    """Resolve a dedicated status cell, or a free-form note when the rulebook permits it."""
+    if not from_note:
+        return rules.status.resolve(value)
+    if rules.status_in_notes is None:
+        raise StatusError("The split rulebook does not define statuses written in notes")
+    return rules.status.resolve(_note_state(value))
 
 
 # ---------------------------------------------------------------- loading
@@ -635,11 +783,21 @@ def _orders_index(roles: dict[str, _Role], rules: _Rules
     if "orders" not in roles:
         return orders, counts
     for sheet, _ordinal, row in _role_rows(roles["orders"]):
+        if row["_header_repeat"]:
+            counts["repeated_headers_skipped"] += 1
+            continue
         if _blank(row.get("order_id")):
             counts["blank_key_rows"] += 1
             continue
         key = str(row["order_id"]).strip()
+        if (_blank(row.get("date")) and _blank(row.get("status"))
+                and fold(key).startswith("tong ")):
+            counts["summary_rows"] += 1
+            continue
         if key in orders:
+            if rules.duplicate_rows_once and row["_cells"] == orders[key]["_cells"]:
+                counts["duplicate_rows_dropped"] += 1
+                continue
             raise ReadmeSalesError("DUPLICATE_PARENT_KEY", "Order list repeats an order id",
                                    role="orders")
         orders[key] = {**row, "_sheet": sheet}
@@ -691,6 +849,38 @@ def _customers_index(roles: dict[str, _Role]) -> dict[str, dict[str, str | None]
     return customers
 
 
+def joined_customer_sources(
+    catalog: Catalog, orders: Table,
+) -> tuple[dict[str, str], dict[str, dict[str, str | None]], str | None]:
+    """Optional customer fields documented for the joined adapter's actual order table."""
+    order_fields: list[dict[str, str]] = []
+    lists = []
+    for section in parse_sections(catalog.readme):
+        fields = section.fields
+        if not fields.keys() & {"customer_id", "customer_name", "customer_group"}:
+            continue
+        if "order_id" not in fields:
+            if {"customer_id", "customer_group"} <= fields.keys():
+                lists.append(section)
+            continue
+        if section.file != orders.path.name or section.sheet not in (None, orders.name):
+            continue
+        order_fields.append({key: column for key, column in fields.items()
+                             if key in {"customer_id", "customer_name", "customer_group"}})
+    if not order_fields:
+        return {}, {}, None
+    fields = order_fields[0]
+    if (any(candidate != fields for candidate in order_fields)
+            or set(fields.values()) - set(orders.columns)):
+        return {}, {}, "CUSTOMER_ORDER_MAPPING_AMBIGUOUS"
+    if "customer_id" not in fields:
+        return fields, {}, None
+    try:
+        return fields, _customers_index(_classify(lists, catalog)), None
+    except ReadmeSalesError as exc:
+        return fields, {}, exc.code
+
+
 def _conversion_table(roles: dict[str, _Role], conventions: Conventions
                       ) -> tuple[dict[tuple[str, str], tuple[Decimal, str]], bool]:
     conversions = dict(conventions.conversions)
@@ -715,6 +905,9 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
     conversions, conversion_complete = _conversion_table(roles, conventions)
     customer_groups = _customers_index(roles)
     has_order_ids = "order_id" in line_fields
+    order_id_column = roles["lines"].sections[0].fields.get("order_id", "")
+    sheet_scoped_order_ids = (conventions.sheet_scoped_order_ids
+                              and _name_key(order_id_column) == "stt")
     if not has_order_ids and orders:
         raise ReadmeSalesError("MAPPING_INCOMPLETE", "Lines cannot be joined to orders")
 
@@ -723,10 +916,26 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
     lines: list[dict[str, Any]] = []
     group: dict[str, Any] = {}
     first_values: dict[str, dict[str, Any]] = defaultdict(dict)
-    order_keys = [k for k in ("order_id", "date", "status") if k in line_fields]
+    order_keys = [k for k in ("order_id", "date", "status", "status_note") if k in line_fields]
     count_keys = [k for k in ("quantity", "quantity_base") if k in line_fields]
+    previous_sheet: str | None = None
     for sheet, ordinal, row in _role_rows(roles["lines"]):
         counts["line_rows_raw"] += 1
+        if sheet != previous_sheet:
+            group = {}
+            previous_sheet = sheet
+        if row["_header_repeat"]:
+            counts["repeated_headers_skipped"] += 1
+            continue
+        raw_order_id = "" if _blank(row.get("order_id")) else str(row["order_id"]).strip()
+        if orders and raw_order_id not in orders and fold(raw_order_id).startswith("tong "):
+            counts["summary_rows_skipped"] += 1
+            continue
+        if (_blank(row.get("order_id")) and _blank(row.get("product_id"))
+                and _blank(row.get("product_name")) and _blank(row.get("quantity"))
+                and _blank(row.get("quantity_base"))):
+            counts["summary_rows_skipped"] += 1
+            continue
         if all(_blank(row.get(k)) for k in order_keys + count_keys):
             # Subtotal, daily total or note rows ("Cộng", "Tổng ngày 01/03", "Ghi chú: ...")
             # carry no order and no quantity: they are not sales lines.
@@ -739,7 +948,8 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
                                            role="lines", sheet=sheet)
                 counts["order_cells_inherited"] += 1
                 row = {**row, **{k: v for k, v in group.items() if _blank(row.get(k))}}
-            key = str(row["order_id"]).strip()
+            raw_key = str(row["order_id"]).strip()
+            key = f"{sheet}::{raw_key}" if sheet_scoped_order_ids else raw_key
             seen_first = first_values[key]
             for name in _ORDER_FIELDS:
                 if name in line_fields:
@@ -773,12 +983,20 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         state = order_state.setdefault(key, {"days": set(), "statuses": set(), "times": set(),
                                              "negative": False, "returned": False})
         raw_date = line.get("date") if "date" in line_fields else (parent or {}).get("date")
-        raw_status = line.get("status") if "status" in line_fields else (parent or {}).get("status")
-        if _blank(raw_status) or _blank(raw_date):
+        if "status" in line_fields:
+            raw_status, status_from_note = line.get("status"), False
+        elif parent is not None and "status" in parent:
+            raw_status, status_from_note = parent["status"], False
+        elif "status_note" in line_fields:
+            raw_status, status_from_note = line.get("status_note"), True
+        else:
+            raw_status = (parent or {}).get("status_note")
+            status_from_note = parent is not None and "status_note" in parent
+        if _blank(raw_date) or (_blank(raw_status) and not status_from_note):
             raise ReadmeSalesError("MISSING_VALUE", "Order date or status is missing",
                                    order_source="lines" if parent is None else "orders")
         try:
-            status = rules.status.resolve(raw_status)
+            status = _resolve_status(raw_status, rules, from_note=status_from_note)
         except StatusError as exc:
             raise ReadmeSalesError("UNKNOWN_STATUS", str(exc)) from exc
         sheet = line["_sheet"] if "date" in line_fields else (parent or {}).get("_sheet", "")
@@ -846,6 +1064,12 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
     fee_rows = 0
     for line in lines:
         key = line["_order"]
+        line_name = _name_key(line.get("product_name") or "")
+        if (conventions.non_product_adjustments
+                and (line_name == "voucher" or line_name == "phi ship"
+                     or (line_name.startswith("dung ") and " diem" in line_name))):
+            counts["non_product_adjustments_skipped"] += 1
+            continue
         try:
             amount = parse_amount(line.get("amount"))
         except ValueError as exc:
@@ -878,7 +1102,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         parent = orders.get(key) or {}
         context = {name: _text(line.get(name) if name in line_fields else parent.get(name))
                    for name in ("customer_id", "customer_name", "customer_group", "channel",
-                                "staff_id")}
+                                "staff_id", "payment_method")}
         listed = customer_groups.get(context["customer_id"] or "")
         if listed:
             context["customer_group"] = context["customer_group"] or listed["group"]
@@ -891,7 +1115,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
                           product_group=_text((product or {}).get("group")
                                               or line.get("product_group")),
                           **context))
-        if not is_fee:
+        if not is_fee and count_keys:
             eligible.add(index)
         elif rules.service_fee is None:
             eligible.clear()
@@ -1005,18 +1229,28 @@ def _from_orders(roles: dict[str, _Role], rules: _Rules
     """Shops that only keep an invoice list: one Sale per order, no product."""
     sales: list[Sale] = []
     status_counts: Counter[str] = Counter()
-    seen: set[str] = set()
+    seen: dict[str, tuple[tuple[str, str], ...]] = {}
     skipped = 0
     for sheet, _ordinal, row in _role_rows(roles["orders"]):
+        if row["_header_repeat"]:
+            skipped += 1
+            continue
         if all(_blank(row.get(k)) for k in ("order_id", "date", "status")):
             skipped += 1  # total / note rows of the invoice list
             continue
         if _blank(row.get("order_id")):
             raise ReadmeSalesError("MISSING_KEY", "Invoice without order id")
         key = str(row["order_id"]).strip()
+        if (_blank(row.get("date")) and _blank(row.get("status"))
+                and fold(key).startswith("tong ")):
+            skipped += 1
+            continue
         if key in seen:
+            if rules.duplicate_rows_once and row["_cells"] == seen[key]:
+                skipped += 1
+                continue
             raise ReadmeSalesError("DUPLICATE_PARENT_KEY", "Invoice list repeats an order id")
-        seen.add(key)
+        seen[key] = row["_cells"]
         try:
             status = rules.status.resolve(row.get("status"))
         except StatusError as exc:
