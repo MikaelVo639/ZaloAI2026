@@ -68,6 +68,22 @@ class PeriodTests(unittest.TestCase):
                 self.assertEqual(intent, "order_count")
                 self.assertIn(start, (date(2026, 3, 3), date(2026, 3, 4)))
 
+    def test_quantity_wording_preserves_the_asked_unit(self):
+        book = (rulebook() + "| Bán được bao nhiêu <đơn vị> | cộng số lượng quy về đơn vị "
+                "cơ bản của các mặt hàng có đơn vị cơ bản là <đơn vị>, kể cả dòng bán theo "
+                "đơn vị lớn; mặt hàng có đơn vị cơ bản khác không tính |\n")
+        for text, unit in (
+            ("Hôm qua bán ra được bao nhiêu phần?", "phan"),
+            ("Cộng mọi mặt hàng tính theo lon, hôm qua bán ra được mấy lon?", "lon"),
+        ):
+            with self.subTest(text=text):
+                result = self.plan(text, book=book)
+                self.assertIsNotNone(result)
+                self.assertEqual((result.intent, result.unit), ("quantity", unit))
+        self.assertIsNone(self.plan("Cộng mọi mặt hàng tính theo ly, hôm qua bán ra mấy lon?",
+                                    book=book))
+        self.assertIsNone(self.plan("Hôm qua bán được bao nhiêu phần trăm?", book=book))
+
     def test_money_wording_requires_rule_of_current_split(self):
         text = "Tháng 5/2025 cửa hàng bán được bao nhiêu tiền?"
         self.assertIsNone(self.plan(text, "2026-07-01", rulebook("money")))

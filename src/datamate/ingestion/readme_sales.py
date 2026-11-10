@@ -35,7 +35,7 @@ from typing import Any, Iterable, Iterator
 
 from datamate.contracts import Catalog, Table
 from datamate.ingestion.catalog import iter_rows
-from datamate.ingestion.sales import Sale, parse_date, parse_minute
+from datamate.ingestion.sales import Sale, parse_date, parse_minute, price_per_base_unit
 from datamate.ingestion.source_names import filename_key
 from datamate.ingestion.status import StatusError, status_policy
 from datamate.ingestion.status import order_state as canonical_order_state
@@ -720,16 +720,27 @@ def _classify(sections: list[Section], catalog: Catalog) -> dict[str, _Role]:
     return roles
 
 
+_BASE_PRICE_MEANINGS = {
+    "don gia theo don vi co ban", "don gia don vi co ban",
+    "don gia tinh theo don vi co ban", "don gia cho mot don vi co ban",
+    "don gia mot don vi co ban", "don gia da quy doi ve don vi co ban",
+}
+
+
 def _role_rows(
     entry: _Role, headers: dict[tuple[Path, str], set[str]] | None = None,
 ) -> Iterator[tuple[str, int, dict[str, Any]]]:
     for section, table in entry.tables:
         fields = section.fields
         key = (table.path, table.name)
+        price_column = fields.get("unit_price", "")
+        price_is_base = fold(section.columns.get(price_column, "")) in _BASE_PRICE_MEANINGS
         for ordinal, raw in _records(table, section.columns):
             if headers is not None and key not in headers:
                 headers[key] = {name for name in raw if not re.fullmatch(r"_empty_\d+", name)}
             row = {key: raw.get(column) for key, column in fields.items()}
+            if price_is_base:
+                row["_unit_price_is_base"] = True
             row["_header_repeat"] = bool(fields) and all(
                 _name_key(row.get(key)) == _name_key(column)
                 for key, column in fields.items()
@@ -866,6 +877,8 @@ def _orders_index(roles: dict[str, _Role], rules: _Rules
             raise ReadmeSalesError("DUPLICATE_PARENT_KEY", "Order list repeats an order id",
                                    role="orders")
         orders[key] = {**row, "_sheet": sheet}
+    for row in orders.values():
+        row.pop("_cells")
     counts["orders"] = len(orders)
     return orders, counts
 
@@ -1011,6 +1024,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
             # carry no order and no quantity: they are not sales lines.
             counts["summary_rows_skipped"] += 1
             continue
+        cells = row.pop("_cells")
         if has_order_ids:
             if _blank(row.get("order_id")):
                 if not group or rules.blank_cells_inherit is None:
@@ -1031,7 +1045,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
                     elif not _blank(row.get(name)):
                         seen_first.setdefault(name, row[name])
             group = {k: row.get(k) for k in _ORDER_FIELDS if k in line_fields}
-            fingerprint = (key, sheet, row["_cells"])
+            fingerprint = (key, sheet, cells)
             if fingerprint in seen and rules.duplicate_rows_once:
                 counts["duplicates_removed"] += 1
                 continue
@@ -1040,6 +1054,8 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
             key = f"{sheet}#{ordinal}"
             counts["rows_as_records"] += 1
         lines.append({**row, "_order": key, "_sheet": sheet})
+    seen.clear()
+    first_values.clear()
 
     status_counts: Counter[str] = Counter()
     order_state: dict[str, dict[str, Any]] = {}
@@ -1251,16 +1267,15 @@ def _base_unit(line: dict[str, Any], product: dict[str, Any] | None,
 
 def _line_price_per_base(line: dict[str, Any], quantity_base: Decimal | None) -> Decimal | None:
     raw = line.get("unit_price")
-    sold = line["_quantity"]
-    if _blank(raw) or not quantity_base or not sold:
-        return None
-    if not sold.is_finite() or not quantity_base.is_finite() or sold * quantity_base <= 0:
+    if _blank(raw):
         return None
     try:
         price = parse_amount(raw)
     except ValueError:
         return None
-    return price * sold / quantity_base if price.is_finite() and price >= 0 else None
+    if line.get("_unit_price_is_base"):
+        return price if price.is_finite() and price >= 0 else None
+    return price_per_base_unit(price, line["_quantity"], quantity_base)
 
 
 def _base_quantity(line: dict[str, Any], product: dict[str, Any] | None,

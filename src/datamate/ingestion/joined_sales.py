@@ -16,7 +16,7 @@ from datamate.ingestion.readme_sales import (
     optional_sale_cost,
     sale_cost_column,
 )
-from datamate.ingestion.sales import Sale, parse_date, parse_minute
+from datamate.ingestion.sales import Sale, parse_date, parse_minute, price_per_base_unit
 from datamate.semantics.text import fold
 
 _ADAPTER_VERSION = "joined_sales.v1"
@@ -646,7 +646,8 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             numeric_rejected += 1
             continue
         expected_amount = quantity * unit_price - discount
-        if amount == expected_amount:
+        formula_matches_line = amount == expected_amount
+        if formula_matches_line:
             formula_matches += 1
         else:
             formula_mismatches += 1
@@ -665,6 +666,10 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             product_id=product_id,
             product_name=product_name,
             quantity_base=quantity_base,
+            base_unit=None if _missing(product["base_unit"]) else str(product["base_unit"]).strip(),
+            product_group=None if _missing(product["category"]) else str(product["category"]).strip(),
+            unit_price_base=price_per_base_unit(unit_price, quantity, quantity_base)
+            if formula_matches_line or quantity == quantity_base else None,
             minute=order["minute"],
             staff_id=order["staff_id"],
             customer_id=order["customer_id"],

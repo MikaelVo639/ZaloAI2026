@@ -13,7 +13,7 @@ _AMOUNT = r"(?:bao nhieu|bao nhiu|bnhiu|bn|nhieu|nhiu|may)"
 _DATE = r"(\d{1,2})/(\d{1,2})/(\d{4})"
 # Words that carry no condition. Anything else left after intent and period is unsupported.
 # Words after "bán được bao nhiêu" that are not a unit of goods.
-_NOT_UNITS = frozenset({"tien", "don", "dong", "phan", "khach", "ngay", "lan", "mon", "mat",
+_NOT_UNITS = frozenset({"tien", "don", "dong", "khach", "ngay", "lan", "mon", "mat",
                         "san", "loai", "hang", "bill", "order", "nhieu", "nhiu", "may", "bn"})
 _FILLERS = re.compile(
     r"\b(?:nhung mat hang nao|nhung san pham nao|mat hang nao|"
@@ -112,7 +112,7 @@ _INTENTS = (
      r"(?:ban chay|ban duoc nhieu|ban duoc nhiu|ban nhieu|ban nhiu|chay) nhat",
      ()),
     ("quantity", "unit_quantity",
-     rf"\bban(?: ra| duoc)?(?: tong cong)? {_AMOUNT} (?P<unit>[a-z0-9]+)\b"
+     rf"\bban(?: ra)?(?: duoc)?(?: tong cong)? {_AMOUNT} (?P<unit>[a-z][a-z0-9]*)\b"
      rf"|\bso (?P<unit2>[a-z0-9]+) (?:ban ra|ban duoc|ban)\b",
      ()),
     ("revenue", None, rf"(?:tong )?{_REVENUE}", ()),
@@ -302,7 +302,8 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
             continue
         if kind == "quantity":
             unit = match.group("unit") or match.group("unit2")
-            if unit in _NOT_UNITS:
+            if unit in _NOT_UNITS or (unit == "phan" and
+                                       text[match.end():].startswith(" tram")):
                 unit = ""
                 continue
         if feature and not getattr(rules, feature):
@@ -314,6 +315,8 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
                 return None
         middle = match.groupdict().get("mid") or ""
         text = text[:match.start()] + " " + middle + " " + text[match.end():]
+        if kind == "quantity" and not filters:
+            text = re.sub(rf"\bcong moi (?:mat hang|mon) tinh theo {re.escape(unit)}\b", " ", text)
         for extra in extras:
             text = re.sub(extra, " ", text)
         if feature:
@@ -988,16 +991,18 @@ def _share(text: str) -> tuple[str, bool]:
 
 
 _SALE_PRICE = (
-    re.compile(rf"gia ban {_ONE} (?P<unit>[a-z]+)(?: vao)? (?:la )?{_AMOUNT}(?: a)?"),
-    re.compile(rf"(?:cua hang )?ban (?:(?:voi )?don gia|gia) {_AMOUNT} {_ONE} "
-               r"(?P<unit>[a-z]+)(?: a)?"),
+    re.compile(rf"gia ban {_ONE} (?P<unit>[a-z][a-z0-9]*)(?: vao)? (?:la )?{_AMOUNT}(?: tien)?"),
+    re.compile(rf"(?:cua hang )?ban(?: ra)? (?:(?:voi )?don gia|gia) {_AMOUNT}(?: tien)? "
+               rf"{_ONE} (?P<unit>[a-z][a-z0-9]*)"),
 )
 
 
 def _daily_sale_price(text: str, today: date, rules: Rules,
                       names: Iterable[str]) -> Plan | None:
-    if not re.search(r"\b(?:don gia|gia ban|gia bao nhieu)\b", text):
+    if not re.search(rf"\b(?:don gia|gia ban|gia {_AMOUNT})\b", text):
         return None
+    text = re.sub(r"^(?:(?:xem|coi|check) giup|cho (?:minh |toi )?hoi|e+) ", "", text)
+    text = re.sub(rf"\bhom (?={_DATE}\b)", "ngay ", text)
     used = ["daily_sale_price"]
     resolved = _period(text, today, rules, used)
     if resolved is None or not resolved[0] == resolved[1] <= today:

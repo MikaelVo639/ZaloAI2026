@@ -58,6 +58,16 @@ class Sale:
     unit_price_base: Decimal | None = None  # documented line price per base unit
 
 
+def price_per_base_unit(price: Decimal, sold: Decimal | None,
+                        base: Decimal | None) -> Decimal | None:
+    """Convert a documented price per selling unit using the line's quantity ratio."""
+    if not price.is_finite() or price < 0 or not sold or not base:
+        return None
+    if not sold.is_finite() or not base.is_finite() or sold * base <= 0:
+        return None
+    return price * sold / base
+
+
 def parse_minute(value: Any) -> int | None:
     """Clock time of a time or date-time cell ("14:05", "01/03/2026 14:05:09"), in minutes.
 

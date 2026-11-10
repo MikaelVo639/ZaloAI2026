@@ -1302,7 +1302,7 @@ def _answer_sales_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
 
 
 def daily_sale_price(sales: list[Sale], day: date, unit: str) -> Decimal | None:
-    prices = {s.unit_price_base if s.base_unit == unit else None
+    prices = {s.unit_price_base if s.base_unit and fold(s.base_unit) == unit else None
               for s in select_period(sales, day, day)}
     return next(iter(prices)) if len(prices) == 1 else None
 

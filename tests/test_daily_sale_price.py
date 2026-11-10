@@ -26,6 +26,8 @@ class DailySalePriceTests(_Shop):
             "Ngày 05/01/2026 cửa hàng bán Bánh quy mè với đơn giá bao nhiêu một gói?",
             "Giá bán một gói Bánh quy mè vào ngày 05/01/2026 là bao nhiêu ạ?",
             "Ngày 05/01/2026 cửa hàng bán Bánh quy mè giá bao nhiêu một gói?",
+            "Xem giúp hôm 05/01/2026 Bánh quy mè bán ra với đơn giá bao nhiêu tiền một gói?",
+            "Cho hỏi giá bán một gói Bánh quy mè vào ngày 05/01/2026 là bn?",
         ):
             with self.subTest(text=text):
                 self.assertIsNone(self.plan(text, RULEBOOK))
@@ -34,6 +36,8 @@ class DailySalePriceTests(_Shop):
                                  ("daily_sale_price", date(2026, 1, 5), date(2026, 1, 5), "goi"))
         self.assertIsNone(self.plan("Giá bán một gói Bánh quy mè tháng 1/2026 là bao nhiêu?"))
         self.assertIsNone(self.plan("Giá bán một gói Bánh quy mè ngày 05/03/2026 là bao nhiêu?"))
+        self.assertIsNone(self.plan("Chỉ tính đơn tiền mặt, giá bán một gói Bánh quy mè "
+                                    "ngày 05/01/2026 là bao nhiêu?"))
 
     def test_reads_line_price_and_includes_cancelled_and_returned_orders(self):
         header = [*REPORT_HEADER, "Đơn giá ghi"]
@@ -56,6 +60,26 @@ class DailySalePriceTests(_Shop):
                 wrong_unit = self.plan("Giá bán một thùng Bánh quy mè ngày 05/01/2026 là bao nhiêu?")
                 self.assertEqual(answer_plan({}, catalog, wrong_unit, RULEBOOK + PRICE_RULE).type,
                                  "abstain")
+
+    def test_a_documented_base_price_is_not_divided_again(self):
+        readme = REPORT_README.replace(
+            "## Cột trong `QuyDoi.xlsx`",
+            "- **Giá một gói**: đơn giá theo đơn vị cơ bản\n\n## Cột trong `QuyDoi.xlsx`",
+        )
+        sources = {
+            "DonHang.xlsx": {"01.2026": [
+                [*REPORT_HEADER, "Giá một gói"],
+                ["O1", "05/01/2026", "Đã huỷ", "Bánh quy mè", 1, 2400, "thùng", 100],
+            ]},
+            "QuyDoi.xlsx": {"Sheet1": [
+                ["Tên sản phẩm", "Đơn vị quy đổi", "Tỉ lệ quy đổi", "Đơn vị cơ bản"],
+                ["Bánh quy mè", "thùng", 24, "gói"],
+            ]},
+        }
+        catalog = self.shop(readme, sources, business="base_price")
+        plan = self.plan("Giá bán một gói Bánh quy mè ngày 05/01/2026 là bao nhiêu?")
+        candidate = answer_plan({}, catalog, plan, RULEBOOK + PRICE_RULE)
+        self.assertEqual((candidate.type, candidate.answer), ("number", 100))
 
     def test_explicit_top_k_after_a_month(self):
         plan = self.plan("Tháng 12/2025 top 5 hàng chạy nhất là chi?", rulebook())
