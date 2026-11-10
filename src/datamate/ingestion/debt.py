@@ -160,6 +160,21 @@ _DEBT_PROFILES = (
             "Customer ID": "mã khách", "ten_kh": "tên khách",
         }),
     )),
+    ("debt_sqlite_pos.v1", (
+        ({"MaHoaDon", "NgayLap", "TinhTrang", "TongThanhToan", "PhuongThucTT", "KenhBanHang"}, {
+            "MaHoaDon": "mã đơn", "NgayLap": "ngày bán", "TinhTrang": "trạng thái đơn",
+            "TongThanhToan": "số khách phải trả cho cả đơn", "PhuongThucTT": "hình thức thanh toán",
+            "KenhBanHang": "kênh bán", "MaKhachHang": "mã khách",
+            "ConPhaiThu": "còn nợ cuối dữ liệu", "KhachDaTra": "đã thanh toán",
+        }),
+        ({"MaHoaDon", "NgayGioThu", "SoTienThu"}, {
+            "MaHoaDon": "mã đơn", "NgayGioThu": "thời điểm thu",
+            "SoTienThu": "số tiền trả lần đó",
+        }),
+        ({"MaKhachHang", "TenGoi", "LoaiKhachHang"}, {
+            "MaKhachHang": "mã khách", "TenGoi": "tên khách",
+        }),
+    )),
 )
 
 _DEBT_PROFILE_CANDIDATES = {
@@ -211,7 +226,7 @@ def _profile_sections(catalog: Catalog, documented: list[Section],
                     break
             if matched:
                 continue
-            for role, marker, meanings in _DEBT_PROFILE_CANDIDATES[version]:
+            for role, marker, meanings in _DEBT_PROFILE_CANDIDATES.get(version, ()):
                 if marker <= header:
                     found.append(Section(
                         table.path.name, table.name,
@@ -667,9 +682,10 @@ def _money_unit(readme: str) -> tuple[str, Decimal, tuple[str, ...]]:
     )
     hint = re.compile(
         r"\bdon vi tien\b|\btien te\b|"
-        r"\b(?:cot tien|so tien|tien)\b.*\b(?:don vi|(?:tinh|ghi|luu) (?:bang|theo))\b|"
+        r"\b(?:cot tien|so tien|tien) (?:deu )?(?:duoc )?"
+        r"(?:co don vi|(?:tinh|ghi|luu) (?:bang|theo))\b|"
         r"\b(?:nghin|ngan|trieu|ty) dong\b|"
-        r"\b(?:vnd|eur|usd|jpy|gbp|cny|krw|aud|cad|cent|xu)\b"
+        r"\b(?:vnd|eur|usd|jpy|gbp|cny|krw|aud|cad|cent)\b|\bxu\b(?! ly\b)"
     )
     accepted = {
         "vnd": "vnd", "dong": "vnd",

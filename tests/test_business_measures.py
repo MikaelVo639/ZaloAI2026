@@ -175,6 +175,8 @@ class BusinessMeasureTests(unittest.TestCase):
                 ("Hàng nào hết hạn trong 2 ngày tới mà hiện vẫn còn tồn kho?", "list",
                  ["Thuốc X", "Thuốc Y"]),
                 ("Tổng giá trị hàng tồn kho hôm nay là bao nhiêu?", "number", 42),
+                ("Tính theo giá vốn, tiền hàng nằm trong kho vào cuối ngày 30/04/2026 "
+                 "là bao nhiêu?", "number", 42),
             ]
             for text, kind, expected in cases:
                 with self.subTest(text=text):

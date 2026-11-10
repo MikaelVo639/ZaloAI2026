@@ -60,6 +60,7 @@ class Rules:
     size_by_name: bool = False          # size M / L: tên món kết thúc bằng (M) / (L)
     purchase_total: bool = False        # tiền nhập hàng: tổng tiền phiếu theo ngày phiếu, bỏ phiếu huỷ
     top_supplier: bool = False          # nhà cung cấp nhập nhiều nhất = tiền nhập cao nhất
+    daily_sale_price: bool = False
     avg_purchase_price: bool = False    # giá nhập bình quân trong tháng: theo số lượng nhập
     price_effect: bool = False          # hiệu ứng tăng giá: N ngày kể từ D với N ngày trước D
     price_effect_lookup: bool = False   # look up the first increase to the requested price
@@ -297,6 +298,10 @@ def read_rules(rulebook: str) -> Rules:
                                     "san pham ghi ke don trong danh muc thuoc",
                                     "moi san pham con lai la hang khong ke don",
                                     "ti le ke don tinh theo doanh thu"),
+        daily_sale_price=enable(
+            "daily_sale_price", _find(rows, "gia ban x ngay d"),
+            "don gia ghi tren dong ban", "cac don dat ngay", "mot don vi co ban",
+            "truoc chiet khau dong", "ca dong cua don huy don tra"),
         avg_purchase_price=enable(
             "avg_purchase_price", _find(rows, "gia nhap binh quan", "trong thang"),
             "theo so luong nhap", "khong phai trung binh cong", "theo don vi nhap",

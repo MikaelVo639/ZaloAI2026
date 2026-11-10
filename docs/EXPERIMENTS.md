@@ -519,3 +519,235 @@ config và manifest đã chốt cho A và hai lượt B. Xem từng gate trong
 `acceptance.json`, gồm generation thật, kết quả hai lượt, lỗi mới và runtime
 bao gồm load. Nếu hiệu chỉnh B, thu candidate với `min_confidence=0`, chọn
 ngưỡng trên business train, khóa config rồi chạy lại acceptance trên config đó.
+
+## R3 — Evaluation và sửa lượt đọc thừa ở adapter bán hàng
+
+### Kết quả của #44 đã merge
+
+Hai lượt Kaggle CPU dùng baseline theo luật, cùng 3.000 câu, cùng config và cùng
+SHA-256 của ZIP train (`c1adbc654a301c30e4cf20b55d301381025f49db1162d88322b552d7472fea01`).
+Điểm dưới đây do scorer local proxy tính.
+
+| Revision | Đúng | Sai | Abstain |
+| --- | ---: | ---: | ---: |
+| Main trước #44 — `fb76719` | 2.651 | 0 | 349 |
+| Head #44 — `ea4ba09` | 2.680 | 0 | 320 |
+| Nhánh thử thiếu danh tính — `995d0a6` | 2.572 | 0 | 428 |
+
+#44 thêm 29 câu đúng và giữ đủ 2.651 ID đúng của main. Hai lượt Kaggle thấp hơn
+một câu đúng so với số tuyệt đối trong báo cáo tiến độ cũ, cùng chênh lệch +29.
+
+| Biến thể | Số câu | Đúng trên main cũ | Đúng trên #44 | Sai trên #44 | ID đúng bị mất |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Bỏ dấu | 2.226 | 1.964 | 1.990 | 0 | 0 |
+| Viết tắt tháng | 1.335 | 1.196 | 1.220 | 0 | 0 |
+| Thêm hư từ | 2.963 | 2.620 | 2.650 | 0 | 0 |
+| Từ đồng nghĩa | 271 | 262 | 263 | 0 | 0 |
+| Đảo ký tự | 2.737 | 2.437 | 2.467 | 0 | 0 |
+| Năm ngắn | 1.335 | 1.199 | 1.223 | 0 | 0 |
+| Cách viết chat | 3.000 | 2.649 | 2.679 | 0 | 0 |
+
+Trong 320 abstain của head #44 có 68 câu mang nhãn `unanswerable` và 252 câu
+có nhãn đáp án cụ thể. Gom theo từ khóa, các nhóm lớn là giá bán/đơn giá 62,
+công nợ 36, đơn vị bán 29, nhập hàng 27, nhóm hàng/doanh thu 23 và tồn kho/lô 20.
+Còn 99 câu chưa gán chủ đề. Lý do bỏ qua cần đối chiếu log của từng câu.
+
+[PR #44](https://github.com/MikaelVo639/ZaloAI2026/pull/44) ·
+[Train main cũ](https://www.kaggle.com/code/trngquangbodng/datamate-r3-fb76719-train-cpu) ·
+[Train #44](https://www.kaggle.com/code/trngquangbodng/datamate-r3-ea4ba09-train-cpu) ·
+[Robustness main cũ](https://www.kaggle.com/code/trngquangbodng/datamate-r3-fb76719-robustness-cpu) ·
+[Robustness #44](https://www.kaggle.com/code/trngquangbodng/datamate-r3-ea4ba09-robustness-cpu)
+
+### Sửa phần còn lại trên main sau tích hợp
+
+`995d0a6` cứu 6 câu thiếu danh tính khách ở `biz_112` và `biz_130`, đồng thời mất
+114 ID từng đúng ở `biz_102`. Khoảng xử lý shop này theo console tăng từ 277 lên
+306 giây, trong khi worker có ngưỡng nạp dữ liệu 300 giây. Timeout là giả thuyết
+chính cho lượt cũ, vì artifact không xuất log nguyên nhân của từng câu.
+
+`biz_102` có 86.029 dòng bán trên 18 sheet. Adapter phẳng gặp trạng thái ngoài
+tập nhãn của nó lần đầu ở sheet 18, sau đó adapter README phải đọc lại dữ liệu.
+Ưu tiên adapter README khi README mô tả rõ bảng bán theo đơn vị bán và bảng
+hệ số quy đổi, vì đây là nguồn đã có cả cách đọc trạng thái của split lẫn cách
+quy về đơn vị cơ bản. Khi nguồn được mô tả thiếu hoặc giá trị quy đổi sai
+định dạng, adapter phẳng vẫn có thể trả lời các ca nó đọc được. Điều kiện chọn
+adapter dùng schema thay vì ID shop.
+
+Probe Windows dùng cùng nguồn và giới hạn 105 giây cho mỗi revision. Adapter
+trên `c6283d2` chạm ngưỡng này. Adapter trên `068f9b1` đọc đủ 86.029 dòng
+trong 51,4 giây. Chạy pipeline trên riêng 119 câu của `biz_102` với code này
+đạt **114 đúng, 0 sai, 5 abstain** và phục hồi đủ 114 ID từng mất. Lượt predict
+mất 58,7 giây, đỉnh bộ nhớ cam kết của job là 385,8 MiB dưới giới hạn 512 MiB.
+Năm câu còn lại thuộc grammar, gồm bốn câu đơn giá theo ngày và một cách hỏi
+top 5 bán chạy.
+
+Chỉ trả `unanswerable` cho câu cần mã hoặc tên khách nếu rulebook cho phép và
+schema của mọi bảng liên quan chứng minh thiếu cả hai trường. Header được lấy
+trong lúc adapter đọc nguồn. Thiếu mapping, lỗi worker và dữ liệu trống chưa
+rõ nguyên nhân vẫn được xử lý theo đường abstain. Các ca địa chỉ, giới tính,
+nhóm khách và kỳ hỏi cần kiểm chứng riêng.
+
+Câu bán chạy `q_02eb42db6665` cũng đã được đối chiếu ngoài inference. Theo lượng
+quy về lon, Bia Sài Gòn Special đạt 303 và Bia Tiger đạt 300. Nhãn train chọn
+Tiger. Phần bán chạy được theo dõi riêng để nhóm kiểm lại nhãn.
+
+Trên Windows, smoke qua với 21 đúng, 0 sai và 3 abstain trên dữ liệu giả lập.
+Unittest chạy 441 ca, có 1 ca skip trên `068f9b1`. Sau khi thêm fallback cho
+giá trị quy đổi sai định dạng ở `4c8f670`, chạy lại 38 test adapter đều qua.
+
+Hai notebook chẩn đoán trước dừng ở test setup. Một lượt import nhầm package
+`tests` của ảnh Kaggle, lượt kế tiếp gặp test đòi Git checkout trong khi
+notebook dùng Git archive. Lượt chẩn đoán mới chạy smoke và test adapter,
+sau đó so hai revision trên ba shop và xuất lý do abstain. Suite đầy đủ dùng
+checkout Windows và GitHub Actions.
+
+Full train của `4c8f670` so với `c6283d2` là phép kiểm các shop chịu ảnh
+hưởng của thay đổi thứ tự adapter. Điều kiện chốt là 0 sai, giữ ID đúng
+của base và đạt đủ các ca đã xác minh. Trên public, `c6283d2` có **353/1.000**
+câu có đáp án, 647 abstain, đọc được **14/14 shop**. Public chưa có nhãn để
+chấm độ đúng.
+
+[Train nhánh thử](https://www.kaggle.com/code/trngquangbodng/datamate-r3-995d0a6-train-cpu) ·
+[Chẩn đoán cũ](https://www.kaggle.com/code/trngquangbodng/datamate-r3-0629954-identity-ab-cpu) ·
+[A/B ba shop](https://www.kaggle.com/code/trngquangbodng/datamate-r3-4c8f670-identity-ab-cpu) ·
+[Train bản sửa](https://www.kaggle.com/code/trngquangbodng/datamate-r3-4c8f670-train-cpu) ·
+[Train main hiện tại](https://www.kaggle.com/code/trngquangbodng/datamate-r3-c6283d2-train-cpu) ·
+[Robustness main hiện tại](https://www.kaggle.com/code/trngquangbodng/datamate-r3-c6283d2-robustness-cpu) ·
+[Public main hiện tại](https://www.kaggle.com/code/trngquangbodng/datamate-r3-c6283d2-public-audit-cpu)
+
+### Năm câu còn abstain tại biz_102
+
+Code `6d9c8a9` bổ sung đơn giá bán theo ngày và mẫu top-k có số lượng nêu rõ.
+Adapter dùng đơn giá ghi trên dòng trước chiết khấu, quy về đơn vị cơ bản
+và xét cả dòng thuộc đơn huỷ hoặc trả. Câu hỏi nhiều ngày, đơn vị không khớp,
+giá thiếu hoặc có nhiều mức giá trên cùng ngày vẫn được bỏ qua. Mẫu top-k
+dùng phép xếp hạng hiện có theo số lượng đã quy đổi.
+
+Trên 119 câu của `biz_102`, Windows chấm được **119 đúng, 0 sai, 0 abstain**.
+So với lượt `068f9b1`, cả 114 câu đúng cũ đều được giữ và 5 câu còn lại đã
+đúng. Lượt predict mất 61,4 giây, đỉnh bộ nhớ cam kết 394,6 MiB với trần
+512 MiB. Smoke qua, unittest chạy 444 ca với 1 skip.
+Code này chưa có lượt full train trong các artifact đã thu thập.
+
+### Năm lượt Kaggle đã hoàn tất và kiểm tra hồi quy
+
+Các lượt train dưới đây dùng cùng ZIP, rulebook và config baseline. Chấm bằng
+local proxy, ghép theo đúng 3.000 ID.
+
+| Code | Đúng | Sai | Abstain | ID tăng đúng so với main | ID đúng bị mất |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Main `c6283d2` | 2.681 | 0 | 319 | — | — |
+| `068f9b1` | 2.580 | 0 | 420 | 3 | 104 |
+| `4c8f670` | 2.579 | 0 | 421 | 3 | 105 |
+
+A/B 355 câu trên ba shop giữ đủ 114 câu đúng ở `biz_102`, với thời gian cả
+shop từ 313,7 xuống 174,2 giây. `biz_130` tăng từ 106 lên 109 câu đúng nhờ
+ba ca thiếu danh tính. `biz_112` chuyển từ 104 đúng, 14 abstain thành 118
+abstain, có 77 log ghi timeout khi nạp dữ liệu. Đây cũng là 104 ID bị mất
+trong cả hai lượt full train thử. Một ID giá nhập tại `biz_106` mất thêm ở
+`4c8f670`. Shop này không dùng nhánh ưu tiên bảng quy đổi, là đường code duy
+nhất thay đổi giữa hai lượt thử. Artifact không có log theo câu để xác định
+nguyên nhân ở shop này.
+
+Ở bảy biến thể của main `c6283d2`, sai đều bằng 0. So với `ea4ba09`, biến thể
+năm ngắn mất 53 ID đúng, gồm 52 ở `biz_102`, và cách viết chat mất 115 ID,
+gồm 114 ở `biz_102`. Có bốn biến thể khác mất một ID tại `biz_106`. Public
+của main có 353 câu có đáp án trên 1.000, đọc được 14 shop. Public chưa có
+nhãn để chấm độ đúng.
+
+Bản sửa sau đối chiếu gom dò header các sheet cùng workbook và dùng lại
+mapping đã chọn khi kiểm thiếu danh tính khách. Giữ ngưỡng timeout hiện có.
+Trên catalog thật của `biz_112`, số lần mở workbook để phân loại schema giảm
+16 xuống 2, từ 26,740 xuống 1,772 giây, cùng tập và thứ tự bảng. Kiểm bằng
+header nguồn xác nhận đủ 17/17 bảng ở `biz_112` và 3/3 ở `biz_130`. Smoke và
+445 test chạy trên Windows, có 1 skip, đỉnh job 114,6 MiB dưới trần 256 MiB.
+Phiên kiểm 118 câu trên dữ liệu thật được bỏ qua do RAM trống dưới ngưỡng
+đã đặt. Chưa có điểm sau sửa cho 118 câu này hay full train của head #46.
+Lượt 119/119 ở `biz_102` là phép đo cục bộ ở `6d9c8a9`.
+
+Trong 319 abstain của main, 68 có nhãn `unanswerable` và 251 có đáp án cụ thể.
+Phân loại sơ bộ theo từ khóa cho 62 ca giá bán/đơn giá, 36 công nợ, 29 đơn
+vị bán, 26 nhập hàng, 23 nhóm hàng/doanh thu, 20 tồn kho/lô và 99 chưa gán
+chủ đề. `biz_123` có nhiều abstain nhất (44), trong đó 20 có từ khóa công
+nợ và 10 có từ khóa nhập hàng. Kiểm schema SQLite ở chế độ chỉ đọc xác nhận
+có các cột công nợ và nhập hàng mà README nêu. Probe adapter vẫn trả
+`partial` cho mapping công nợ và không chọn được bảng phiếu nhập. Đây là
+đầu mối mapping cần kiểm tiếp trước khi thêm mẫu câu.
+
+[Full train main](https://www.kaggle.com/code/trngquangbodng/datamate-r3-c6283d2-train-cpu) ·
+[Full train 068f9b1](https://www.kaggle.com/code/trngquangbodng/datamate-r3-068f9b1-train-cpu) ·
+[Full train 4c8f670](https://www.kaggle.com/code/trngquangbodng/datamate-r3-4c8f670-train-cpu) ·
+[A/B ba shop](https://www.kaggle.com/code/trngquangbodng/datamate-r3-4c8f670-identity-ab-cpu)
+
+### Kết quả chốt cho Evaluation đợt 3
+
+Hai notebook CPU kiểm tra đúng revision `37cd647` và đã hoàn tất. Các số
+dưới đây dùng scorer local proxy trên tập train.
+
+| Phạm vi | Môi trường | Đúng | Sai | Abstain |
+| --- | --- | ---: | ---: | ---: |
+| `biz_102`, 119 câu, `6d9c8a9` | Windows | 119 | 0 | 0 |
+| `biz_112`, 118 câu, `37cd647` | Kaggle | 109 | 0 | 9 |
+| `biz_106`, `q_0266c6b24cbf`, `37cd647` | Kaggle | 0 | 0 | 1 |
+| `biz_106`, cùng câu và revision | Windows | 0 | 0 | 1 |
+
+`biz_112` giữ đủ 104 ID đúng trên main, thêm 5 câu đúng và đạt cả ba
+ca thiếu danh tính được theo dõi. `biz_106` là một ca giá nhập bình quân
+từng đúng trên main. Kaggle báo timeout tính toán 30 giây. Windows mất
+38,7 giây, chạm giới hạn bộ nhớ 512 MiB và ghi lý do chung của baseline.
+Hai lượt xác nhận ca này vẫn abstain, nguyên nhân gốc chưa được xác định.
+
+Phần nhóm khách của gói 3 đã merge qua #44. #46 bổ sung các ca thiếu
+danh tính có bằng chứng schema. Kết quả rà nguồn của nhóm 23 câu nằm ở
+phần kiểm kê bên dưới. Gói 12 là việc dự phòng,
+đã kiểm chứng bốn câu đơn giá theo ngày trong lượt `biz_102`. Việc
+đối chiếu nhãn `q_02eb42db6665` đã hoàn tất, còn quyết định nhãn thuộc nhóm.
+
+Các số 2.681 đúng, 0 sai, 319 abstain là full train của main `c6283d2`.
+Kết quả hai notebook đích chỉ xác nhận phạm vi trong bảng. Chưa có
+full train ở `37cd647`.
+
+[biz_112 trên Kaggle](https://www.kaggle.com/code/trngquangbodng/datamate-r3-37cd647-biz-112-targeted-cpu) ·
+[biz_106 trên Kaggle](https://www.kaggle.com/code/trngquangbodng/datamate-r3-37cd647-biz-106-targeted-cpu)
+
+### Kiểm kê 23 câu khách hàng có nhãn unanswerable
+
+Tài liệu chia việc nêu số lượng nhưng không liệt kê ID. Danh sách dưới đây
+được dựng bằng cách ghép câu hỏi với nhãn train, lấy các câu về khách hàng
+và công nợ, loại câu đánh giá nhân viên. Tập thu được có 23 ID thuộc 11 shop.
+Nhãn chỉ dùng để chọn tập kiểm kê. Kết luận dùng rulebook train §3, §4, §7,
+README và header của 168 sheet thuộc 60 workbook. Probe chạy chỉ đọc từng
+workbook trên Windows, đỉnh bộ nhớ cam kết 32,84 MiB.
+
+| Nhóm | Shop và ID | Bằng chứng từ dữ liệu phát hành |
+| --- | --- | --- |
+| Địa chỉ | `biz_118` · `q_04128078842a` | Sổ bán có tên khách. Sổ giao và sổ hạn nợ thiếu địa chỉ khách. |
+| Địa chỉ | `biz_105` · `q_a4560b62b198` | Hai sổ bán có tên khách, thiếu địa chỉ và nguồn khách để nối. |
+| Địa chỉ | `biz_121` · `q_e9455734edd3` | Chi tiết đơn có tên khách, thiếu địa chỉ. Workbook xuất kèm chứa dữ liệu hàng, lô, nhập và thuốc. |
+| Địa chỉ | `biz_122` · `q_f120d0f5e7d0` | Sổ bán có tên khách, thiếu địa chỉ và danh mục khách. |
+| Địa chỉ | `biz_117` · `q_f895c5de92bd` | Sổ bán có `TenKH`. Sổ giao có mã bill, biển số và tài xế, thiếu địa chỉ khách. |
+| Địa chỉ | `biz_109` · `q_fcafb39ec35f` | Có hoá đơn tháng 2/2025 và nối được danh mục theo mã khách. Danh mục thiếu địa chỉ. |
+| Giới tính | `biz_103` · `q_9f82b2f25fd6` | Sổ bán có tên khách, thiếu giới tính. File còn lại là bảng quy đổi. |
+| Giới tính | `biz_109` · `q_95099c4916a8` | Danh mục khách có nhóm khách, thiếu giới tính. |
+| Giới tính | `biz_122` · `q_ea69ed45df1c` | Sổ bán có tên khách, thiếu giới tính và danh mục khách. |
+| Giới tính | `biz_124` · `q_ee9d6f998de7` | Danh mục khách có hạng, ngày sinh và loại hình khách, thiếu giới tính. |
+| Nhóm khách | `biz_106` · `q_4bc3846b6f5b` | Hoá đơn nối danh mục theo mã khách. Danh mục có `Loại hình khách` và điểm, thiếu nhóm thân thiết và quy tắc suy ra nhóm. |
+| Danh tính khách | `biz_112` · `q_2306395cb34a`, `q_43953e1ca6ca`, `q_d18944d81860` | 16 sheet bán thiếu mã và tên khách. Ba ID đều đúng trong lượt Kaggle `37cd647`. |
+| Danh tính khách | `biz_130` · `q_05a8b30443a1`, `q_937cb5addd0b`, `q_99bc48a3da13` | Cả hai sổ bán thiếu mã và tên khách. Ba ID đều đúng trong lượt full train `995d0a6`. |
+| Kỳ ngoài phạm vi | `biz_121` · `q_40f434f3920d` | Quét cột ngày của sổ bán thấy 44.042 dòng có ngày, sớm nhất 01/03/2025 và muộn nhất 20/09/2026. Kỳ hỏi là tháng 2/2025. |
+| Công nợ theo khách | `biz_117` · `q_4333ad0589a1` | Sổ hạn nợ ghi mã đơn và hạn trả, thiếu số đã trả và lịch sử thanh toán. C01 đã chấm đúng trên main `c6283d2`. |
+| Công nợ theo khách | `biz_105` · `q_faf7802261fb` | Sổ bán có tên khách và trị giá dòng, thiếu khoản trả theo đơn. C01 đã chấm đúng trên main `c6283d2`. |
+| Công nợ | `biz_112` · `q_8d1792dae92c`, `q_b376cbe01666` | Sổ bán thiếu các khoản thu nợ theo ngày. Câu nợ theo khách còn cần mã hoặc tên khách. |
+| Công nợ tổng | `biz_103` · `q_ecca6bcc3dfc` | Sổ chi tiết bán có tổng tiền dòng. Nguồn thiếu khoản trả theo đơn hoặc số dư nợ. |
+
+Bằng chứng nguồn đã được rà cho 23/23 câu. Tám ID đã chấm đúng qua
+các lượt nêu trong bảng. 15 ID còn lại có kết quả đối chiếu nguồn,
+chưa có thay đổi hành vi trong PR này. Địa chỉ và giới tính cần trường
+được ghi rõ, danh tính và nhóm khách dùng quy tắc của split, còn câu công
+nợ cần sổ đủ dữ liệu tính số tiền. Báo cáo cũ ghi 10 ca với lý do
+`No customer recorded on the orders` nhưng artifact còn lưu thiếu log từng
+câu để ghép đủ 10 ID. Sáu ca thiếu danh tính ở bảng là các ID đã đối chiếu
+được bằng schema và kết quả chấm.
+
+Đây là kiểm kê phạm vi dữ liệu. Báo cáo sử dụng các benchmark đã có,
+gồm full train và robustness của main cùng các lượt đích đã hoàn tất.

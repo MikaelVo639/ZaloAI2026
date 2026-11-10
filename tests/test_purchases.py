@@ -122,6 +122,7 @@ class PurchaseTests(unittest.TestCase):
             ("Tháng 6/2026 nhập hàng hết bao nhiêu tiền?", "purchase_total"),
             ("Tháng 6/2026 tổng giá trị các phiếu nhập hàng là bao nhiêu?", "purchase_total"),
             ("Tháng 6/2026 tiền nhập hàng từ nhà cung cấp nào cao nhất?", "top_supplier"),
+            ("Tháng 6/2026 nhà cung cấp nào có tổng tiền nhập hàng lớn nhất?", "top_supplier"),
         ):
             with self.subTest(text=text):
                 self.assertEqual(plan(text).intent, intent)

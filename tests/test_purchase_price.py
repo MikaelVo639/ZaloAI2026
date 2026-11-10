@@ -1,5 +1,7 @@
 """Average purchase price of one product in a month (rulebook §5). Shops are synthetic."""
+import sqlite3
 import tempfile
+from contextlib import closing
 import unittest
 from datetime import date
 from decimal import Decimal
@@ -11,7 +13,7 @@ from datamate.agent import compute
 from datamate.agent.validation import check_executed
 from datamate.contracts import Question
 from datamate.ingestion import build_catalog
-from datamate.ingestion.purchases import PurchaseSourceError, load_purchase_lines
+from datamate.ingestion.purchases import PurchaseSourceError, load_purchase_lines, load_purchases
 from datamate.semantics.planner import plan_question
 from datamate.semantics.rules import read_rules
 
@@ -141,6 +143,38 @@ class PurchasePriceTests(unittest.TestCase):
         parsed_code = plan_question(code_query, read_rules(rules), ["SKU1"])
         candidate = compute.answer_plan({}, coded_catalog, parsed_code, rules)
         self.assertEqual((candidate.type, candidate.answer), ("number", 6), candidate.reason)
+
+    def test_sqlite_receipts_and_lines_match_readme_references(self):
+        readme = (
+            "## File\n- `pos.sqlite`\n\n## Quy ước\n"
+            "- **Nhập hàng**: `chi_tiet_nhap.DonGiaNhap` là giá nhập một đơn vị, "
+            "theo đơn vị nhập của dòng; `phieu_nhap.TongGiaTriNhap` là tổng tiền của cả phiếu nhập.\n"
+        )
+        catalog = self.catalog(readme, {})
+        shop = Path(self.directory.name) / catalog.business_id
+        with closing(sqlite3.connect(shop / "pos.sqlite")) as database:
+            database.executescript("""
+                CREATE TABLE phieu_nhap (MaPhieuNhap, NgayNhapKho, TongGiaTriNhap,
+                                         TinhTrang, MaNhaCungCap);
+                INSERT INTO phieu_nhap VALUES ('N1', '2026-06-02', 100, 'received', 'NCC1');
+                INSERT INTO phieu_nhap VALUES ('N2', '2026-06-03', 450, 'cancelled', 'NCC1');
+                CREATE TABLE chi_tiet_nhap (MaPhieuNhap, MaHangHoa, DonViTinh, SL, DonGiaNhap);
+                INSERT INTO chi_tiet_nhap VALUES ('N1', 'SP1', 'hộp', 2, 50);
+                INSERT INTO chi_tiet_nhap VALUES ('N2', 'SP1', 'hộp', 3, 150);
+                CREATE TABLE nha_cung_cap (MaNhaCungCap, TenGoi);
+                INSERT INTO nha_cung_cap VALUES ('NCC1', 'Cty A');
+            """)
+        catalog = build_catalog(Path(self.directory.name), "b")
+        book = load_purchases(catalog)
+        self.assertTrue(book.supplier_names)
+        self.assertEqual(book.receipts[0].supplier, "Cty A")
+        lines = load_purchase_lines(catalog)
+        self.assertEqual(compute.average_purchase_price(list(lines.lines), date(2026, 6, 1),
+                                                         date(2026, 6, 30)), Decimal(50))
+        (shop / "README.md").write_text(readme.replace("chi_tiet_nhap.DonGiaNhap", "x.DonGiaNhap"),
+                                       encoding="utf-8")
+        with self.assertRaises(PurchaseSourceError):
+            load_purchase_lines(build_catalog(Path(self.directory.name), "b"))
 
     def test_wordings(self):
         for text, unit in (
