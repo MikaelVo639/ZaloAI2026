@@ -1,5 +1,7 @@
 """End-of-data stock of one product (README "Tồn kho" convention). Shops are synthetic."""
+import sqlite3
 import tempfile
+from contextlib import closing
 import unittest
 from unittest import mock
 from datetime import date
@@ -66,6 +68,34 @@ class StockTests(unittest.TestCase):
                          [("SP1", "lon", 43), ("SP2", "viên", 120)])
         with self.assertRaises(StockSourceError):
             load_stock(self.catalog(readme=README.replace("- **Tồn kho**", "- **Kho**")))
+
+    def test_sqlite_movements_use_last_row_per_product_at_the_cutoff(self):
+        shop = Path(self.directory.name) / "b"
+        shop.mkdir()
+        (shop / "README.md").write_text(
+            "`san_pham`, `the_kho`\n"
+            "- Dữ liệu có đến hết 14/07/2026.\n"
+            "- **Tồn kho**: mỗi dòng `the_kho.TonCuoi` là tồn sau lần nhập/bán/trả đó, "
+            "theo đơn vị cơ bản; tồn tại một thời điểm là tồn ở dòng cuối của sản phẩm "
+            "tính đến thời điểm đó.\n", encoding="utf-8")
+        path = shop / "pos.sqlite"
+        with closing(sqlite3.connect(path)) as database:
+            database.executescript("""
+                CREATE TABLE san_pham (MaHangHoa, TenGoi, DonViCoSo, GiaVonHang);
+                INSERT INTO san_pham VALUES ('SP1', 'Bia Tiger lon', 'lon', 20);
+                CREATE TABLE the_kho (MaHangHoa, NgayGioPhatSinh, TonCuoi, MaChiNhanh);
+                INSERT INTO the_kho VALUES ('SP1', '2026-07-14 18:00:00', 9, 'A'),
+                    ('SP1', '2026-07-14 09:00:00', 14, 'A'),
+                    ('SP1', '2026-07-15 07:00:00', 3, 'A');
+            """)
+        catalog = build_catalog(Path(self.directory.name), "b")
+        self.assertEqual(load_stock(catalog).items[0].quantity, Decimal(9))
+        self.assertEqual(stock_source.load_stock_costs(catalog)[0], {"SP1": Decimal(20)})
+        with closing(sqlite3.connect(path)) as database:
+            database.executescript(
+                "INSERT INTO the_kho VALUES ('SP1', '2026-07-14 18:00:00', 4, 'A');")
+        with self.assertRaisesRegex(StockSourceError, "not unique"):
+            load_stock(catalog)
 
     def test_wordings(self):
         for text in ("Tồn kho Bia Tiger lon cuối ngày hôm nay là bao nhiêu lon?",

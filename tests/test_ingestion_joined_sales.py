@@ -548,6 +548,19 @@ class XlsxOrderDetailProductTests(unittest.TestCase):
             self._load("return_without_rule", incompatible)
         self.assertEqual(caught.exception.code, "RULE_CAPABILITY_MISSING")
 
+    def test_xlsx_channel_needs_a_matching_readme_column(self):
+        target = self._write_sources()
+        self._write_xlsx(target / "orders-export.xlsx", [*self.ORDER_HEADER, "Kênh"], [
+            ["O1", "01/01/2026", "25,000", "Hoàn thành", "phone"],
+            ["O2", "02/01/2026", "10,000", "Đã hủy", "store"],
+            ["O3", "03/01/2026", "30,000", "Đã trả hàng", "store"],
+            ["O4", "04/01/2026", "40,000", "Đang giao hàng", "phone"],
+        ])
+        self.assertIsNone(self._load()[0][0].channel)
+        with (target / "README.md").open("a", encoding="utf-8") as stream:
+            stream.write("\n## Cột trong `orders-export.xlsx`\n- **Kênh**: kênh bán\n")
+        self.assertEqual(self._load()[0][0].channel, "phone")
+
     def test_new_schema_mapping_requires_readme_evidence_and_is_unambiguous(self):
         target = self._write_sources("ambiguous")
         self._write_xlsx(

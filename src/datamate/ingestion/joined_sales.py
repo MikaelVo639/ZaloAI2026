@@ -14,6 +14,7 @@ from datamate.ingestion.inventory import _sha256
 from datamate.ingestion.readme_sales import (
     joined_customer_sources,
     optional_sale_cost,
+    parse_sections,
     sale_cost_column,
 )
 from datamate.ingestion.sales import Sale, parse_date, parse_minute, price_per_base_unit
@@ -300,6 +301,14 @@ def mapping_for_xlsx_order_detail_product(catalog: Catalog) -> MappingSpec:
                            if "nguoi ban" in fold(line) and "ma nhan vien ban" in fold(line)), None)
     if staff_evidence and "Người bán" in orders.columns:
         order_fields["staff_id"] = "Người bán"
+    for field in ("channel", "payment_method"):
+        columns = {
+            section.fields[field] for section in parse_sections(catalog.readme)
+            if section.file == orders.path.name and section.sheet in (None, orders.name)
+            and field in section.fields
+        }
+        if len(columns) == 1 and columns <= set(orders.columns):
+            order_fields[field] = next(iter(columns))
     cost_column = sale_cost_column(catalog.readme, details, set(details.columns))
 
     def source(table: Table) -> str:
@@ -514,6 +523,8 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             "customer_name": customer_name,
             "customer_group": customer_group,
             "total_due": total_due,
+            "channel": (None if _missing(raw.get(mapping.orders.fields.get("channel", "")))
+                        else str(raw[mapping.orders.fields["channel"]]).strip()),
             "row_ordinal": row_ordinal,
             "payment_method": (
                 None if "payment_method" not in mapping.orders.fields
@@ -668,8 +679,9 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             quantity_base=quantity_base,
             base_unit=None if _missing(product["base_unit"]) else str(product["base_unit"]).strip(),
             product_group=None if _missing(product["category"]) else str(product["category"]).strip(),
-            unit_price_base=price_per_base_unit(unit_price, quantity, quantity_base)
-            if formula_matches_line or quantity == quantity_base else None,
+            channel=order["channel"],
+            unit_price_base=(price_per_base_unit(unit_price, quantity, quantity_base)
+                             if formula_matches_line or quantity == quantity_base else None),
             minute=order["minute"],
             staff_id=order["staff_id"],
             customer_id=order["customer_id"],

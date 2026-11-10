@@ -82,6 +82,9 @@ class DailySalePriceTests(_Shop):
         self.assertEqual((candidate.type, candidate.answer), ("number", 100))
 
     def test_explicit_top_k_after_a_month(self):
-        plan = self.plan("Tháng 12/2025 top 5 hàng chạy nhất là chi?", rulebook())
-        self.assertEqual((plan.intent, plan.top_k, plan.start, plan.end),
-                         ("top_products", 5, date(2025, 12, 1), date(2025, 12, 31)))
+        for text in ("Tháng 12/2025 top 5 hàng chạy nhất là chi?",
+                     "5 best seller tháng 12/2025 là những mặt hàng nào?"):
+            with self.subTest(text=text):
+                plan = self.plan(text, rulebook())
+                self.assertEqual((plan.intent, plan.top_k, plan.start, plan.end),
+                                 ("top_products", 5, date(2025, 12, 1), date(2025, 12, 31)))

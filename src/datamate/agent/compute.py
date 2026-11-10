@@ -341,7 +341,8 @@ def share_percent(part: Decimal, whole: Decimal) -> float | None:
 
 C01_INTENTS = frozenset({"revenue_increasing", "top_debt_customers"})
 # Contract C01 §7: further debt questions on the same D01 ledger.
-DEBT_INTENTS = frozenset({"debt_total", "debt_customer_count", "debt_collected", "debt_flow"})
+DEBT_INTENTS = frozenset({"debt_total", "debt_customer_count", "debt_collected", "debt_flow",
+                          "debt_age_buckets"})
 DEBT_MEASURE_FEATURES = ("debt_orders", "debt_at_date", "debt_excluded", "customer_identity")
 LOT_INTENTS = frozenset({"earliest_expiry", "expiring_lot_count", "expiring_lot_cost",
                          "expiring_product_count", "expiring_products"})
@@ -400,7 +401,7 @@ def unsupported(plan: Plan) -> str:
         if (plan.comparison or plan.compare_start is not None or plan.periods or plan.shape
                 or plan.unit or plan.rank_by or plan.top_k != 1):
             return f"Unsupported fields for {plan.intent}"
-        snapshot = plan.intent in ("debt_total", "debt_customer_count")
+        snapshot = plan.intent in ("debt_total", "debt_customer_count", "debt_age_buckets")
         if snapshot and plan.start != plan.end:
             return "Debt balance is a snapshot at one day"
         if plan.intent == "debt_flow":
@@ -624,6 +625,16 @@ def debt_total(ledger: DebtLedger, day: date, min_age: int | None = None,
     return total
 
 
+def debt_age_buckets(ledger: DebtLedger, day: date) -> list[int]:
+    """Balance for orders aged 0–7, 8–15, and over 15 days, in that order."""
+    totals = [Decimal(0), Decimal(0), Decimal(0)]
+    for order, remaining in open_debts(ledger, day):
+        age = (day - order.day).days
+        index = int(age > 7) + int(age > 15)
+        totals[index] += remaining
+    return [int(_vnd(total)) for total in totals]
+
+
 def debt_customer_count(ledger: DebtLedger, day: date) -> int:
     """Customers (not walk-in) who still owe at the end of ``day``."""
     keys = {_debt_key(order, ledger) for order, _ in open_debts(ledger, day)}
@@ -671,13 +682,13 @@ def _answer_debt_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                          rulebook: str) -> Candidate:
     rules = read_rules(rulebook)
     needed = list(DEBT_MEASURE_FEATURES)
-    if plan.intent in ("debt_total", "debt_customer_count"):
+    if plan.intent in ("debt_total", "debt_customer_count", "debt_age_buckets"):
         needed.append("until_end_of_day")
     if plan.intent in ("debt_customer_count", "debt_flow"):
         needed.append("debt_by_customer")
     if plan.intent in ("debt_collected", "debt_flow"):
         needed.append("debt_flow_rule")
-    if plan.threshold is not None:
+    if plan.threshold is not None or plan.intent == "debt_age_buckets":
         needed.append("debt_age")
     evidence: dict[str, Any] = {"intent": plan.intent, "start": plan.start.isoformat(),
                                 "end": plan.end.isoformat()}
@@ -708,6 +719,11 @@ def _answer_debt_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         evidence.update(code=_code(f"_vnd(debt_total(ledger, {day}, {age!r}, {inclusive!r}))",
                                    open_debts, debt_total, _vnd), result=value)
         return Candidate("number", value, 1.0, "", evidence)
+    if plan.intent == "debt_age_buckets":
+        value = debt_age_buckets(ledger, plan.end)
+        evidence.update(code=_code(f"debt_age_buckets(ledger, {day})",
+                                   open_debts, debt_age_buckets, _vnd), result=value)
+        return Candidate("list", value, 1.0, "", evidence)
     if plan.intent == "debt_customer_count":
         value = debt_customer_count(ledger, plan.end)
         evidence.update(code=_code(f"debt_customer_count(ledger, {day})", open_debts,

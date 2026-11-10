@@ -89,7 +89,8 @@ class Plan:
 # C01 (docs/AGENT_02_CONTRACT.md). Intents asked "đến hết ngày X" (rulebook §2): the answer is
 # the state at the end of X built from everything since the first day of data, so the Plan
 # carries ``start == end == X``. No new Plan field: a backend reads the intent.
-SNAPSHOT_INTENTS = frozenset({"top_debt_customers", "debt_total", "debt_customer_count"})
+SNAPSHOT_INTENTS = frozenset({"top_debt_customers", "debt_total", "debt_customer_count",
+                              "debt_age_buckets"})
 # Column names of the top_debt_customers table, as in the rulebook's table example.
 DEBT_TABLE_COLUMNS = ("khach_hang", "so_tien_no")
 

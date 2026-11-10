@@ -15,7 +15,7 @@ ANSWER_TYPES = {
     "quantity": "number", "count_where": "number",
     "revenue_increasing": "boolean", "top_debt_customers": "table",
     "debt_total": "number", "debt_customer_count": "number", "debt_collected": "number",
-    "debt_flow": "list", "top_staff": "string", "stock": "number", "stock_split": "list",
+    "debt_flow": "list", "debt_age_buckets": "list", "top_staff": "string", "stock": "number", "stock_split": "list",
     "purchase_total": "number", "top_supplier": "string",
     "avg_purchase_price": "number", "daily_sale_price": "number",
     "unsold_count": "number", "delivery_count": "number",
@@ -190,6 +190,10 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
                     if (len(candidate.answer) != 2 or not all(
                             type(x) is int and x >= 0 for x in candidate.answer)):
                         raise ValueError("Debt flow is [nợ thêm, trả được] in whole VND")
+                elif plan.intent == "debt_age_buckets":
+                    if (len(candidate.answer) != 3 or not all(
+                            type(x) is int and x >= 0 for x in candidate.answer)):
+                        raise ValueError("Debt age report requires three nonnegative VND balances")
                 elif plan.shape == "series":
                     if (len(candidate.answer) != len(plan.periods)
                             or not all(is_number(x) for x in candidate.answer)):

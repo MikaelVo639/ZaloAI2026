@@ -60,7 +60,7 @@ _TRANSPOSABLE = frozenset("""
 _CLOSING = re.compile(
     r"(?:\s+(?:vay|day|dzay|zay|zi|z|v|a|ak|ah|ha|nhi|nha|nhe|nhen|hen|ne|di|the nhi|roi))+$")
 # Calling someone at the start of a question: "em ơi", "ad ơi", "ủa".
-_CALLING = re.compile(r"^(?:(?:(?:e|em|a|anh|chi|ad|admin|ban|be|shop) )?oi |(?:ui|ua) )+")
+_CALLING = re.compile(r"^(?:(?:(?:e|em|a|anh|chi|ad|admin|ban|be|shop) )?oi |(?:ui|ua|e{2,}) )+")
 # Month/year with a two-digit year: "12/25", "th 3/26". The data years 2020-2039 are all
 # above 12, so "1/26" cannot be a day and a month.
 _SHORT_YEAR = re.compile(r"(?<![\d/])(?:\b(?:thang|thg|th|t) ?)?(\d{1,2})/([23]\d)\b(?![\d/])")

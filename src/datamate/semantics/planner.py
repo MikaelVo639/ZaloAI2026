@@ -34,10 +34,14 @@ _UNSOLD = re.compile(
     r"\b(?:mat hang|san pham|hang|mon) (?:(?:bi )?(?:e|ees)(?: han| den muc)?|van dang ban ma)\b"
     r"|\b(?:khong|ko|k|hong|hok) ban (?:ra )?(?:duoc|dc|d c) (?:cai|mon|lan) nao\b")
 _DELIVERY = re.compile(r"\bdot (?:giao hang|hang)\b")
-_PROFIT = re.compile(r"\b(?:lai|loi) (?:gop|rong|nhat)\b")
+_PROFIT = re.compile(r"\b(?:lai|loi(?: nhuan)?) (?:gop|rong|nhat)\b")
 _EARLIEST = re.compile(r"\b(?:gan het han nhat|can date nh(?:at|ut))\b")
-_STOCK_VALUE = re.compile(r"\bgia tri (?:hang ton kho|hang con trong kho)\b")
-_EXPIRY = re.compile(r"\bhet han (?:trong|tu)\b|\b(?:tien von|lo con ton) .*\bhan dung tu\b")
+_STOCK_VALUE = re.compile(
+    r"\bgia tri (?:hang ton kho|hang con trong kho)\b"
+    rf"|\b(?:tien hang nam trong kho|so hang con trong kho dang {_AMOUNT} tien)\b"
+)
+_EXPIRY = re.compile(r"\bhet han (?:trong|tu)\b|\b(?:tien von|lo con ton) .*\bhan dung tu\b"
+                     r"|\bcon (?:hang|ton(?: kho)?) co han dung tu\b")
 
 
 def _package_period(text: str, today: date, rules: Rules) -> Plan | bool:
@@ -58,7 +62,8 @@ def _package_period(text: str, today: date, rules: Rules) -> Plan | bool:
         remove = (r"\bdot (?:giao hang|hang)\b|\b(?:xe|tiem|cho giao|cho khach|cho duoc|giao|"
                   r"dem(?: so)?|so|total|may)\b")
     elif _PROFIT.search(text):
-        text = re.sub(r"\b(?:lai|loi) gop (?:ca thang )?(?:cao|nhieu) nh(?:at|ut)\b",
+        text = re.sub(r"\bloi nhuan (?=gop\b|rong\b)", "loi ", text)
+        text = re.sub(r"\b(?:lai|loi) gop (?:ca thang )?(?:cao|nhieu|lon) nh(?:at|ut)\b",
                       "lai gop cao nhat", text)
         if re.search(r"\b(?:lai|loi) nhat\b|\b(?:lai|loi) gop cao nhat\b", text):
             intent, features = "top_gross_profit", ("gross_profit", "top_gross_profit",
@@ -295,8 +300,11 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     for kind, feature, pattern, extras in () if intent else _INTENTS:
         if kind == "average_order" and group and group[1] == "customer_group":
             pattern = rf"(?:{pattern}|{_GROUP_AVERAGE})"
-        if kind == "top_products" and re.search(r"\btop \d+\b", text):
-            pattern = rf"\btop {pattern}(?: la chi\b)?"
+        if kind == "top_products":
+            if re.search(r"\btop \d+\b", text):
+                pattern = rf"\btop {pattern}(?: la chi\b)?"
+            else:
+                pattern = rf"(?:{pattern}|(?<![/\d])\b(\d+) best sellers?\b)"
         match = re.search(pattern, text)
         if not match:
             continue
@@ -310,7 +318,7 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
             return None
         intent = kind
         if kind == "top_products":
-            top_k = int(match.group(1) or 1)
+            top_k = int(next((count for count in match.groups() if count), "1"))
             if not rules.quantity_ranking or not 1 <= top_k <= 100:
                 return None
         middle = match.groupdict().get("mid") or ""
@@ -377,8 +385,11 @@ def lot_product_question(question: Question) -> bool:
 
 def _package_snapshot(text: str, today: date, rules: Rules,
                       names: Iterable[str]) -> Plan | None:
-    snapshot = re.search(
-        rf"\b(?:theo ton kho ngay|tinh den het ngay|tinh tai ngay|cuoi ngay) {_DATE}\b", text)
+    stock_value = bool(_STOCK_VALUE.search(text))
+    snapshot_words = r"theo ton kho ngay|tinh den het ngay|tinh tai ngay|cuoi ngay"
+    if stock_value:
+        snapshot_words += r"|het ngay|vao cuoi ngay"
+    snapshot = re.search(rf"\b(?:{snapshot_words}) {_DATE}\b", text)
     if snapshot:
         try:
             day, month, year = map(int, snapshot.groups())
@@ -399,11 +410,12 @@ def _package_snapshot(text: str, today: date, rules: Rules,
         intent, features = "earliest_expiry", ("earliest_expiry", "product_names")
         remove = (r"\b(?:con lo|lo|gan het han nhat|can date nh(?:at|ut)|"
                   r"het han ngay (?:nao|may)|han dung|han su dung|hsd|ngay may|hom nay)\b")
-    elif _STOCK_VALUE.search(text):
+    elif stock_value:
         if not (rules.stock_value and rules.until_end_of_day):
             return None
         intent, features = "stock_value", ("stock_value", "until_end_of_day")
-        remove = r"\bgia tri (?:hang ton kho|hang con trong kho)\b|\b(?:tong|theo gia von|hom nay)\b"
+        text = _STOCK_VALUE.sub(" ", text)
+        remove = r"\b(?:tong|theo gia von|het hom nay|cuoi ngay hom nay|hom nay)\b"
     else:
         if not rules.expiring_lots:
             return None
@@ -444,6 +456,7 @@ def _package_snapshot(text: str, today: date, rules: Rules,
                   rf"{_AMOUNT} mat hang con lo ton sap het han|tuc han dung|"
                   r"(?:liet )?ke giup cac san pham con lo ton het han|"
                   r"(?:mat )?hang nao het han|ma hien van con ton kho|"
+                  r"(?:dang )?con (?:hang|ton(?: kho)?) co han dung|san pham nao|"
                   r"hang se het han|con ton kho|con ton|tien von|hom nay)\b")
     text = re.sub(remove, " ", re.sub(r"\s+", " ", text))
     if _FILLERS.sub(" ", text).strip():
@@ -628,7 +641,7 @@ _DEBT_AMOUNTS = re.compile(
     r"|\b(?:va )?so (?:tien )?no cua tung nguoi\b|\b(?:cho (?:minh |toi )?)?bang\b")
 _DEBT_DATE = re.compile(rf"\b(?:tinh )?den het (?:ngay )?{_DATE}\b"
                         r"|\b(?:tinh )?den (?:het )?hom nay\b")
-_DEBT_WORDS = re.compile(r"\b(?:giup minh|xem giup|liet ke|cho minh|cho toi|cho|tinh|ha|a|nhe|vay)\b")
+_DEBT_WORDS = re.compile(r"\b(?:giup minh|xem giup|liet ke|cho hoi|cho minh|cho toi|cho|tinh|ha|a|nhe|vay)\b")
 
 
 def _debt_table(text: str, today: date, rules: Rules) -> Plan | None | bool:
@@ -674,6 +687,7 @@ _DEBT_COUNT = re.compile(r"\b(?:bao nhieu|bao nhiu|bnhiu|bn|may|so) khach\b")
 _DEBT_OWED = re.compile(r"\b(?:con no|con cong no|con thieu|chua thu|chua tra het)\b"
                         rf"|\bkhoan no\b.*\bcon {_AMOUNT} tien\b")
 _DEBT_AGE = re.compile(r"\b(?:qua|hon|tren) (\d{1,4}) ngay\b|\btu (\d{1,4}) ngay tro len\b")
+_DEBT_BUCKETS = re.compile(r"\b0 7(?: ngay)? 8 15(?: ngay)? (?:va )?tren 15 ngay\b")
 _DEBT_COMMON = frozenset("""
     tinh cho hoi minh toi biet xem coi giup e ta do la cua hang khach tong cong so tien bao
     nhieu nhiu bnhiu bn may duoc no cac nhung don voi o co ma trong
@@ -681,6 +695,8 @@ _DEBT_COMMON = frozenset("""
 _DEBT_VOCABULARY = {
     "debt_total": _DEBT_COMMON | frozenset(
         "con thieu chua thu tra het da dat khoan tuoi cach".split()),
+    "debt_age_buckets": _DEBT_COMMON | frozenset(
+        "con lai chia tuoi no phan theo nhom lan luot moi ngay 3 ba".split()),
     "debt_customer_count": _DEBT_COMMON | frozenset("con thieu chua tra het dang".split()),
     "debt_collected": _DEBT_COMMON | frozenset("thu hoi tra bot mua chiu da tu".split()),
     "debt_flow": _DEBT_COMMON | frozenset(
@@ -696,7 +712,10 @@ def _debt_measure(text: str, today: date, rules: Rules) -> Plan | None | bool:
     text = re.sub(r"\s+", " ", text).strip()
     if not re.search(r"\b(?:no|cong no|mua chiu|thieu)\b", text):
         return None
-    if _DEBT_FLOW.search(text) and _DEBT_REPAID.search(text):
+    buckets = _DEBT_BUCKETS.search(text)
+    if buckets and re.search(r"\btuoi no\b", text):
+        intent = "debt_age_buckets"
+    elif _DEBT_FLOW.search(text) and _DEBT_REPAID.search(text):
         intent = "debt_flow"
     elif _DEBT_REPAID.search(text) and not _DEBT_OWED.search(text):
         intent = "debt_collected"
@@ -707,14 +726,18 @@ def _debt_measure(text: str, today: date, rules: Rules) -> Plan | None | bool:
     else:
         return None
     features = ["debt_orders", "debt_at_date", "debt_excluded", "customer_identity"]
-    if intent in ("debt_total", "debt_customer_count"):
+    snapshot = intent in ("debt_total", "debt_customer_count", "debt_age_buckets")
+    if snapshot:
         features.append("until_end_of_day")
     if intent in ("debt_customer_count", "debt_flow"):
         features.append("debt_by_customer")
     if intent in ("debt_collected", "debt_flow"):
         features.append("debt_flow_rule")
     threshold = None
-    if intent in ("debt_total", "debt_customer_count"):
+    if snapshot:
+        if intent == "debt_age_buckets":
+            features.append("debt_age")
+            text = text[:buckets.start()] + " " + text[buckets.end():]
         moment = _DEBT_SNAPSHOT.search(text)
         if not moment:
             return False  # the snapshot day is unknown
@@ -734,8 +757,9 @@ def _debt_measure(text: str, today: date, rules: Rules) -> Plan | None | bool:
                                   Decimal(age.group(1) or age.group(2)),
                                   rules.row("debt_age") or "")
             rest = rest[:age.start()] + " " + rest[age.end():]
-        elif re.search(r"\b(?:qua|hon|tren|tuoi|nhom)\b", rest):
-            return False  # an age condition or buckets this grammar does not read
+        elif (intent != "debt_age_buckets"
+              and re.search(r"\b(?:qua|hon|tren|tuoi|nhom)\b", rest)):
+            return False  # a qualifier beyond the supported debt grammar
     else:
         resolved = _period(text, today, rules)
         if resolved is None:
@@ -1067,7 +1091,8 @@ _PURCHASE_TOTAL = re.compile(
 _TOP_SUPPLIER = re.compile(
     r"\bnha cung cap nao duoc cua hang nhap hang (?:nhieu|nhiu) tien nhat\b"
     r"|\bcua hang nhap (?:nhieu|nhiu) tien hang nhat tu nha cung cap nao\b"
-    r"|\btien nhap hang tu nha cung cap nao cao nhat\b")
+    r"|\btien nhap hang tu nha cung cap nao cao nhat\b"
+    r"|\bnha cung cap nao co tong tien nhap hang (?:cao|lon) nhat\b")
 
 
 def _purchase(text: str, today: date, rules: Rules) -> Plan | None:
@@ -1307,6 +1332,7 @@ def stock_question(question: Question) -> bool:
 def _stock_plan(text: str, today: date, rules: Rules, filters: list[Filter]) -> Plan | None:
     if not rules.until_end_of_day or not re.search(r"\bhom nay\b", text):
         return None
+    text = re.sub(r"\bcon lai\b", "con", text)
     pair = _STOCK_PAIR.search(text)
     features = ("product_names", "until_end_of_day")
     if pair:

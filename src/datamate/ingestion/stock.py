@@ -18,10 +18,10 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
-from datamate.contracts import Catalog
+from datamate.contracts import Catalog, Table
 from datamate.ingestion.debt import _coverage_day
 from datamate.ingestion.readme_sales import (
     ReadmeSalesError,
@@ -39,6 +39,13 @@ from datamate.semantics.text import fold
 
 _KIOTVIET_STOCK = {"Mã hàng": "product_id", "Tên hàng": "product_name", "ĐVT": "base_unit"}
 _CSV_STOCK = {"ID SP": "product_id", "Hàng hóa": "product_name", "Đơn vị": "base_unit"}
+_SQLITE_PRODUCTS = ("MaHangHoa", "TenGoi", "DonViCoSo")
+_SQLITE_MOVEMENTS = ("MaHangHoa", "NgayGioPhatSinh", "TonCuoi", "MaChiNhanh")
+_STOCK_COST_PROFILES = (
+    ("san_pham", (*_SQLITE_PRODUCTS, "GiaVonHang")),
+    ("DanhSachSanPham.xlsx", ("Mã hàng", "Tên hàng", "ĐVT", "Giá vốn")),
+    ("BanHang_HangHoa.xlsx", ("ma_sp", "Món", "Đơn vị", "Giá vốn hiện tại")),
+)
 # Known conversion exports with an explicitly referenced source in the README.
 _CONVERSION_EXPORTS = (
     ("Mã hàng", "ĐVT", "Quy đổi"),
@@ -140,6 +147,13 @@ def _convention(readme: str) -> tuple[str, str]:
     raise StockSourceError("absent", "README states no end-of-data stock column")
 
 
+def _named_table(catalog: Catalog, source: str, fields: tuple[str, ...]) -> list[Table]:
+    if f"`{source}`" not in catalog.readme:
+        return []
+    return [table for table in catalog.tables
+            if source in (table.name, table.path.name) and set(fields) <= set(table.columns)]
+
+
 def load_stock_costs(catalog: Catalog) -> tuple[dict[str, Decimal], str]:
     """Read the documented base-unit cost from a product catalogue."""
     sources = []
@@ -153,6 +167,9 @@ def load_stock_costs(catalog: Catalog) -> tuple[dict[str, Decimal], str]:
         if len(names) == 1:
             sources.extend((table, identity, names[0])
                            for table in _matching_tables(catalog, section))
+    if not sources:
+        sources = [(table, fields[0], fields[-1]) for source, fields in _STOCK_COST_PROFILES
+                   for table in _named_table(catalog, source, fields)]
     if len(sources) != 1:
         raise StockSourceError("columns", "No unique product catalogue with base-unit cost")
     table, identity, cost = sources[0]
@@ -168,7 +185,64 @@ def load_stock_costs(catalog: Catalog) -> tuple[dict[str, Decimal], str]:
     return costs, table.key
 
 
+def _movement_stock(catalog: Catalog, day: date, convention: str) -> StockSnapshot:
+    movements = _named_table(catalog, "the_kho", _SQLITE_MOVEMENTS)
+    products = _named_table(catalog, "san_pham", _SQLITE_PRODUCTS)
+    if len(movements) != 1 or len(products) != 1 or movements[0].path != products[0].path:
+        raise StockSourceError("columns", "No unique stock ledger and product list in the database")
+
+    latest: dict[str, tuple[datetime, Decimal]] = {}
+    ambiguous: set[str] = set()
+    branches: set[str] = set()
+    for _, row in _records(movements[0], _SQLITE_MOVEMENTS):
+        code, timestamp, quantity, branch = (row[column] for column in _SQLITE_MOVEMENTS)
+        moment = datetime.fromisoformat(str(timestamp))
+        if moment.tzinfo is not None or not code or not branch:
+            raise StockSourceError("value", "Stock movement lacks a comparable date or key")
+        if moment.date() > day:
+            continue
+        branches.add(str(branch))
+        key = str(code).strip()
+        balance = parse_quantity(quantity)
+        previous = latest.get(key)
+        if previous is None or moment > previous[0]:
+            latest[key] = (moment, balance)
+            ambiguous.discard(key)
+        elif moment == previous[0] and balance != previous[1]:
+            ambiguous.add(key)
+    if ambiguous or len(branches) != 1:
+        raise StockSourceError("coverage", "The last stock movement is not unique per product")
+
+    items = []
+    seen = set()
+    for _, row in _records(products[0], _SQLITE_PRODUCTS):
+        code, name, unit = (str(row[column] or "").strip() for column in _SQLITE_PRODUCTS)
+        if not code or not name or not unit or code in seen:
+            raise StockSourceError("key", "Invalid or repeated stock product")
+        seen.add(code)
+        if code in latest:
+            items.append(StockItem(code, name, unit, latest[code][1]))
+    if latest.keys() - seen:
+        raise StockSourceError("key", "Stock movement has no product catalogue entry")
+    return StockSnapshot(day, tuple(items), movements[0].key, convention)
+
+
 def load_stock(catalog: Catalog) -> StockSnapshot:
+    movement_convention = next((line.strip() for line in catalog.readme.splitlines()
+                                if fold(line.partition(":")[0]) == "ton kho"
+                                and "the kho toncuoi la ton sau lan nhap ban tra" in fold(line.replace("/", " "))
+                                and "ton o dong cuoi cua san pham" in fold(line)
+                                and "theo don vi co ban" in fold(line)), "")
+    if movement_convention:
+        day = _coverage_day(catalog.readme)
+        if day is None:
+            raise StockSourceError("coverage", "README states no last data day")
+        try:
+            return _movement_stock(catalog, day, movement_convention)
+        except (ReadmeSalesError, TypeError, ValueError) as exc:
+            if isinstance(exc, StockSourceError):
+                raise
+            raise StockSourceError("value", "Stock movement cannot be read") from exc
     try:
         column, convention = _convention(catalog.readme)
     except StockSourceError as exc:
