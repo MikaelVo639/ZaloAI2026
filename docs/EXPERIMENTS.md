@@ -568,4 +568,4 @@ Trên 119 câu của `biz_102`, Windows chấm được **119 đúng, 0 sai, 0 a
 So với lượt `068f9b1`, cả 114 câu đúng cũ đều được giữ và 5 câu còn lại đã
 đúng. Lượt predict mất 61,4 giây, đỉnh bộ nhớ cam kết 394,6 MiB với trần
 512 MiB. Smoke qua, unittest chạy 444 ca với 1 skip.
-[Full train code 6d9c8a9](https://www.kaggle.com/code/trngquangbodng/datamate-r3-6d9c8a9-train-cpu)
+Full train của code này chờ slot Kaggle. Tài khoản đang dùng đủ 5 phiên CPU.
