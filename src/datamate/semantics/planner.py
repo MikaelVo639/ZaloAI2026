@@ -108,7 +108,8 @@ _INTENTS = (
      rf"|{_REVENUE} (?:trung binh|binh quan) (?:tren )?{_ONE} {_ORDER}"
      rf"|trung binh {_ONE} {_ORDER}(?P<mid>.*?) mang ve {_AMOUNT} {_REVENUE}", ()),
     ("top_products", None,
-     r"(?:(\d+) )?(?:mat hang|san pham|hang|mon)(?: nao)? "
+     # The count is not the year of "tháng 10/2025 hàng nào chạy nhất".
+     r"(?:(?<![\d/])(\d+) )?(?:mat hang|san pham|hang|mon)(?: nao)? "
      r"(?:ban chay|ban duoc nhieu|ban duoc nhiu|ban nhieu|ban nhiu|chay) nhat",
      ()),
     ("quantity", "unit_quantity",
