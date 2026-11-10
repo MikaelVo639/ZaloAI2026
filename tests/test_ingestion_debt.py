@@ -1,6 +1,8 @@
 """D01: README-backed debt ledger, source checks and reconciliation."""
 
 import csv
+import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from datetime import date
@@ -411,6 +413,43 @@ class DebtLedgerTests(_Shop):
                 self.assertEqual(source["source"], f"{filename}::{Path(filename).stem}")
                 self.assertEqual(source["role"], "payments")
                 self.assertEqual(source["missing_fields"], ["payment_amount", "payment_day"])
+
+    def test_a_status_column_named_xu_ly_is_not_a_currency(self):
+        readme = README.replace("**Trạng thái**", "**Xử lý**")
+        catalog = self.catalog(readme=readme)
+        with (self.data / "shop" / "orders.csv").open(encoding="utf-8-sig", newline="") as stream:
+            orders = list(csv.reader(stream))
+        orders[0][2] = "Xử lý"
+        ledger = load_debt_ledger(self.catalog(readme=readme, orders=orders), RULEBOOK)
+        self.assertEqual(ledger.orders[0].total, Decimal("100000.5"))
+
+    def test_sqlite_profile_uses_qualified_readme_amount_columns(self):
+        shop = self.data / "shop"
+        shop.mkdir(parents=True)
+        readme = ("File máy POS xuất ra.\n\n## File\n- `pos.sqlite`\n\n## Quy ước\n"
+                  "- **Công nợ**: mỗi lần khách trả tiền cho một đơn là một dòng, "
+                  "`thanh_toan.SoTienThu` là số tiền trả lần đó; "
+                  "`don_hang.TongThanhToan` là số khách phải trả cho cả đơn.\n"
+                  "- Dữ liệu có đến hết 31/01/2026.\n")
+        (shop / "README.md").write_text(readme, encoding="utf-8")
+        with closing(sqlite3.connect(shop / "pos.sqlite")) as database:
+            database.executescript("""
+                CREATE TABLE don_hang (MaHoaDon, NgayLap, TinhTrang, TongThanhToan,
+                                       PhuongThucTT, KenhBanHang, MaKhachHang);
+                INSERT INTO don_hang VALUES ('D1', '2026-01-01', 'completed', 100,
+                                             'debt', 'store', 'K1');
+                CREATE TABLE thanh_toan (MaHoaDon, NgayGioThu, SoTienThu);
+                INSERT INTO thanh_toan VALUES ('D1', '2026-01-03', 25);
+                CREATE TABLE khach_hang (MaKhachHang, TenGoi, LoaiKhachHang);
+                INSERT INTO khach_hang VALUES ('K1', 'Khách A', 'thân thiết');
+            """)
+        ledger = load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+        self.assertEqual((ledger.orders[0].customer_name, ledger.orders[0].total,
+                          ledger.payments[0].amount), ("Khách A", Decimal(100), Decimal(25)))
+        (shop / "README.md").write_text(readme.replace("thanh_toan.SoTienThu", "table.SoTienThu"),
+                                       encoding="utf-8")
+        with self.assertRaises(DebtSourceError):
+            load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
 
     def test_money_units_are_converted_or_rejected_explicitly(self):
         thousand = README.replace(

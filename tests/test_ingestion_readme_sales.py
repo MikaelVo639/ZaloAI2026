@@ -6,8 +6,11 @@ import unittest
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from datamate.agent import sales_source
+from datamate.agent.compute import answer_plan
+from datamate.contracts import Catalog, Filter, Plan
 from datamate.ingestion.catalog import build_catalog
 from datamate.ingestion.readme_sales import (
     ReadmeSalesError,
@@ -21,6 +24,7 @@ from datamate.ingestion.readme_sales import (
     parse_quantity,
     parse_sections,
 )
+from datamate.ingestion.sales import Sale
 from datamate.ingestion.status import StatusError
 
 RULEBOOK = """# Synthetic split rules
@@ -90,6 +94,113 @@ class _Shop(unittest.TestCase):
                         worksheet.append(row)
                 book.save(path)
         return build_catalog(self.data, business)
+
+
+class VerifiedSalesCoverageTests(_Shop):
+    def test_monthly_coverage_requires_all_named_sheets_and_respects_explicit_bounds(self):
+        readme = FLAT_README.replace("ban_hang.csv", "sales.xlsx")
+        readme += "\nFile `sales.xlsx` chia mỗi tháng một sheet, tên sheet ghi tháng và năm.\n"
+        row = ["A", "15/01/2026", "Hoàn thành", "Bánh mè", 1, "gói", 100, 1, "Khách lẻ"]
+        missing_rule = ("\n- Không có dữ liệu khác với bằng 0: shop không ghi loại thông tin "
+                        "câu hỏi cần, thì không trả lời được, không phải 0.\n")
+        plan = Plan("revenue", date(2025, 12, 1), date(2025, 12, 31))
+        book = RULEBOOK + missing_rule
+        for name, doc, sheets, rules, expected in (
+            ("monthly", readme, {"T01_2026": [FLAT_HEADER, row]}, book, "unanswerable"),
+            ("within", readme + "\nKhoảng dữ liệu: 2025-12-01 đến 2026-01-31\n",
+             {"01.2026": [FLAT_HEADER, row]}, book, "abstain"),
+            ("undated", readme, {"Sheet1": [FLAT_HEADER, row]}, book, "abstain"),
+            ("no_rule", readme, {"01.2026": [FLAT_HEADER, row]}, RULEBOOK, "abstain"),
+        ):
+            with self.subTest(name=name):
+                catalog = self.shop(doc, {"sales.xlsx": sheets}, business=name)
+                result = answer_plan({}, catalog, plan, rules)
+                self.assertEqual(result.type, expected)
+                if expected == "unanswerable":
+                    self.assertEqual(result.evidence["coverage_source"]["first_sheet_month"],
+                                     "2026-01-01")
+        within_first_sheet = Plan("revenue", date(2026, 1, 1), date(2026, 1, 14))
+        catalog = self.shop(readme, {"sales.xlsx": {"01.2026": [FLAT_HEADER, row]}},
+                            business="first_month")
+        self.assertEqual(answer_plan({}, catalog, within_first_sheet, book).type, "abstain")
+
+    def test_spelling_variants_merge_only_when_all_rows_use_names_as_codes(self):
+        day = date(2026, 1, 15)
+        plan = Plan("revenue", day, day, filters=(Filter("product", "Café A"),))
+        first = Sale("O1", day, "valid", Decimal(100), "Café A", "Café A", Decimal(1),
+                     product_id_is_name=True)
+        for inferred, expected in ((True, "number"), (False, "abstain")):
+            with self.subTest(inferred=inferred):
+                second = Sale("O2", day, "valid", Decimal(200), "CAFE-A", "Café A", Decimal(1),
+                              product_id_is_name=inferred)
+                source = {"tables": ["synthetic"], "sales_rows": 2}
+                with patch("datamate.agent.compute.load_business_sales",
+                           return_value=([first, second], source, None)):
+                    result = answer_plan({}, Catalog("shop", "", ()), plan, RULEBOOK)
+                self.assertEqual(result.type, expected)
+                if inferred:
+                    self.assertEqual(result.answer, 300)
+
+
+class CustomerIdentityCoverageTests(_Shop):
+    def test_multisheet_identity_proof_reuses_the_matched_tables(self):
+        from openpyxl import load_workbook
+
+        header = FLAT_HEADER[:-1]
+        readme = FLAT_README.replace("ban_hang.csv", "ban_hang.xlsx").replace(
+            "- **Đối tác**: tên khách (Khách lẻ nếu không lưu)\n", "")
+        first = ["1", "2026-01-05", "hoàn thành", "Hàng A", "1", "hộp", "50", "1"]
+        second = ["2", "2026-01-06", "hoàn thành", "Hàng A", "2", "hộp", "100", "2"]
+        for extra_column in (False, True):
+            with self.subTest(extra_column=extra_column):
+                sources = {"ban_hang.xlsx": {
+                    "T1": [["Sổ bán hàng"], header, first],
+                    "T2": [["Sổ bán hàng"], header + (["Người mua"] if extra_column else []),
+                           second + (["A"] if extra_column else [])],
+                }}
+                catalog = self.shop(readme, sources, business=f"case_{extra_column}")
+                with patch("openpyxl.load_workbook", wraps=load_workbook) as opened:
+                    sales, evidence, _ = load_readme_sales(catalog, RULEBOOK)
+                self.assertEqual([sale.order_id for sale in sales], ["1", "2"])
+                # One header preview for both sheets, followed by their two row reads.
+                self.assertEqual(opened.call_count, 3)
+                self.assertTrue(all(call.kwargs["read_only"] for call in opened.call_args_list))
+                self.assertEqual(evidence["tables_without_customer_identity"],
+                                 [] if extra_column else ["ban_hang.xlsx::T1", "ban_hang.xlsx::T2"])
+
+    def test_unanswerable_requires_a_complete_schema_and_split_rule(self):
+        absence_rule = ("- Không có dữ liệu khác với bằng 0: shop không ghi loại thông tin "
+                        "câu hỏi cần, thì không trả lời được, không phải 0.\n")
+        readme = FLAT_README.replace(
+            "- **Đối tác**: tên khách (Khách lẻ nếu không lưu)\n", "")
+        row = ["1", "2026-01-05", "hoàn thành", "Hàng A", "1", "hộp", "50", "1"]
+        plan = Plan("top_customers", date(2026, 1, 1), date(2026, 1, 31),
+                    top_k=1, rank_by="revenue")
+        files = {"ban_hang.csv": [FLAT_HEADER[:-1], row]}
+        cases = (
+            ("complete", readme, files, RULEBOOK + absence_rule, "unanswerable"),
+            ("title_and_product_metadata",
+             readme.replace("ban_hang.csv", "ban_hang.xlsx") + """
+## Cột trong `san_pham.csv`
+- **Mã**: mã hàng
+- **Tên**: tên hàng
+""",
+             {"ban_hang.xlsx": {"Tháng 1": [["Sổ bán hàng"], FLAT_HEADER[:-1], row]},
+              "san_pham.csv": [["Mã", "Tên", "Mô tả sản phẩm"], ["A", "Hàng A", "Hộp"]]},
+             RULEBOOK + absence_rule, "unanswerable"),
+            ("missing_rule", readme, files, RULEBOOK, "abstain"),
+            ("unknown_source", readme, {**files, "extra.csv": [["Người mua"], ["A"]]},
+             RULEBOOK + absence_rule, "abstain"),
+            ("blank_identity", FLAT_README,
+             {"ban_hang.csv": [FLAT_HEADER, row + [""]]}, RULEBOOK + absence_rule, "abstain"),
+        )
+        for name, description, sources, rules, expected in cases:
+            with self.subTest(name=name):
+                catalog = self.shop(description, sources, business=name)
+                result = answer_plan({}, catalog, plan, rules)
+                self.assertEqual(result.type, expected, result.reason)
+                self.assertEqual(bool(result.evidence.get("coverage_source")),
+                                 expected == "unanswerable")
 
 
 class ParsingTests(unittest.TestCase):
@@ -629,6 +740,71 @@ class NoteStatusTests(unittest.TestCase):
 
 
 class AdapterSelectionTests(_Shop):
+    def test_documented_unit_conversion_avoids_the_flat_scan(self):
+        sales_file = {
+            "01.2026": [REPORT_HEADER, ["O1", "05/01/2026", "Đã hoàn thành",
+                                      "Bia", 1, 240_000, "thùng"]],
+            "02.2026": [REPORT_HEADER, ["O2", "05/02/2026", "Đang giao dịch",
+                                      "Bia", 2, 20_000, "lon"]],
+        }
+        conversions = {"Sheet1": [["Tên sản phẩm", "Đơn vị quy đổi", "Tỉ lệ quy đổi",
+                                   "Đơn vị cơ bản"], ["Bia", "thùng", 24, "lon"]]}
+        catalog = self.shop(REPORT_README, {"DonHang.xlsx": sales_file, "QuyDoi.xlsx": conversions})
+        with patch.object(sales_source, "load_sales") as flat:
+            sales, evidence, eligible = sales_source.load_business_sales(catalog, RULEBOOK)
+        flat.assert_not_called()
+        self.assertEqual(evidence["adapter"], "readme_sales")
+        self.assertEqual([(sale.status, sale.quantity_base) for sale in sales],
+                         [("valid", 24), ("valid", 2)])
+        self.assertEqual(eligible, frozenset({0, 1}))
+
+    def test_documented_flat_catalogue_preserves_group_and_base_unit(self):
+        readme = """## Cột trong `ban_hang.csv`
+- **Mã đơn**: mã đơn
+- **Ngày**: ngày bán
+- **Trạng thái**: trạng thái đơn
+- **Tên hàng**: tên hàng
+- **SL**: số lượng
+- **ĐVT**: đơn vị tính
+- **SL quy đổi**: số lượng đã đổi ra đơn vị cơ bản
+- **Thành tiền**: thành tiền sau giảm
+
+## Cột trong `san_pham.csv`
+- **SKU**: mã hàng
+- **Hàng**: tên
+- **ĐV**: đơn vị cơ bản
+- **Loại**: nhóm hàng
+"""
+        catalog = self.shop(readme, {
+            "ban_hang.csv": [
+                ["Mã đơn", "Ngày", "Trạng thái", "Tên hàng", "SL", "ĐVT", "SL quy đổi",
+                 "Thành tiền"],
+                ["O1", "05/01/2026", "Hoàn thành", "Bánh mè", 1, "thùng", 24, 2400],
+            ],
+            "san_pham.csv": [["SKU", "Hàng", "ĐV", "Loại"], ["P1", "Bánh mè", "gói", "Bánh"]],
+        })
+        sales, evidence, _ = sales_source.load_business_sales(catalog, RULEBOOK)
+        self.assertEqual(evidence["adapter"], "readme_sales")
+        self.assertEqual((sales[0].quantity_base, sales[0].base_unit, sales[0].product_group),
+                         (Decimal(24), "goi", "Bánh"))
+
+    def test_unusable_conversion_source_keeps_the_working_flat_adapter(self):
+        sales_file = {"01.2026": [REPORT_HEADER, ["O1", "05/01/2026", "Đã hoàn thành",
+                                                "Bia", 1, 240_000, "thùng"]]}
+        invalid = {"QuyDoi.xlsx": {"Sheet1": [
+            ["Tên sản phẩm", "Đơn vị quy đổi", "Tỉ lệ quy đổi", "Đơn vị cơ bản"],
+            ["Bia", "thùng", "không rõ", "lon"],
+        ]}}
+        for case, sources in (("missing", {}), ("invalid_factor", invalid)):
+            with self.subTest(case=case):
+                catalog = self.shop(REPORT_README, {"DonHang.xlsx": sales_file, **sources},
+                                    business=case)
+                sales, evidence, eligible = sales_source.load_business_sales(catalog, RULEBOOK)
+                self.assertEqual(evidence["adapter"], "flat_sales")
+                self.assertEqual(sales[0].amount, 240_000)
+                self.assertIsNone(sales[0].quantity_base)
+                self.assertIsNone(eligible)
+
     def test_readme_adapter_is_used_when_flat_headers_are_unknown(self):
         catalog = self.shop(FLAT_README, {"ban_hang.csv": FlatReadmeTests.rows(None)})
         sales, evidence, eligible = sales_source.load_business_sales(catalog, RULEBOOK)
