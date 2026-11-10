@@ -678,6 +678,14 @@ def _debt_customer(ledger: DebtLedger, name: str) -> tuple[str | None, int]:
     return (next(iter(keys)), 1) if len(keys) == 1 else (None, len(keys))
 
 
+def _absence_rule(rulebook: str) -> str:
+    return next(
+        (line for line in rulebook.splitlines()
+         if "shop khong ghi loai thong tin cau hoi can thi khong tra loi duoc" in fold(line)),
+        "",
+    )
+
+
 def _answer_debt_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                          rulebook: str) -> Candidate:
     rules = read_rules(rulebook)
@@ -703,7 +711,14 @@ def _answer_debt_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                          evidence=evidence)
     prepared = prepare_debt(cache, catalog, rulebook)
     if not prepared["ok"]:
-        evidence["debt_source_error"] = prepared["debt_source_error"]
+        diagnostic = prepared["debt_source_error"]
+        evidence["debt_source_error"] = diagnostic
+        rule = _absence_rule(rulebook)
+        if rule and diagnostic.get("code") == "absent" and diagnostic.get("sources_complete") is True:
+            evidence["coverage_source"] = {
+                "sources": [table.key for table in catalog.tables], "rule": rule,
+            }
+            return Candidate("unanswerable", None, 1.0, prepared["reason"], evidence)
         return Candidate(reason=prepared["reason"], evidence=evidence)
     ledger = cache["debt"]
     evidence["ledger"] = ledger.lineage
@@ -1387,11 +1402,7 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
     )
     tables = source.get("tables_without_customer_identity")
     if needs_customer and tables:
-        absence_rule = next(
-            (line for line in rulebook.splitlines()
-             if "shop khong ghi loai thong tin cau hoi can thi khong tra loi duoc" in fold(line)),
-            "",
-        )
+        absence_rule = _absence_rule(rulebook)
         if absence_rule:
             evidence["coverage_source"] = {"tables": tables, "rule": absence_rule}
             return Candidate("unanswerable", None, 1.0,

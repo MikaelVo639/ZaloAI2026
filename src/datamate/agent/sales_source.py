@@ -7,7 +7,8 @@ detected joined schema):
 1. verified order/detail/product CSV signature -> joined adapter;
 2. verified XLSX order/detail/product export with README evidence (DATA-02 mapping)
    -> joined adapter;
-3. documented sales lines that require the declared unit conversion table -> README adapter;
+3. documented sales lines with an authoritative unit conversion or product catalogue
+   -> README adapter;
 4. flat sales table whose headers match the known aliases -> flat adapter;
 5. other lists described column by column in the business README -> README adapter.
 
@@ -240,17 +241,20 @@ def _joined_result(catalog: Catalog, mapping: MappingSpec, rules: RuleCapabiliti
     return sales, source, frozenset(ranking_eligible)
 
 
-def _needs_documented_conversions(readme: str) -> bool:
+def _needs_documented_context(readme: str) -> bool:
     fields_by_section = [set(section.fields) for section in parse_sections(readme)]
     line_fields = {"order_id", "date", "status", "amount", "quantity", "unit"}
     product_fields = {"product_id", "product_name"}
     conversion_fields = {"big_unit", "factor", "base_unit"}
-    return any(
-        line_fields <= fields and fields & product_fields and "quantity_base" not in fields
-        for fields in fields_by_section
-    ) and any(
-        conversion_fields <= fields and fields & product_fields for fields in fields_by_section
-    )
+    catalogue_fields = {"product_id", "base_unit", "product_group"}
+    lines = [fields for fields in fields_by_section
+             if line_fields <= fields and fields & product_fields]
+    conversions = any(conversion_fields <= fields and fields & product_fields
+                      for fields in fields_by_section)
+    products = any(catalogue_fields <= fields and fields & {"name", "product_name"}
+                   and not fields & {"order_id", "quantity"} for fields in fields_by_section)
+    return (conversions and any("quantity_base" not in fields for fields in lines)
+            or products and any("quantity_base" in fields for fields in lines))
 
 
 def load_business_sales(
@@ -271,22 +275,22 @@ def load_business_sales(
         sales, source, eligible = _joined_result(
             catalog, mapping, _xlsx_rules(rulebook, catalog, mapping))
         return sales, {**source, "adapter": "joined_sales_xlsx"}, eligible
-    conversion_error = None
-    if _needs_documented_conversions(catalog.readme):
-        # The flat reader cannot apply the companion conversion table. A late error
-        # in a large workbook would make it scan the same sales again via the README.
+    context_error = None
+    if _needs_documented_context(catalog.readme):
+        # The flat reader drops the companion conversion or product catalogue.
+        # Use the documented source first and retain the flat fallback on a typed failure.
         try:
             sales, evidence, eligible = load_readme_sales(catalog, rulebook)
         except (ValueError, OSError) as exc:
-            conversion_error = exc
+            context_error = exc
         else:
             return sales, {**evidence, "adapter": "readme_sales"}, eligible
     try:
         sales, evidence = load_sales(catalog)
         return sales, {**evidence, "adapter": "flat_sales"}, None
     except ValueError as flat_error:
-        if conversion_error is not None:
-            raise ValueError(f"{flat_error}; README adapter: {conversion_error}") from conversion_error
+        if context_error is not None:
+            raise ValueError(f"{flat_error}; README adapter: {context_error}") from context_error
         try:
             sales, evidence, eligible = load_readme_sales(catalog, rulebook)
         except ReadmeSalesError as readme_error:

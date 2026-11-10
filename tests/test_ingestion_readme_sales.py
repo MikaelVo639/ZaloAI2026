@@ -711,6 +711,36 @@ class AdapterSelectionTests(_Shop):
                          [("valid", 24), ("valid", 2)])
         self.assertEqual(eligible, frozenset({0, 1}))
 
+    def test_documented_flat_catalogue_preserves_group_and_base_unit(self):
+        readme = """## Cột trong `ban_hang.csv`
+- **Mã đơn**: mã đơn
+- **Ngày**: ngày bán
+- **Trạng thái**: trạng thái đơn
+- **Tên hàng**: tên hàng
+- **SL**: số lượng
+- **ĐVT**: đơn vị tính
+- **SL quy đổi**: số lượng đã đổi ra đơn vị cơ bản
+- **Thành tiền**: thành tiền sau giảm
+
+## Cột trong `san_pham.csv`
+- **SKU**: mã hàng
+- **Hàng**: tên
+- **ĐV**: đơn vị cơ bản
+- **Loại**: nhóm hàng
+"""
+        catalog = self.shop(readme, {
+            "ban_hang.csv": [
+                ["Mã đơn", "Ngày", "Trạng thái", "Tên hàng", "SL", "ĐVT", "SL quy đổi",
+                 "Thành tiền"],
+                ["O1", "05/01/2026", "Hoàn thành", "Bánh mè", 1, "thùng", 24, 2400],
+            ],
+            "san_pham.csv": [["SKU", "Hàng", "ĐV", "Loại"], ["P1", "Bánh mè", "gói", "Bánh"]],
+        })
+        sales, evidence, _ = sales_source.load_business_sales(catalog, RULEBOOK)
+        self.assertEqual(evidence["adapter"], "readme_sales")
+        self.assertEqual((sales[0].quantity_base, sales[0].base_unit, sales[0].product_group),
+                         (Decimal(24), "goi", "Bánh"))
+
     def test_unusable_conversion_source_keeps_the_working_flat_adapter(self):
         sales_file = {"01.2026": [REPORT_HEADER, ["O1", "05/01/2026", "Đã hoàn thành",
                                                 "Bia", 1, 240_000, "thùng"]]}
