@@ -294,7 +294,8 @@ def vocabulary(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -> d
         return {}
     sales, _ = cache["sales"]
     result = {field: sorted({getattr(s, field) for s in sales if getattr(s, field)})
-              for field in ("product_group", "customer_group")}
+              for field in ("product_group", "customer_group", "product_brand",
+                            "product_size")}
     # Đợt 3 gói 1: payment method / channel labels and the words that name them.
     for kind, attribute in PAYMENT_FIELDS.items():
         labels = {getattr(s, attribute) for s in sales if getattr(s, attribute)}

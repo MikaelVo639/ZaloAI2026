@@ -56,6 +56,10 @@ class Sale:
     # Matching a question word to it goes through the README's description of the labels.
     payment_method: str | None = None
     unit_price_base: Decimal | None = None  # documented line price per base unit
+    # Optional product-catalog attributes.  They are kept separate from the display name
+    # because a shop may sell the same product family in several brands or sizes.
+    product_brand: str | None = None
+    product_size: str | None = None
 
 
 def price_per_base_unit(price: Decimal, sold: Decimal | None,

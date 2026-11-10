@@ -466,6 +466,77 @@ JOINED_README = """# Dữ liệu shop
 
 
 class JoinedReadmeTests(_Shop):
+    def test_name_only_catalog_supplies_group_brand_size_and_base_unit(self):
+        readme = """# Shop
+## Cột trong `sales.csv`
+- **Mã đơn**: mã đơn
+- **Ngày**: ngày bán
+- **Trạng thái**: trạng thái đơn
+- **Tên hàng**: tên hàng
+- **SL**: số lượng
+- **ĐVT**: đơn vị tính
+- **Thành tiền**: thành tiền sau giảm
+- **SL cơ bản**: số lượng đã đổi ra đơn vị cơ bản
+## Cột trong `catalog.csv`
+- **Tên hàng**: tên hàng
+- **Nhóm**: nhóm hàng
+- **Hãng**: hãng
+- **Số / Size**: số / size
+- **ĐVT**: đơn vị cơ bản
+"""
+        catalog = self.shop(readme, {
+            "sales.csv": [
+                ["Mã đơn", "Ngày", "Trạng thái", "Tên hàng", "SL", "ĐVT",
+                 "Thành tiền", "SL cơ bản"],
+                ["O1", "01/01/2026", "completed", "Bỉm M", 2, "bịch", 200, 2],
+            ],
+            "catalog.csv": [
+                ["Tên hàng", "Nhóm", "Hãng", "Số / Size", "ĐVT"],
+                ["Bỉm M", "Bỉm tã", "Bobby", "M", "bịch"],
+            ],
+        })
+        sales, evidence, _eligible = load_readme_sales(catalog, RULEBOOK)
+        self.assertEqual(evidence["product_join"], {"by_name": 1})
+        self.assertEqual(
+            (sales[0].product_group, sales[0].product_brand,
+             sales[0].product_size, sales[0].base_unit),
+            ("Bỉm tã", "Bobby", "M", "bich"),
+        )
+
+    def test_name_only_catalog_does_not_guess_between_duplicate_names(self):
+        readme = """# Shop
+## Cột trong `sales.csv`
+- **Mã đơn**: mã đơn
+- **Ngày**: ngày bán
+- **Trạng thái**: trạng thái đơn
+- **Tên hàng**: tên hàng
+- **SL**: số lượng
+- **ĐVT**: đơn vị tính
+- **Thành tiền**: thành tiền sau giảm
+- **SL cơ bản**: số lượng đã đổi ra đơn vị cơ bản
+## Cột trong `catalog.csv`
+- **Tên hàng**: tên hàng
+- **Nhóm**: nhóm hàng
+- **Hãng**: hãng
+- **ĐVT**: đơn vị cơ bản
+"""
+        catalog = self.shop(readme, {
+            "sales.csv": [
+                ["Mã đơn", "Ngày", "Trạng thái", "Tên hàng", "SL", "ĐVT",
+                 "Thành tiền", "SL cơ bản"],
+                ["O1", "01/01/2026", "completed", "Trùng tên", 1, "cái", 10, 1],
+            ],
+            "catalog.csv": [
+                ["Tên hàng", "Nhóm", "Hãng", "ĐVT"],
+                ["Trùng tên", "A", "Hãng 1", "cái"],
+                ["Trùng tên", "B", "Hãng 2", "cái"],
+            ],
+        })
+        sales, evidence, _eligible = load_readme_sales(catalog, RULEBOOK)
+        self.assertEqual(evidence["product_join"], {"name_not_in_list": 1})
+        self.assertIsNone(sales[0].product_group)
+        self.assertIsNone(sales[0].product_brand)
+
     def files(self, orders=None, lines=None, lots=None):
         return {
             "don.csv": [["Mã CT", "Ngày", "Xử lý", "Tiền hàng"],
@@ -740,7 +811,7 @@ class NoteStatusTests(unittest.TestCase):
 
 
 class AdapterSelectionTests(_Shop):
-    def test_flat_sales_get_documented_base_unit_without_changing_the_adapter(self):
+    def test_flat_sales_get_documented_product_attributes_without_changing_the_adapter(self):
         readme = """# Flat export
 ## Cột trong `sales.csv`
 - **order_id**: mã đơn
@@ -756,6 +827,8 @@ class AdapterSelectionTests(_Shop):
 - **name**: tên
 - **unit**: đơn vị cơ bản
 - **group**: nhóm hàng
+- **brand**: hãng
+- **size**: kích cỡ
 """
         catalog = self.shop(readme, {
             "sales.csv": [
@@ -766,8 +839,8 @@ class AdapterSelectionTests(_Shop):
                 ["O3", "2026-01-01", "completed", "10", "Tên khác", "1", "P1"],
             ],
             "products.csv": [
-                ["sku", "name", "unit", "group"],
-                ["P1", "Thước", "cái", "Dụng cụ"],
+                ["sku", "name", "unit", "group", "brand", "size"],
+                ["P1", "Thước", "cái", "Dụng cụ", "Nhãn A", "30 cm"],
             ],
         })
         sales, evidence, _ = sales_source.load_business_sales(catalog, RULEBOOK)
@@ -777,6 +850,8 @@ class AdapterSelectionTests(_Shop):
         self.assertEqual((sales[1].product_id, sales[1].base_unit, sales[1].product_group),
                          ("P2", None, None))
         self.assertEqual((sales[2].base_unit, sales[2].product_group), ("cai", "Dụng cụ"))
+        self.assertEqual([(sale.product_brand, sale.product_size) for sale in sales],
+                         [("Nhãn A", "30 cm"), (None, None), ("Nhãn A", "30 cm")])
         self.assertEqual(evidence["product_context"],
                          {"matched_by_name": 1, "unmatched": 1, "matched_by_code": 1})
 
