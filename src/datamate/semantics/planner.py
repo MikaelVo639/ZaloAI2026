@@ -206,6 +206,8 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
     if re.search(r"\b(?:giao|cho)(?: thanh)? (?:tu )?(?:\d+|hai) dot tro len\b"
                  r"|\b(?:giao|cho) it nhat (?:\d+|hai) dot\b", text):
         return _delivered_orders(text, today, rules)
+    if "ngay phai tra" in text and "don ban chiu" in text:
+        return _credit_due_count(text, today, rules)
     package = _package_period(text, today, rules)
     if package:
         return package if isinstance(package, Plan) else None
@@ -233,6 +235,12 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
         brand = _brand_ranking(text, today, rules, vocabulary or {})
         if brand is not None:
             return brand if isinstance(brand, Plan) else None
+    phone_scope = _phone_scope(text, today, rules, names, vocabulary or {})
+    if phone_scope is not None:
+        return phone_scope if isinstance(phone_scope, Plan) else None
+    catalogue_quantity = _catalogue_quantity(text, today, rules, vocabulary or {})
+    if catalogue_quantity is not None:
+        return catalogue_quantity if isinstance(catalogue_quantity, Plan) else None
     group = _group(text, vocabulary or {})
     if group is _AMBIGUOUS:
         return None
@@ -266,6 +274,8 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
             if not rules.list_in_question_order:
                 return None
             used.append("list_in_question_order")
+            if not re.search(rf"\b{_REVENUE}\b", text) or _SHARE.search(text):
+                return None
             pair = True
             text = _PAIR_WORDS.sub(" ", text)
             text = re.sub(rf"\b{_REVENUE}\b", " ", text) + " doanh thu"
@@ -278,6 +288,8 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
     if product is _AMBIGUOUS:
         return None
     if product:
+        # The named item may occur between the sale verb and the amount.
+        text = re.sub(rf"\bban(?= {_REVENUE}\b)", "", text).strip()
         if not rules.product_names:
             return None
         filters.append(Filter("product", product, rules.row("product_names") or ""))
@@ -298,7 +310,7 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
                       " ", text)
         text = re.sub(r"\bquan(?= ban\b)", " ", text)
         text = re.sub(r"\s+", " ", text).strip()
-    staff = _staff(text)
+    staff = _staff(text, (vocabulary or {}).get("staff_terms", ()), rules.money_is_revenue)
     if staff is False or (staff and filters):
         return None  # several staff codes, or a second filter
     if staff:
@@ -320,6 +332,11 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
     reference = None
     if comparison:
         text, reference = comparison
+    if group:
+        text = re.sub(r"\b(?:ca|ka) (?:cua hang|shop) thanks(?: e| em)?$", "", text)
+        text = re.sub(rf"\b(?:mua(?: tong(?: cong)?)?|mang ve)(?= (?:{_AMOUNT}|{_REVENUE})\b)",
+                      " ", text)
+        text = re.sub(r"\b((?:so|may|bao nhieu) don) co\b", r"\1", text)
     if share and not re.search(rf"\b{_REVENUE}\b", text):
         text = text + " doanh thu"  # "nhóm X đóng góp bao nhiêu % tổng doanh thu"
     contract = _increasing(text, today, rules)
@@ -349,6 +366,8 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
     if best_staff and not filters and not reference:
         if "gioi nhat" in best_staff.group() and not rules.best_staff:
             return None  # "giỏi nhất" means revenue only when the rulebook says so
+        if best_staff.group().startswith("tho ") and not (vocabulary or {}).get("repair_staff"):
+            return None
         intent = "top_staff"
         text = text[:best_staff.start()] + " " + text[best_staff.end():]
         text = re.sub(r"\b(?:la ai|ai la)\b", " ", text)
@@ -401,8 +420,13 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
         middle = " ".join(value for key, value in match.groupdict().items()
                           if key.startswith("mid") and value)
         text = text[:match.start()] + " " + middle + " " + text[match.end():]
-        if kind == "quantity" and not filters:
-            text = re.sub(rf"\bcong moi (?:mat hang|mon) tinh theo {re.escape(unit)}\b", " ", text)
+        if kind == "quantity":
+            if not filters:
+                text = re.sub(rf"\b(?:cong moi (?:mat hang|mon) tinh theo"
+                              rf"|tinh (?:het|tat ca) (?:cac )?mat hang ban theo) {re.escape(unit)}\b",
+                              " ", text)
+            if size:
+                text = re.sub(r"\bcong (?:het|tat ca) (?:cac )?mon\b", " ", text)
         for extra in extras:
             text = re.sub(extra, " ", text)
         if feature:
@@ -424,7 +448,8 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
         return None
     if group and intent != "revenue" and (
             share or (group[1], intent) not in {
-                ("customer_group", "average_order"), ("product_group", "top_products")
+                ("customer_group", "average_order"), ("product_group", "top_products"),
+                ("product_group", "order_count"), ("product_group", "quantity")
             }):
         return None
     if (shift or staff) and intent not in ("revenue", "order_count"):
@@ -1059,6 +1084,84 @@ _PHONE_AVERAGE = re.compile(
 )
 
 
+def _phone_scope(text: str, today: date, rules: Rules, names: tuple[str, ...],
+                 vocabulary: dict[str, Iterable[str]]) -> Plan | bool | None:
+    kinds = set(vocabulary.get("phone_kind", ()))
+    if not kinds or not (rules.revenue and rules.average_phone_revenue):
+        return None
+    resolved = _period(text, today, rules)
+    if resolved is None:
+        return None
+    start, end, rest = resolved
+    if start > today:
+        return None
+    rest = re.sub(r"\s+", " ", rest).strip()
+    share = re.fullmatch(
+        rf"(?:bo phu kien ra thi {_REVENUE} )?may moi chiem {_AMOUNT} phan tram "
+        rf"(?:tong )?(?:{_REVENUE}|tien ban) may", rest)
+    if share and {"may moi", "may cu"} <= kinds:
+        return Plan("revenue", start, min(end, today), comparison="share",
+                    filters=(Filter("phone_kind", "may moi"),),
+                    evidence=_rows(rules, "average_phone_revenue"))
+    group = re.fullmatch(
+        rf"nhom (may moi|may cu|phu kien) ban(?: duoc)? {_AMOUNT} tien(?: the)?", rest)
+    if group and group[1] in kinds and rules.money_is_revenue:
+        return Plan("revenue", start, min(end, today),
+                    filters=(Filter("phone_kind", group[1]),),
+                    evidence=_rows(rules, "average_phone_revenue", "money_is_revenue"))
+    quantity = re.search(rf"\bban(?: ra)?(?: duoc)? {_AMOUNT} (chiec)\b", rest)
+    if quantity:
+        scope = " ".join((rest[:quantity.start()] + " " + rest[quantity.end():]).split())
+        scope = re.sub(r"^cua hang ", "", scope)
+        if scope in {"dien thoai cu", "may cu", "may moi"}:
+            field, value = "phone_kind", "may cu" if scope == "dien thoai cu" else scope
+            if value not in kinds:
+                return False
+        elif scope in {"dien thoai", "dien thoai gop ca may moi voi may cu"}:
+            field, value = "phone_kind", "dien thoai"
+        elif scope in vocabulary.get("phone_model", ()) and scope not in {fold(n) for n in names}:
+            field, value = "phone_model", scope
+        else:
+            return None
+        return Plan("quantity", start, min(end, today), unit=quantity[1],
+                    filters=(Filter(field, value),),
+                    evidence=_rows(rules, "average_phone_revenue"))
+    return None
+
+
+def _catalogue_quantity(text: str, today: date, rules: Rules,
+                        vocabulary: dict[str, Iterable[str]]) -> Plan | bool | None:
+    if not (rules.revenue and rules.catalogue_size and rules.product_group and rules.unit_quantity):
+        return None
+    cue = re.search(r"\b(?:(bim)(?: ta)? (size (?:nb|[smlx]+))|(sua bot) (so \d+))"
+                    r"(?: cua moi hang)?\b", text)
+    if not cue:
+        return None
+    group, size = ("bim ta", cue[2]) if cue[1] else ("sua bot", cue[4])
+    group_labels = [name for name in vocabulary.get("product_group", ()) if fold(name) == group]
+    size_labels = [name for name in vocabulary.get("product_size", ()) if fold(name) == size]
+    if len(group_labels) != 1 or len(size_labels) != 1:
+        return False
+    rest = text[:cue.start()] + " " + text[cue.end():]
+    rest = re.sub(r"\b(?:(?:tinh|gop) (?:het )?)?(?:tat ca (?:cac )?|moi )hang\b", " ", rest)
+    rest = re.sub(r"\b(?:sop|shop)(?= ban\b)", "cua hang", rest)
+    rest = re.sub(r"\s+", " ", rest).strip()
+    unit = "bich" if cue[1] else "lon"
+    quantity = re.search(rf"\bban(?: ra)?(?: duoc)?(?: tong cong)? {_AMOUNT} {unit}\b", rest)
+    if not quantity:
+        return False
+    rest = rest[:quantity.start()] + " " + rest[quantity.end():]
+    resolved = _period(rest, today, rules)
+    if resolved is None:
+        return False
+    start, end, rest = resolved
+    if start > today or _FILLERS.sub(" ", rest).strip():
+        return False
+    return Plan("quantity", start, min(end, today), unit=unit,
+                filters=(Filter("product_group", group_labels[0]), Filter("product_size", size_labels[0])),
+                evidence=_rows(rules, "catalogue_size", "product_group", "unit_quantity"))
+
+
 def _phone_average(text: str, today: date, rules: Rules) -> Plan | bool | None:
     match = _DUE_AVERAGE.search(text)
     intent, used = "average_amount_due", ["average_amount_due", "average_order"]
@@ -1081,11 +1184,14 @@ def _phone_average(text: str, today: date, rules: Rules) -> Plan | bool | None:
 
 # Đợt 3 gói 1: "các đơn trả bằng <hình thức>", "các đơn bán qua / tại <kênh>".
 _LABEL_CLAUSE = {
-    "payment": re.compile(r"\b(?:cac )?don(?: hang)? (?:duoc )?(?:tra|thanh toan) bang "),
-    "channel": re.compile(r"\b(?:cac )?don(?: hang)? (?:duoc )?ban (?:qua |tren |(?=tai ))"),
+    "payment": re.compile(r"\b(?:cua )?(?:cac )?don(?: hang)? (?:duoc )?"
+                          r"(?:(?:tra|thanh toan)(?: bang)? |(?=chuyen khoan\b))"),
+    "channel": re.compile(r"\b(?:cua )?(?:(?:cac )?don(?: hang)? (?:duoc )?(?:ban )?|ban )"
+                          r"(?:qua |tren |(?=tai ))"),
 }
 _PAIR_WORDS = re.compile(
-    r"\b(?:lan luot|moi loai|moi ben|tung loai|ca hai)\b|^so\b|\bvoi\b|\bva\b")
+    r"\b(?:lan luot|lan nuot|moi loai|moi ben|tung loai|tung ben|moi kenh|ca hai|con|voi|va)\b"
+    r"|^so\b")
 
 
 def _labels(text: str, vocabulary: dict[str, Iterable[str]]) -> tuple | bool | None:
@@ -1103,6 +1209,12 @@ def _labels(text: str, vocabulary: dict[str, Iterable[str]]) -> tuple | bool | N
             hit = next(((term, label) for term, label in terms
                         if re.match(rf"{re.escape(term)}(?!\S)", rest)), None)
             if hit is None:
+                # Shorthand "đơn trả …" may refer to returned goods. Leave that
+                # condition in the text unless it names a known payment method.
+                if field == "payment" and not match.group().endswith("bang "):
+                    continue
+                if field == "channel" and not re.search(r"\bdon\b", match.group()):
+                    continue
                 return False if vocabulary.get(f"{field}_terms") is not None else None
             clauses.append((match.start(), match.end() + len(hit[0]), field, hit[1]))
     if not clauses:
@@ -1119,10 +1231,10 @@ def _labels(text: str, vocabulary: dict[str, Iterable[str]]) -> tuple | bool | N
 
 _AMBIGUOUS = object()
 _GROUP_PREFIX = {
-    "product_group": r"(?:cua )?(?:cac |nhung )?(?:mat hang |san pham |hang )?nhom (?:hang )?",
+    "product_group": r"(?:cua )?(?:cac |nhung )?(?:mua hang |mat hang |san pham |hang )?nhom (?:hang )?",
     "customer_group": r"(?:(?<!moi )(?<!mot )(?<!1 )(?:cac )?don (?:hang )?)?"
                       r"(?:tu |cua |do )?(?:cac |nhung )?khach(?: hang)? "
-                      r"(?:thuoc )?nhom ",
+                      r"(?:thuoc )?nhom |(?:cua )?nhom khach(?: hang)? ",
 }
 
 
@@ -1136,23 +1248,25 @@ def _group(text: str, vocabulary: dict[str, Iterable[str]]) -> tuple | object | 
                 continue
             # "các đơn do khách nhóm X mua", "các khách thuộc nhóm X mua …"
             suffix = "(?: mua)?" if field == "customer_group" else ""
-            for match in re.finditer(rf"\b{prefix}{re.escape(key)}{suffix}(?!\S)", text):
+            for match in re.finditer(rf"\b(?:{prefix}){re.escape(key)}{suffix}(?!\S)", text):
                 found.append((match.start(), match.end(), field, name))
     if not found:
         return None
     found.sort(key=lambda f: (f[0] - f[1], f[0]))  # longest first ("trà sữa" before "trà")
     best = found[0]
-    same_span = {(f[2], normalize_question(f[3])) for f in found if (f[0], f[1]) == best[:2]}
+    same_span = {(f[2], unicodedata.normalize("NFC", f[3]).casefold()) for f in found
+                 if (f[0], f[1]) == best[:2]}
     elsewhere = [f for f in found if f[1] <= best[0] or f[0] >= best[1]]
-    if len(same_span) != 1 or any(normalize_question(f[3]) != normalize_question(best[3])
-                                  for f in elsewhere):
+    if len(same_span) != 1 or any(
+            (f[2], normalize_question(f[3])) != (best[2], normalize_question(best[3]))
+            for f in elsewhere):
         return _AMBIGUOUS  # two groups, or the same words name a product and a customer group
     return text[:best[0]] + " " + text[best[1]:], best[2], best[3]
 
 
 _SHARE = re.compile(r"\bphan tram\b|\bt[iy] trong\b")
 _SHARE_WORDS = re.compile(
-    rf"\b(?:trong )?tong (?:{_REVENUE})(?: cua cua hang| cua shop)?\b|\bt[iy] trong\b|"
+    rf"\b(?:(?:trong|tren) )?tong (?:{_REVENUE})(?: cua cua hang| cua shop)?\b|\bt[iy] trong\b|"
     rf"\b(?:chiem|dong gop|bang)\b|\bphan(?: cua)?\b|\b(?:la )?(?:{_AMOUNT} )?phan tram\b")
 
 
@@ -1162,14 +1276,16 @@ def _share(text: str) -> tuple[str, bool]:
     if not (_SHARE.search(text) and re.search(rf"\b{_REVENUE}\b", text)):
         return text, False
     # Not the "trọng" of "tỉ trọng doanh thu".
-    text = re.sub(rf"\b(?:trong )?(?:{_REVENUE}) ca (?:cua hang|shop)\b"
+    text = re.sub(rf"\b(?:trong )?(?:{_REVENUE}) ca (?:cua hang|shop|thang)\b"
                   rf"|(?<!\bti )(?<!\bty )\btrong {_REVENUE}\b",
                   " tong doanh thu ", text)
+    text = re.sub(rf"\b(?:chiem|dong gop) ((?:{_AMOUNT} )?phan tram) (?:tren )?({_REVENUE})\b",
+                  r"chiem \1 tong \2", text)
     if not re.search(rf"\btong {_REVENUE}\b", text) and not re.search(r"\bchiem\b", text):
         return text, False
-    text = re.sub(rf"\bchiem ((?:{_AMOUNT} )?phan tram) ({_REVENUE})\b", r"chiem \1 tong \2",
-                  text)
-    return re.sub(r"\s+", " ", _SHARE_WORDS.sub(" ", text)).strip(), True
+    text = _SHARE_WORDS.sub(" ", text)
+    text = re.sub(rf"\b{_REVENUE}\b", " ", text)
+    return re.sub(r"\s+", " ", text).strip(), True
 
 
 _SALE_PRICE = (
@@ -1205,16 +1321,29 @@ def _daily_sale_price(text: str, today: date, rules: Rules,
 
 _PRODUCT_MARKER = re.compile(r"(?:\b(?:mat hang|san pham|hang|mon|thuoc|cua)\s*)+$")
 
+# Whole phrases only. Match them against the source name and keep its identity.
+_PRODUCT_WORDINGS = {
+    "chao ngheu": "chao ngao",
+    "dau hu chien gion": "dau phu ran gion",
+    "gia do dien thoai de ban": "ke dien thoai de ban",
+}
+
 
 def _product(text: str, names: Iterable[str]) -> tuple[str, object]:
     """Remove the one product the question names; several different products are ambiguous."""
     found = []
-    for name in set(names):
-        key = normalize_question(name)
+    names_by_key = [(name, normalize_question(name)) for name in set(names)]
+    keys = {key for _, key in names_by_key}
+    for name, key in names_by_key:
         # One-word names ("Trà") are too easy to confuse with grammar; codes carry digits.
         if not key or (len(key.split()) < 2 and not any(c.isdigit() for c in key)):
             continue
-        for match in re.finditer(rf"(?<!\S){re.escape(key)}(?!\S)", text):
+        alias = _PRODUCT_WORDINGS.get(key)
+        if key.startswith("cu sac "):
+            alias = "coc " + key.removeprefix("cu ")
+        terms = (key, alias) if alias and alias not in keys else (key,)
+        pattern = "|".join(re.escape(term) for term in terms)
+        for match in re.finditer(rf"(?<!\S)(?:{pattern})(?!\S)", text):
             found.append((match.start(), match.end(), name))
     if not found:
         return text, None
@@ -1280,6 +1409,34 @@ def _purchase_difference(text: str, today: date, rules: Rules,
     return Plan("purchase_sales_difference", start, min(end, today),
                 evidence=_rows(rules, "purchase_sales_difference", "revenue", "product_names"),
                 filters=tuple(filters), unit=unit)
+
+
+def _credit_due_count(text: str, today: date, rules: Rules) -> Plan | None:
+    """Count credit orders by recorded due date as observed through today."""
+    if not (rules.until_end_of_day and rules.debt_orders):
+        return None
+    cutoff = re.match(r"(?:tinh )?(?:toi|den) (?:het )?hom nay\b", text)
+    if not cutoff:
+        return None
+    rest = text[cutoff.end():].strip()
+    rest = re.sub(
+        rf"^(?:trong moi don ban chiu )?(?:co )?{_AMOUNT} don"
+        r"(?: ban chiu)?(?: co| ghi)? ngay phai tra(?: ghi tren so)? ",
+        "", rest, count=1,
+    )
+    if rest == text[cutoff.end():].strip():
+        return None
+    if re.fullmatch(r"(?:con )?(?:sau|muon hon) hom nay"
+                    r"(?: han dung hom nay khong tinh)?", rest):
+        start, end = today + timedelta(days=1), date.max
+    else:
+        month = re.fullmatch(r"(?:trong|roi vao) thang (\d{1,2})/(\d{4})", rest)
+        if not month or not rules.calendar_month or not 1 <= int(month[1]) <= 12:
+            return None
+        start, end = _month(int(month[2]), int(month[1]))
+    return Plan("credit_due_count", start, end,
+                evidence=_rows(rules, "until_end_of_day", "debt_orders", "calendar_month"),
+                observed_on=today)
 
 
 def _delivered_orders(text: str, today: date, rules: Rules) -> Plan | None:
@@ -1597,18 +1754,39 @@ _STAFF = re.compile(r"\b(?:cac )?don (?:hang )?do nhan vien (?:ma )?(nv\d{1,4}) 
                     r"|\b(?:cua )?nhan vien (?:ma )?(nv\d{1,4})\b")
 _BEST_STAFF = re.compile(
     r"\b(?:ai la )?nhan vien ban gioi nhat(?: la ai)?\b"
-    r"|\b(?:ai la )?(?:nhan vien|nguoi ban) (?:nao )?co doanh thu cao nhat(?: la ai)?\b")
+    r"|\b(?:ai la )?(?:nhan vien|nguoi ban|nv) (?:nao )?"
+    rf"(?:(?:(?:co|ban(?: duoc)?) )?{_REVENUE}(?: cao)?|ban(?: duoc)? (?:nhieu|nhiu) tien) nh(?:at|ut)(?: la ai)?\b"
+    rf"|\btho nao lam ra {_REVENUE} cao nh(?:at|ut)\b")
 
 
-def _staff(text: str) -> tuple[str, str] | None | bool:
-    """"nhân viên mã NV001": a staff code filter; None: no code; False: several codes."""
-    found = list(_STAFF.finditer(text))
-    if not found:
+def _staff(text: str, terms: Iterable[str], money_is_revenue: bool) -> tuple[str, str] | None | bool:
+    """Resolve an explicit seller code or a uniquely documented person's name."""
+    code_matches = [(m, (m.group(1) or m.group(2)).upper()) for m in _STAFF.finditer(text)]
+    if not code_matches:
+        code_matches = [(m, m["code"].upper()) for m in re.finditer(
+            r"\b(?:nv )?(?P<code>nv\d{1,4})(?= ban\b)", text)]
+    matches = code_matches[:]
+    for term in terms:
+        role, name, code = term.split("|", 2)
+        prefix = (r"(?:(?:cac|kac) phieu )?(?:tho )?" if role == "repair" else
+                  r"(?:(?:cac|kac) don(?: hang)? )?(?:do )?(?:nhan vien|nv) ")
+        for match in re.finditer(rf"\b{prefix}{re.escape(name)}(?: lam\b| ban\b)?(?!\S)", text):
+            matched = match.group()
+            if role == "repair" and matched == name and not re.search(r"\bban\b", text):
+                continue
+            matches.append((match, code))
+    if not matches:
         return None
-    codes = {match.group(1) or match.group(2) for match in found}
-    if len(codes) != 1:
+    if len({code for _, code in matches}) != 1:
         return False
-    return _STAFF.sub(" ", text), codes.pop().upper()
+    code = matches[0][1]
+    rest = text
+    for match, _ in sorted(matches, key=lambda pair: pair[0].start(), reverse=True):
+        rest = rest[:match.start()] + " " + rest[match.end():]
+    if money_is_revenue and any(match.group().endswith(" ban") for match, _ in matches):
+        rest = re.sub(rf"\b(?:cong lai )?(?:duoc )?{_AMOUNT} tien(?: hang)?\b",
+                      " doanh thu ", rest, count=1)
+    return rest, code
 
 
 _SHIFT = re.compile(r"\b(?:rieng |trong |cua )?ca (sang|chieu)\b")

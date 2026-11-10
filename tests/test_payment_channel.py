@@ -157,6 +157,13 @@ class PaymentShopTests(_Shop):
                 self.assertEqual(plan.shape, "by_filter")
                 self.assertEqual((candidate.type, candidate.answer), ("list", value))
 
+    def test_two_short_channel_clauses_keep_the_question_order(self):
+        _, result = self.answer("Tháng 3/2026 dthu đơn qua điện thoại bao nhiêu, "
+                                "còn đơn tại quầy bao nhiêu?")
+        self.assertEqual((result.type, result.answer), ("list", [30000, 190000]))
+        self.assertIsNone(ask("Số đơn qua điện thoại và đơn tại quầy tháng 3/2026 lần lượt "
+                              "là bao nhiêu?", self.vocabulary))
+
     def test_debt_orders_are_not_cash(self):
         # "Ghi nợ" is its own method: D4 is neither cash nor transfer, even if paid later.
         _, candidate = self.answer("doanh thu các đơn trả bằng tiền mặt tháng 3/2026")

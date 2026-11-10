@@ -751,3 +751,43 @@ câu để ghép đủ 10 ID. Sáu ca thiếu danh tính ở bảng là các ID 
 
 Đây là kiểm kê phạm vi dữ liệu. Báo cáo sử dụng các benchmark đã có,
 gồm full train và robustness của main cùng các lượt đích đã hoàn tất.
+
+## Độ phủ public của Data đợt 3, nhóm 14–17 và 20 — 11/11/2026
+
+Đối chứng dùng `a82648c` sau #47. Hai lượt chạy cùng split, rulebook, calendar
+và cấu hình baseline. Danh sách 74 câu lấy từ audit phân công, chỉ dùng để
+đếm độ phủ sau inference.
+
+| Nhóm | Đối chứng | Bản sửa | Phân công |
+| --- | ---: | ---: | ---: |
+| 14. Nhân viên và thợ | 0 | 9 | 9 |
+| 15. Tên hàng, size, hãng và đơn vị | 0 | 19 | 19 |
+| 16. Nhóm hàng, nhóm khách và tỷ trọng | 8 | 26 | 32 |
+| 17. Thanh toán và kênh | 0 | 7 | 8 |
+| 20. Ngày phải trả ghi trên sổ | 0 | 6 | 6 |
+| **Tổng** | **8** | **67** | **74** |
+
+Trên đủ 1.000 câu public, số câu có đáp án tăng từ **530 lên 593**. Cả hai
+lượt có 5 câu `unanswerable`, nên tổng số câu có kết quả tăng từ 535 lên 598.
+Đối chiếu theo từng mã giữ nguyên toàn bộ kết quả cũ và xác nhận submission
+đủ 1.000 mã, đúng định dạng. Public chưa có nhãn để chấm độ đúng.
+
+Bốn câu hỏi nhóm hàng thiếu cột phân nhóm trong nguồn. Hai câu hỏi theo
+giới tính thiếu giá trị giới tính trong dữ liệu khách. Một câu hỏi chia
+doanh thu theo kênh thiếu cột kênh bán. Bảy câu giữ `abstain`.
+
+Phép đếm hạn trả nối sổ hạn trả với đơn theo mã và tính các đơn bán chịu đã
+ghi nhận tính đến ngày quan sát. Câu hỏi theo tháng dùng ngày đến hạn ghi
+trên sổ. Câu hỏi sau hôm nay loại ngày hôm nay. Đây là thống kê sổ hạn trả,
+tách khỏi phép tính số dư chưa thanh toán. Tỷ trọng máy mới trên tiền bán
+máy dùng doanh thu máy mới và máy cũ làm mẫu số. Tỷ trọng nhóm khách và
+phương thức thanh toán dùng doanh thu toàn shop cùng kỳ.
+
+| Phạm vi chấm local proxy | Đúng / sai / abstain của đối chứng | Đúng / sai / abstain của bản sửa |
+| --- | ---: | ---: |
+| Train (3.000 câu) | 2.925 / 1 / 74 | 2.926 / 1 / 73 |
+| Holdout theo shop (630 câu, nằm trong train) | 622 / 0 / 8 | 623 / 0 / 7 |
+
+Giữ đủ các câu đúng cũ và không phát sinh câu sai mới. Một câu lệch nhãn đã
+có trong đối chứng sau #47. `uv sync --locked` và smoke qua. Unittest chạy
+513 ca, 512 qua và 1 skip.

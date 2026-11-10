@@ -62,6 +62,7 @@ class Sale:
     product_size: str | None = None
     phone_item_kind: str | None = None
     order_amount_due: Decimal | None = None
+    phone_catalogue_name: str | None = None
 
 
 def price_per_base_unit(price: Decimal, sold: Decimal | None,
