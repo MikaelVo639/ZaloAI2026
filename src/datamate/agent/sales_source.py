@@ -30,11 +30,15 @@ from datamate.ingestion.joined_sales import (
     load_joined_sales,
     mapping_for_xlsx_order_detail_product,
 )
-from datamate.ingestion.readme_sales import ReadmeSalesError, load_readme_sales, parse_sections
+from datamate.ingestion.readme_sales import (
+    ReadmeSalesError,
+    enrich_sales_from_readme_products,
+    load_readme_sales,
+    parse_sections,
+)
 from datamate.ingestion.sales import Sale, load_sales
 from datamate.ingestion.status import StatusError, status_policy
 from datamate.semantics.text import fold
-
 
 _JOIN_COLUMNS = {
     "orders": {
@@ -287,7 +291,12 @@ def load_business_sales(
             return sales, {**evidence, "adapter": "readme_sales"}, eligible
     try:
         sales, evidence = load_sales(catalog)
-        return sales, {**evidence, "adapter": "flat_sales"}, None
+        try:
+            sales, product_context = enrich_sales_from_readme_products(catalog, sales)
+        except ReadmeSalesError as exc:
+            product_context = {"error": str(exc)}
+        return sales, {**evidence, "adapter": "flat_sales",
+                       "product_context": product_context}, None
     except ValueError as flat_error:
         if context_error is not None:
             raise ValueError(f"{flat_error}; README adapter: {context_error}") from context_error
