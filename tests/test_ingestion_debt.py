@@ -2,16 +2,15 @@
 
 import csv
 import sqlite3
-from contextlib import closing
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
 from datamate.ingestion.catalog import build_catalog
 from datamate.ingestion.debt import DebtSourceError, load_debt_ledger
-
 
 RULEBOOK = """# Synthetic split rules
 | Luật | Mặc định |
@@ -474,6 +473,17 @@ class DebtLedgerTests(_Shop):
             load_debt_ledger(self.catalog(readme=foreign), RULEBOOK)
         self.assertEqual(caught.exception.code, "amount")
 
+        short_unit = README + "\n- **Đơn vị**: USD\n"
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(self.catalog(readme=short_unit), RULEBOOK)
+        self.assertEqual(caught.exception.code, "amount")
+
+        for declaration in ("VND", "cái"):
+            with self.subTest(declaration=declaration):
+                plain = README + f"\n- **Đơn vị**: {declaration}\n"
+                ledger = load_debt_ledger(self.catalog(readme=plain), RULEBOOK)
+                self.assertEqual(ledger.lineage["money"]["unit"], "vnd")
+
         mixed = README.replace(
             "- Dữ liệu có đến hết 31/01/2026.",
             "- Dữ liệu có đến hết 31/01/2026.\n"
@@ -486,6 +496,15 @@ class DebtLedgerTests(_Shop):
         thousand_vnd = thousand.replace("nghìn đồng", "nghìn VND")
         ledger = load_debt_ledger(self.catalog(readme=thousand_vnd), RULEBOOK)
         self.assertEqual(ledger.orders[0].total, Decimal("100000500"))
+
+        ordinary_words = README.replace(
+            "- Dữ liệu có đến hết 31/01/2026.",
+            "- Dữ liệu có đến hết 31/01/2026.\n"
+            "- **Xử lý**: trạng thái đơn.\n"
+            "- **Dòng hàng**: thành tiền theo số lượng đã đổi ra đơn vị cơ bản.",
+        )
+        ledger = load_debt_ledger(self.catalog(readme=ordinary_words), RULEBOOK)
+        self.assertEqual(ledger.lineage["money"]["unit"], "vnd")
 
         unknown = README.replace(
             "- Dữ liệu có đến hết 31/01/2026.",
@@ -655,6 +674,58 @@ File máy POS xuất ra.
         self.assertEqual((len(complete.orders), len(complete.payments)), (1, 2))
         self.assertEqual(sum(payment.amount for payment in complete.payments), Decimal(70))
         self.assertEqual(complete.lineage["checks"]["paid_to_date_checked"], 1)
+
+    def test_reviewed_sqlite_pos_profile_uses_qualified_debt_references(self):
+        readme = """# Shop
+File máy POS xuất ra.
+## File
+- `pos.sqlite` (sqlite)
+## Quy ước
+- Dữ liệu có đến hết 31/01/2026.
+- **Công nợ**: mỗi lần khách trả tiền cho một đơn là một dòng, `thanh_toan.SoTienThu` là số tiền trả lần đó; `don_hang.TongThanhToan` là số khách phải trả cho cả đơn.
+"""
+        root = self.data / "shop"
+        root.mkdir(parents=True)
+        (root / "README.md").write_text(readme, encoding="utf-8")
+        database = root / "pos.sqlite"
+        with closing(sqlite3.connect(database)) as connection:
+            connection.execute(
+                "CREATE TABLE don_hang (MaHoaDon TEXT, NgayLap TEXT, TinhTrang TEXT, "
+                "TongThanhToan REAL, PhuongThucTT TEXT, KenhBanHang TEXT, "
+                "MaKhachHang TEXT, KhachDaTra REAL, ConPhaiThu REAL)"
+            )
+            connection.execute(
+                "INSERT INTO don_hang VALUES "
+                "('D1', '01/01/2026', 'Xong', 100, 'debt', 'store', 'K1', 50, 50)"
+            )
+            connection.execute(
+                "CREATE TABLE thanh_toan "
+                "(MaHoaDon TEXT, NgayGioThu TEXT, SoTienThu REAL)"
+            )
+            connection.execute(
+                "INSERT INTO thanh_toan VALUES ('D1', '02/01/2026', 50)"
+            )
+            connection.execute(
+                "CREATE TABLE khach_hang (MaKhachHang TEXT, TenGoi TEXT)"
+            )
+            connection.execute("INSERT INTO khach_hang VALUES ('K1', 'An')")
+            connection.commit()
+
+        ledger = load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+        self.assertEqual((len(ledger.orders), len(ledger.payments)), (1, 1))
+        self.assertEqual(ledger.orders[0].customer_name, "An")
+        self.assertEqual(ledger.lineage["columns"]["orders"][0]["origin"],
+                         "debt_pos_sqlite.v1")
+
+        with closing(sqlite3.connect(database)) as connection:
+            connection.execute("DROP TABLE thanh_toan")
+            connection.execute(
+                "CREATE TABLE thanh_toan (MaHoaDon TEXT, SoTienThu REAL)"
+            )
+            connection.commit()
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+        self.assertEqual(caught.exception.code, "partial")
 
     def test_pos_payment_family_is_grouped_by_filename_across_workbooks(self):
         from openpyxl import Workbook

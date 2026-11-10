@@ -1,10 +1,42 @@
 # Data public adapters — handoff
 
 Branch: `codex/data-public-adapters`  
-Base: `main@c5601e6`  
+Base synced through: `main@fb76719` and customer coverage PR `#44`
 Scope: Data & Schema assignment in `chia-viec-dot-3.md`
 
-## Result
+## Đợt 3 update — 10/11/2026
+
+### Implemented
+
+- Propagated documented product base units and groups from joined product tables into sales.
+- Enriched otherwise-valid flat sales with the README product catalog by unique product code or
+  unambiguous product name. The selected sales adapter and transaction values are unchanged.
+- Added the reviewed SQLite POS debt profile selected by complete schema signatures plus the
+  README's qualified debt references; no business ID is hard-coded.
+- Tightened money-unit detection so ordinary text such as `Xử lý` or `đơn vị cơ bản` is not
+  mistaken for a currency declaration. Explicit VND, thousand-VND and unsupported currencies
+  keep their existing validation behavior.
+- Incomplete product/debt mappings still fail closed instead of guessing.
+
+### Labeled-train verification
+
+| Check | Result |
+|---|---:|
+| Remaining base-unit failures (`biz_108`, `biz_115`) | **17/17 correct** |
+| Debt failures (`biz_111`, `biz_123`) | **26/26 correct** |
+| `biz_111` debt ledger | 66,469 orders / 66,195 payments / 0 reconciliation mismatch |
+| `biz_123` debt ledger | 33,630 orders / 33,816 payments / 0 reconciliation mismatch |
+| Full-train combined regression | **2,757 correct / 0 wrong / 243 abstain** |
+| Python unit tests | **439 passed** |
+| Ruff on changed Python files | **clean** |
+
+The full-train combined regression uses the completed 3,000-question unit run and replaces only
+the 26 previously abstained debt IDs with the separately rerun debt results. Artifacts are under
+`outputs/runs/unit-mismatch-full-after-20261110/`,
+`outputs/runs/debt-biz111-123-after-20261110/`, and
+`outputs/runs/dot3-data-combined-20261110/` (gitignored).
+
+## Original public-adapter result
 
 All 10 assigned public shops now load through README/rulebook-driven adapters. Public has no
 labels, so the table reports coverage only; it does not claim answer correctness.
@@ -45,13 +77,12 @@ lost answers and zero changed answers in the before/after comparison.
 - Documented Voucher / points / shipping adjustment rows are excluded from sales revenue and
   product rankings.
 
-## Verification
+## Original public verification
 
 - `python -m unittest discover -s tests -v`: **383 tests passed**.
 - Ruff on all changed Python files: **clean**.
 - Final public run: **308 answered / 692 abstain**, up from **124 / 876**.
 - Final run artifacts: `outputs/runs/public-data-adapters-final-20261108/` (gitignored).
 
-Per the team plan, Evaluation should run the labeled full-train benchmark on `main` after the
-merge batch. This checkout does not contain `data/raw/train/questions.jsonl`, so no local labeled
-train score is reported here.
+This original public-only verification predates the labeled-train update reported at the top of
+this handoff.
