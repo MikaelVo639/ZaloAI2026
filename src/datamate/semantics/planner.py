@@ -164,6 +164,10 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
         return _avg_purchase(text, today, rules, names)
     if _PRICE_UP.search(text):
         return _price_effect(text, today, rules, names, price_increases or {}, price_source)
+    if rules.daily_sale_price:
+        price = _daily_sale_price(text, today, rules, names)
+        if price is not None:
+            return price
     if _DRUG_CUE.search(text):
         return _drug_revenue(question, rules)
     group = _group(text, vocabulary or {})
@@ -291,6 +295,8 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     for kind, feature, pattern, extras in () if intent else _INTENTS:
         if kind == "average_order" and group and group[1] == "customer_group":
             pattern = rf"(?:{pattern}|{_GROUP_AVERAGE})"
+        if kind == "top_products" and re.search(r"\btop \d+\b", text):
+            pattern = rf"\btop {pattern}(?: la chi\b)?"
         match = re.search(pattern, text)
         if not match:
             continue
@@ -979,6 +985,34 @@ def _share(text: str) -> tuple[str, bool]:
     text = re.sub(rf"\bchiem ((?:{_AMOUNT} )?phan tram) ({_REVENUE})\b", r"chiem \1 tong \2",
                   text)
     return re.sub(r"\s+", " ", _SHARE_WORDS.sub(" ", text)).strip(), True
+
+
+_SALE_PRICE = (
+    re.compile(rf"gia ban {_ONE} (?P<unit>[a-z]+)(?: vao)? (?:la )?{_AMOUNT}(?: a)?"),
+    re.compile(rf"(?:cua hang )?ban (?:(?:voi )?don gia|gia) {_AMOUNT} {_ONE} "
+               r"(?P<unit>[a-z]+)(?: a)?"),
+)
+
+
+def _daily_sale_price(text: str, today: date, rules: Rules,
+                      names: Iterable[str]) -> Plan | None:
+    if not re.search(r"\b(?:don gia|gia ban|gia bao nhieu)\b", text):
+        return None
+    used = ["daily_sale_price"]
+    resolved = _period(text, today, rules, used)
+    if resolved is None or not resolved[0] == resolved[1] <= today:
+        return None
+    day, _, leftover = resolved
+    rest, product = _product(leftover, names)
+    if not isinstance(product, str):
+        return None
+    for pattern in _SALE_PRICE:
+        match = pattern.fullmatch(" ".join(rest.split()))
+        if match:
+            return Plan("daily_sale_price", day, day,
+                        filters=(Filter("product", product),), unit=match["unit"],
+                        evidence=_rows(rules, *used))
+    return None
 
 
 _PRODUCT_MARKER = re.compile(r"(?:\b(?:mat hang|san pham|hang|mon|thuoc|cua)\s*)+$")

@@ -1169,6 +1169,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         sales.append(Sale(key, final_day[key], final_status[key], amount, product_id,
                           product_name, quantity_base, minute=final_time[key],
                           quantity_sold=line["_quantity"],
+                          unit_price_base=_line_price_per_base(line, quantity_base),
                           unit_cost_at_sale=optional_sale_cost(line.get("unit_cost_at_sale")),
                           product_id_is_name=product_id_is_name,
                           product_group=_text((product or {}).get("group")
@@ -1234,6 +1235,20 @@ def _base_unit(line: dict[str, Any], product: dict[str, Any] | None,
     if source == "file" and quantity_base is not None and line.get("_quantity") == quantity_base:
         return unit
     return None
+
+
+def _line_price_per_base(line: dict[str, Any], quantity_base: Decimal | None) -> Decimal | None:
+    raw = line.get("unit_price")
+    sold = line["_quantity"]
+    if _blank(raw) or not quantity_base or not sold:
+        return None
+    if not sold.is_finite() or not quantity_base.is_finite() or sold * quantity_base <= 0:
+        return None
+    try:
+        price = parse_amount(raw)
+    except ValueError:
+        return None
+    return price * sold / quantity_base if price.is_finite() and price >= 0 else None
 
 
 def _base_quantity(line: dict[str, Any], product: dict[str, Any] | None,

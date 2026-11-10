@@ -351,7 +351,7 @@ INDEPENDENT_INTENTS = LOT_INTENTS | {"stock", "stock_split", "delivery_count", "
 INTENTS = (frozenset({"revenue", "order_count", "top_products", "average_order",
                      "cancel_count", "cancel_rate", "best_day",
                      "top_customers", "count_where", "quantity", "top_staff", "stock", "stock_split",
-                     "purchase_total", "top_supplier", "avg_purchase_price"})
+                     "purchase_total", "top_supplier", "avg_purchase_price", "daily_sale_price"})
            | C01_INTENTS | DEBT_INTENTS | INDEPENDENT_INTENTS | SALES_MEASURE_INTENTS)
 # Plan filters this backend applies, and the intents each one may be combined with.
 FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock", "stock_split",
@@ -379,6 +379,12 @@ def unsupported(plan: Plan) -> str:
     """
     if plan.intent not in INTENTS:
         return f"Intent {plan.intent!r} not supported by baseline agent"
+    if plan.intent == "daily_sale_price":
+        if (plan.start != plan.end or len(plan.filters) != 1 or plan.filters[0].field != "product"
+                or not plan.unit or plan.top_k != 1 or plan.periods or plan.shape or plan.threshold
+                or plan.comparison or plan.compare_start or plan.compare_end or plan.rank_by):
+            return "Daily sale price requires one product, base unit and day"
+        return ""
     if plan.intent in MONTHLY_MEASURE_INTENTS and (
             plan.start.day != 1 or plan.start > plan.end or
             (plan.start.year, plan.start.month) != (plan.end.year, plan.end.month)):
@@ -1295,6 +1301,12 @@ def _answer_sales_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
     return Candidate(kind, value, 1.0, "", evidence)
 
 
+def daily_sale_price(sales: list[Sale], day: date, unit: str) -> Decimal | None:
+    prices = {s.unit_price_base if s.base_unit == unit else None
+              for s in select_period(sales, day, day)}
+    return next(iter(prices)) if len(prices) == 1 else None
+
+
 def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                 rulebook: str = "") -> Candidate:
     reason = unsupported(plan)
@@ -1406,6 +1418,20 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         product_call = (f"select_product_code(sales, {code!r})" if code is not None
                         else f"select_product(sales, {value!r})")
     source_expr = product_call or "sales"
+    if plan.intent == "daily_sale_price":
+        if not read_rules(rulebook).daily_sale_price:
+            return Candidate(reason="Split rulebook does not define daily sale price", evidence=evidence)
+        value = daily_sale_price(sales, plan.start, plan.unit)
+        if value is None:
+            return Candidate(reason="Missing, inconsistent or mismatched base-unit prices",
+                             evidence=evidence)
+        result = int(value) if value == value.to_integral_value() else float(value)
+        evidence.update(result=result, unit=plan.unit,
+                        code=_code(f"daily_sale_price({source_expr}, "
+                                   f"date.fromisoformat({plan.start.isoformat()!r}), {plan.unit!r})",
+                                   daily_sale_price, select_period, select_product,
+                                   select_product_code))
+        return Candidate("number", result, 1.0, "", evidence)
     window = f"date.fromisoformat({plan.start.isoformat()!r}), date.fromisoformat({plan.end.isoformat()!r})"
     if plan.shape or plan.intent in ("top_customers", "count_where", "quantity"):
         full = cache["sales"][0]

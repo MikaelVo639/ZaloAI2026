@@ -55,6 +55,7 @@ class Sale:
     # "hình thức thanh toán" of the order, as written in the file (e.g. "cash", "Tiền mặt").
     # Matching a question word to it goes through the README's description of the labels.
     payment_method: str | None = None
+    unit_price_base: Decimal | None = None  # documented line price per base unit
 
 
 def parse_minute(value: Any) -> int | None:

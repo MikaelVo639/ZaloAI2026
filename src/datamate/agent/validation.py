@@ -17,7 +17,7 @@ ANSWER_TYPES = {
     "debt_total": "number", "debt_customer_count": "number", "debt_collected": "number",
     "debt_flow": "list", "top_staff": "string", "stock": "number", "stock_split": "list",
     "purchase_total": "number", "top_supplier": "string",
-    "avg_purchase_price": "number",
+    "avg_purchase_price": "number", "daily_sale_price": "number",
     "unsold_count": "number", "delivery_count": "number",
     "gross_profit": "number", "top_gross_profit": "string", "net_profit": "number",
     "stock_value": "number", "earliest_expiry": "date", "expiring_products": "list",
