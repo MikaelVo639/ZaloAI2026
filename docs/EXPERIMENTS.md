@@ -555,3 +555,17 @@ chấm độ đúng.
 [Train main hiện tại](https://www.kaggle.com/code/trngquangbodng/datamate-r3-c6283d2-train-cpu) ·
 [Robustness main hiện tại](https://www.kaggle.com/code/trngquangbodng/datamate-r3-c6283d2-robustness-cpu) ·
 [Public main hiện tại](https://www.kaggle.com/code/trngquangbodng/datamate-r3-c6283d2-public-audit-cpu)
+
+### Năm câu còn abstain tại biz_102
+
+Code `6d9c8a9` bổ sung đơn giá bán theo ngày và mẫu top-k có số lượng nêu rõ.
+Adapter dùng đơn giá ghi trên dòng trước chiết khấu, quy về đơn vị cơ bản
+và xét cả dòng thuộc đơn huỷ hoặc trả. Câu hỏi nhiều ngày, đơn vị không khớp,
+giá thiếu hoặc có nhiều mức giá trên cùng ngày vẫn được bỏ qua. Mẫu top-k
+dùng phép xếp hạng hiện có theo số lượng đã quy đổi.
+
+Trên 119 câu của `biz_102`, Windows chấm được **119 đúng, 0 sai, 0 abstain**.
+So với lượt `068f9b1`, cả 114 câu đúng cũ đều được giữ và 5 câu còn lại đã
+đúng. Lượt predict mất 61,4 giây, đỉnh bộ nhớ cam kết 394,6 MiB với trần
+512 MiB. Smoke qua, unittest chạy 444 ca với 1 skip.
+[Full train code 6d9c8a9](https://www.kaggle.com/code/trngquangbodng/datamate-r3-6d9c8a9-train-cpu)
