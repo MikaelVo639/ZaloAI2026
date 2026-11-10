@@ -7,8 +7,9 @@ detected joined schema):
 1. verified order/detail/product CSV signature -> joined adapter;
 2. verified XLSX order/detail/product export with README evidence (DATA-02 mapping)
    -> joined adapter;
-3. flat sales table whose headers match the known aliases -> flat adapter;
-4. lists described column by column in the business README -> README adapter.
+3. documented sales lines that require the declared unit conversion table -> README adapter;
+4. flat sales table whose headers match the known aliases -> flat adapter;
+5. other lists described column by column in the business README -> README adapter.
 
 Joined and README capabilities must be stated by the rulebook of the split being answered.
 """
@@ -28,7 +29,7 @@ from datamate.ingestion.joined_sales import (
     load_joined_sales,
     mapping_for_xlsx_order_detail_product,
 )
-from datamate.ingestion.readme_sales import ReadmeSalesError, load_readme_sales
+from datamate.ingestion.readme_sales import ReadmeSalesError, load_readme_sales, parse_sections
 from datamate.ingestion.sales import Sale, load_sales
 from datamate.ingestion.status import StatusError, status_policy
 from datamate.semantics.text import fold
@@ -239,6 +240,19 @@ def _joined_result(catalog: Catalog, mapping: MappingSpec, rules: RuleCapabiliti
     return sales, source, frozenset(ranking_eligible)
 
 
+def _needs_documented_conversions(readme: str) -> bool:
+    fields_by_section = [set(section.fields) for section in parse_sections(readme)]
+    line_fields = {"order_id", "date", "status", "amount", "quantity", "unit"}
+    product_fields = {"product_id", "product_name"}
+    conversion_fields = {"big_unit", "factor", "base_unit"}
+    return any(
+        line_fields <= fields and fields & product_fields and "quantity_base" not in fields
+        for fields in fields_by_section
+    ) and any(
+        conversion_fields <= fields and fields & product_fields for fields in fields_by_section
+    )
+
+
 def load_business_sales(
     catalog: Catalog, rulebook: str,
 ) -> tuple[list[Sale], dict[str, Any], frozenset[int] | None]:
@@ -257,10 +271,22 @@ def load_business_sales(
         sales, source, eligible = _joined_result(
             catalog, mapping, _xlsx_rules(rulebook, catalog, mapping))
         return sales, {**source, "adapter": "joined_sales_xlsx"}, eligible
+    conversion_error = None
+    if _needs_documented_conversions(catalog.readme):
+        # The flat reader cannot apply the companion conversion table. A late error
+        # in a large workbook would make it scan the same sales again via the README.
+        try:
+            sales, evidence, eligible = load_readme_sales(catalog, rulebook)
+        except ReadmeSalesError as exc:
+            conversion_error = exc
+        else:
+            return sales, {**evidence, "adapter": "readme_sales"}, eligible
     try:
         sales, evidence = load_sales(catalog)
         return sales, {**evidence, "adapter": "flat_sales"}, None
     except ValueError as flat_error:
+        if conversion_error is not None:
+            raise ValueError(f"{flat_error}; README adapter: {conversion_error}") from conversion_error
         try:
             sales, evidence, eligible = load_readme_sales(catalog, rulebook)
         except ReadmeSalesError as readme_error:
