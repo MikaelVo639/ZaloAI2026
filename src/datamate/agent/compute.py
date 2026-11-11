@@ -752,11 +752,6 @@ def _answer_debt_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return Candidate(reason=f"Split rulebook does not support {plan.intent}",
                          evidence=evidence)
     evidence["rules"] = tuple(dict.fromkeys(rules.row(feature) for feature in needed))
-    if re.search(r"\b(?:tra gop|so gop)\b", fold(catalog.readme)):
-        # Rulebook: debt questions include instalment orders kept in a separate book,
-        # which the D01 ledger does not read.
-        return Candidate(reason="Instalment book is not part of the debt ledger",
-                         evidence=evidence)
     prepared = prepare_debt(cache, catalog, rulebook)
     if not prepared["ok"]:
         diagnostic = prepared["debt_source_error"]

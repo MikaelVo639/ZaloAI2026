@@ -175,13 +175,9 @@ class DebtExecutionTests(unittest.TestCase):
                     candidate = compute.answer_plan({}, Catalog("b", "", ()), result, rulebook_text)
                 self.assertEqual(check_executed(candidate, result).type, expected)
 
-    def test_unknown_customer_and_instalments_abstain(self):
+    def test_unknown_customer_abstains(self):
         _, candidate = self.answer("Tháng 6/2026 khách Mai ghi nợ thêm bao nhiêu và trả nợ được "
                                    "bao nhiêu")
-        self.assertEqual(candidate.type, "abstain")
-        _, candidate = self.answer(
-            "Đến hết ngày 14/07/2026 số khách còn công nợ với cửa hàng là bao nhiêu?",
-            readme="Sổ góp: mỗi đơn trả góp có dòng đầu ghi ngày mua.")
         self.assertEqual(candidate.type, "abstain")
 
     def test_phone_suffix_is_removed_from_the_name_for_lookup(self):
