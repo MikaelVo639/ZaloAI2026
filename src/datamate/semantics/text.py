@@ -60,7 +60,8 @@ _TRANSPOSABLE = frozenset("""
 # Not "do", "luon", "rua", "ta": at the end they may be part of a name ("áo đỏ", "lươn",
 # "nước rửa") or a unit ("tạ").
 _CLOSING = re.compile(
-    r"(?:\s+(?:vay|day|dzay|zay|zi|z|v|a|ak|ah|ha|nhi|nha|nhe|nhen|hen|ne|di|the nhi|roi))+$")
+    r"(?:\s+(?:vay|day|dzay|zay|zi|z|v|a|ak|ah|ha|nhi|nha|nhe|nhen|hen|ne|di|the nhi|roi"
+    r"|nha e|nhe e))+$")
 # Calling someone at the start of a question: "em ơi", "ad ơi", "ủa".
 _CALLING = re.compile(r"^(?:(?:(?:e|em|a|anh|chi|ad|admin|ban|be|shop) )?oi |(?:ui|ua|e{2,}) )+")
 # Month/year with a two-digit year: "12/25", "th 3/26". The data years 2020-2039 are all
@@ -93,6 +94,10 @@ def normalize_question(value: object, *, product_names: Iterable[str] | None = N
     # fold() also drops "-": "15-3-2026" / "3-2026" are the same dates as "15/3/2026" / "3/2026".
     raw = re.sub(r"(?<![\d/-])(\d{1,2})-(\d{1,2})-(\d{4})(?![\d/-])", r"\1/\2/\3", raw)
     raw = re.sub(r"(?<![\d/-])(\d{1,2})-(\d{4})(?![\d/-])", r"\1/\2", raw)
+    # Misspellings that are not words, told apart by their marks: "đơng" = "đơn",
+    # "tỉ nệ" = "tỉ lệ".
+    raw = re.sub(r"(?<!\w)đơng(?!\w)", "đơn", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"(?<!\w)(t[ỉỷ]) nệ(?!\w)", r"\1 lệ", raw, flags=re.IGNORECASE)
     tokens = [_untranspose(_untelex(token)) for token in fold(raw).split()]
     text = " ".join(ABBREVIATIONS.get(token, token) for token in tokens)
     # Central "ni" = "này": "năm ni", "tháng ni", "bữa ni".
@@ -104,6 +109,8 @@ def normalize_question(value: object, *, product_names: Iterable[str] | None = N
     text = re.sub(r"\bthang roi\b", "thang truoc", text)
     # "tuần rồi" = "tuần trước", also when "rồi" would close the question.
     text = re.sub(r"\btuan roi\b", "tuan truoc", text)
+    # "đếm giùm (mình)" asks to count; "giùm" was already read as "giúp".
+    text = re.sub(r"\bdem giup(?: (?:minh|toi|em|e))?\b", "dem", text)
     text = _SHORT_YEAR.sub(lambda m: f"thang {int(m.group(1))}/20{m.group(2)}"
                            if 1 <= int(m.group(1)) <= 12 else m.group(), text)
     # "tháng 8 năm 2025" / "quý 2 năm 2026" -> "tháng 8/2025" / "quý 2/2026"
@@ -141,7 +148,7 @@ _MILLIONS = re.compile(rf"{_AMOUNT_BOUNDARY}(\d+) (?:triệu|trieu)(?: (?:đồn
                        r"(?! +\d)", re.I)
 # Parse shorthand in a lower threshold before folding punctuation or diacritics.
 _MONEY_THRESHOLD = re.compile(
-    r"\b(?:từ|tu) +(\d+)(k| +củ|tr[0-9]) +(?=(?:trở|tro) (?:lên|len|lne)\b)"
+    r"\b(?:từ|tu) +(\d+)(k| +củ|tr[0-9]?) +(?=(?:trở|tro) (?:lên|len|lne)\b)"
 )
 
 _ASK_COUNT = r"(?:bao nhieu|bnhiu|bn|nhieu|nhiu|may)"
@@ -174,7 +181,7 @@ def _threshold_dong(match: re.Match[str]) -> str:
     digits, suffix = match.groups()
     if suffix == "k":
         return f"tu {digits}000 dong "
-    if suffix.startswith("tr"):
+    if suffix.startswith("tr") and suffix != "tr":
         return f"tu {digits}{suffix[-1]}00000 dong "
     return f"tu {digits}000000 dong "
 
