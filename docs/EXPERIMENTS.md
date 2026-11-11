@@ -935,3 +935,41 @@ dùng cùng cấu hình, rulebook, calendar và mã câu.
 Unittest chạy 520 ca, 519 qua và 1 skip. Regression dùng dữ liệu giả lập,
 kiểm thứ tự dãy, chiều so sánh, mẫu số bằng 0, kỳ chưa kết thúc, tháng
 thiếu dữ liệu và chuỗi tăng có một tháng giảm hoặc bằng tháng trước.
+
+## Sổ công nợ XLSX và dòng cộng trong CSV — 11/11/2026
+
+Đối chứng dùng `main@d07d2b1`, sau #59. Bộ đọc công nợ nhận sổ Excel
+gộp đầu đơn và dòng hàng khi cấu trúc cột và quy ước README xác nhận
+đầu đơn lặp trên mọi dòng. Mỗi mã đơn chỉ giữ một tổng phải thu. Các
+phiếu thu vẫn là các giao dịch riêng. Dòng cộng ngày hoặc tháng được
+bỏ qua khi có nhãn tổng và các trường ngày đặt, trạng thái, khách,
+kênh và phương thức thanh toán đều trống.
+
+Bộ tra cứu khách nhận tên trên hóa đơn và tên danh mục theo cùng mã
+khách. Kết quả chỉ dùng tên tra cứu khi khớp duy nhất một mã. Bộ xếp
+hạng vẫn dùng tên hiển thị đã đọc từ danh mục.
+
+Trong 13 câu public đã có kế hoạch nhưng bị chặn bởi nguồn công nợ,
+bản sửa trả đáp án cho 10/10 câu XLSX và 3/3 câu CSV. Tính lại độc lập
+từ sổ gốc cho cùng 13 kết quả. Sổ XLSX đối soát 62.839 đơn và 62.580
+khoản thu, gộp 39.365 dòng hàng lặp thông tin đơn. Sổ CSV bỏ qua 511
+dòng cộng, đối soát 25.191 đơn và 26.246 khoản thu. Cả hai sổ có 0 khoản
+thu không khớp mã đơn và 0 sai lệch số dư trong các đơn phải đối soát.
+
+Lượt đủ 1.000 câu public có 682 đáp án cụ thể, 5 `unanswerable` và
+313 `abstain`. Tổng có kết quả tăng từ 674 lên 687, giữ đủ 674 kết
+quả cũ theo mã câu. Public chưa có nhãn chấm độ đúng.
+
+| Chấm local proxy | Đối chứng đúng / sai / abstain | Bản sửa đúng / sai / abstain |
+| --- | ---: | ---: |
+| Train, 3.000 câu | 2.928 / 1 / 71 | 2.929 / 1 / 70 |
+| Holdout theo shop, 630 câu | 623 / 0 / 7 | 623 / 0 / 7 |
+
+Câu train có thêm đáp án hỏi nợ thêm và tiền trả của khách có tên trên
+hóa đơn khác tên danh mục. Giữ đủ các câu đúng cũ và không có câu sai
+mới. Hai lượt dùng cùng cấu hình, rulebook, calendar và mã câu.
+
+Regression dùng dữ liệu giả lập để kiểm tra đơn nhiều dòng, phiếu thu
+cùng số tiền và ngày, tệp thiếu phân đoạn, đầu đơn mâu thuẫn, dòng cộng,
+đơn thật thiếu trường và tên trùng nhiều mã. `uv sync --locked`, smoke và
+Ruff trên các file sửa đều qua. Unittest chạy 524 ca, 523 qua và 1 skip.

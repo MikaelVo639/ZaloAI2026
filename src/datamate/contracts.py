@@ -113,6 +113,7 @@ class DebtOrder:
     customer_id: str | None = None
     customer_name: str | None = None  # display name (customer list first, else the order)
     source: str = ""  # lineage: "file::table#row"
+    source_customer_name: str | None = None  # alternate name recorded on this coded order
 
 
 @dataclass(frozen=True)

@@ -9,6 +9,8 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+from openpyxl import Workbook
+
 from datamate.ingestion.catalog import build_catalog
 from datamate.ingestion.debt import DebtSourceError, load_debt_ledger
 
@@ -110,6 +112,7 @@ class DebtLedgerTests(_Shop):
         first = ledger.orders[0]
         self.assertEqual((first.total, first.customer_name, first.on_credit, first.excluded),
                          (Decimal("100000.5"), "An", True, ""))
+        self.assertEqual(first.source_customer_name, "Tên trên đơn")
         self.assertEqual(ledger.orders[1].state, "tra hang")
         self.assertEqual(ledger.orders[2].state, "huy")
         self.assertEqual(ledger.orders[3].excluded, "cod")
@@ -130,6 +133,28 @@ class DebtLedgerTests(_Shop):
         ledger = load_debt_ledger(self.catalog(readme=readme), RULEBOOK)
         self.assertEqual(ledger.last_day, date(2026, 1, 15))
         self.assertEqual(ledger.lineage["coverage"]["source"], "observed")
+
+    def test_summaries_are_skipped_but_incomplete_orders_are_rejected(self):
+        header = ["Mã", "Ngày", "Trạng thái", "Tổng thu", "Thanh toán", "Kênh",
+                  "Mã khách", "Tên khách", "Còn nợ"]
+        order = ["D1", "01/01/2026", "Xong", "100000", "Ghi nợ", "Store", "K1", "An", "25000"]
+        daily_total = ["Tổng 01/01", "", "", "100000", "", "", "", "", "25000"]
+        monthly_total = ["Cộng tháng 01/2026", *daily_total[1:]]
+        ledger = load_debt_ledger(
+            self.catalog(orders=[header, order, daily_total, monthly_total]), RULEBOOK)
+        self.assertEqual([order.order_id for order in ledger.orders], ["D1"])
+        self.assertEqual(ledger.lineage["checks"]["summary_rows_skipped"], 2)
+        self.assertEqual(ledger.lineage["checks"]["closing_debt_checked"], 1)
+
+        for invalid in (
+            ["D2", *daily_total[1:]],
+            [*daily_total[:6], "K2", *daily_total[7:]],
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(DebtSourceError) as caught:
+                    load_debt_ledger(self.catalog(orders=[header, order, invalid]), RULEBOOK)
+                self.assertEqual(caught.exception.code, "column_missing")
+                self.assertIn("order_day", caught.exception.diagnostics["fields"])
 
     def test_duplicate_order_and_orphan_payment_are_rejected(self):
         duplicate = [
@@ -415,7 +440,7 @@ class DebtLedgerTests(_Shop):
 
     def test_a_status_column_named_xu_ly_is_not_a_currency(self):
         readme = README.replace("**Trạng thái**", "**Xử lý**")
-        catalog = self.catalog(readme=readme)
+        self.catalog(readme=readme)
         with (self.data / "shop" / "orders.csv").open(encoding="utf-8-sig", newline="") as stream:
             orders = list(csv.reader(stream))
         orders[0][2] = "Xử lý"
@@ -771,6 +796,74 @@ File máy POS xuất ra.
         self.assertEqual(len(ledger.orders), 1)
         self.assertEqual([payment.amount for payment in ledger.payments],
                          [Decimal(50), Decimal(20)])
+
+    def combined_catalog(self, *, conflicting=False, missing_partition=False,
+                         documented_grain=True):
+        root = self.data / "shop"
+        root.mkdir(parents=True, exist_ok=True)
+        readme = """# Shop
+File xuất từ phần mềm bán hàng.
+Mỗi dòng là một dòng hàng, thông tin hóa đơn lặp lại trên các dòng cùng đơn.
+## File
+- `Export_2025.xlsx`
+- `Export_2026.xlsx`
+- `Receipts.xlsx`
+## Quy ước
+- **Công nợ**: **Tiền thu** là số tiền trả lần đó; **Tổng thanh toán** là số khách phải trả cho cả đơn.
+- Dữ liệu có đến hết 31/01/2026.
+"""
+        if not documented_grain:
+            readme = readme.replace("thông tin hóa đơn lặp lại trên các dòng cùng đơn.", "")
+        (root / "README.md").write_text(readme, encoding="utf-8")
+        order_header = ["Đơn số", "Ngày HĐ", "Trạng thái giao", "Tổng thanh toán", "Nguồn",
+                        "Hình thức thanh toán", "Mã khách", "Khách hàng (tên)", "Công nợ",
+                        "Da tra", "Dòng", "Thành tiền (đ)"]
+        first = ["D1", "31/12/2025", "Xong", 150, "store", "Ghi nợ", "K1", "An", 50, 100]
+        second_line = first.copy()
+        if conflicting:
+            second_line[3] = 175
+        second_order = ["D2", "02/01/2026", "Khách trả", 90, "phone", "Ghi nợ",
+                        "K2", "Bình", 90, 0]
+        files = [
+            ("Export_2025.xlsx", "Orders",
+             [order_header, [*first, 1, 20], [*second_line, 2, 100]]),
+            ("Receipts.xlsx", "Payments", [
+                ["Ma don", "Ngày TT", "Tiền thu", "Mã thanh toán"],
+                ["D1", "31/12/2025", 50, "P1"],
+                ["D1", "10/01/2026", 25, "P2"],
+                ["D1", "10/01/2026", 25, "P3"],
+            ]),
+        ]
+        if not missing_partition:
+            files.append(("Export_2026.xlsx", "Orders", [order_header, [*second_order, 1, 80]]))
+        for filename, sheet, rows in files:
+            book = Workbook()
+            book.active.title = sheet
+            for row in rows:
+                book.active.append(row)
+            book.save(root / filename)
+            book.close()
+        return build_catalog(self.data, "shop")
+
+    def test_combined_workbooks_count_one_total_per_order_and_keep_payment_events(self):
+        ledger = load_debt_ledger(self.combined_catalog(), RULEBOOK)
+        self.assertEqual([(order.order_id, order.total, order.state) for order in ledger.orders],
+                         [("D1", Decimal(150), "hoan thanh"), ("D2", Decimal(90), "tra hang")])
+        self.assertEqual([payment.amount for payment in ledger.payments], [50, 25, 25])
+        self.assertEqual(ledger.lineage["checks"]["repeated_order_rows"], 1)
+        self.assertEqual(ledger.lineage["checks"]["paid_to_date_checked"], 2)
+        self.assertEqual(ledger.lineage["checks"]["closing_debt_checked"], 2)
+
+    def test_combined_profile_requires_consistent_totals_grain_and_all_partitions(self):
+        for options, code in (
+            ({"missing_partition": True}, "partial"),
+            ({"conflicting": True}, "key"),
+            ({"documented_grain": False}, "partial"),
+        ):
+            with self.subTest(options=options):
+                with self.assertRaises(DebtSourceError) as caught:
+                    load_debt_ledger(self.combined_catalog(**options), RULEBOOK)
+                self.assertEqual(caught.exception.code, code)
 
     def test_debt_convention_without_column_mapping_is_partial_not_absent(self):
         template = """# Shop

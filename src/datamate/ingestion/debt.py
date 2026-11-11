@@ -125,6 +125,17 @@ def _field(meaning: str) -> str | None:
 # Debt-specific, reviewed export profiles.  They are selected by complete structural
 # signatures and README evidence, never by business id.  A recognised but incomplete
 # table remains a partial source and is rejected by _role_sections.
+_COMBINED_PROFILE = "debt_banhang_combined.v1"
+_COMBINED_ORDERS = {
+    "Đơn số": "mã đơn", "Ngày HĐ": "ngày bán", "Trạng thái giao": "trạng thái đơn",
+    "Tổng thanh toán": "số khách phải trả cho cả đơn", "Nguồn": "kênh bán",
+    "Hình thức thanh toán": "hình thức thanh toán", "Mã khách": "mã khách",
+    "Khách hàng (tên)": "tên khách", "Công nợ": "còn nợ cuối dữ liệu",
+    "Da tra": "đã thanh toán",
+}
+_COMBINED_PAYMENTS = {
+    "Ma don": "mã đơn", "Ngày TT": "thời điểm thu", "Tiền thu": "số tiền trả lần đó",
+}
 _DEBT_PROFILES = (
     ("debt_pos_kiotviet.v1", (
         ({"Mã hóa đơn", "Thời gian", "Trạng thái", "Tổng sau giảm giá",
@@ -175,6 +186,14 @@ _DEBT_PROFILES = (
             "MaKhachHang": "mã khách", "TenGoi": "tên khách",
         }),
     )),
+    (_COMBINED_PROFILE, (
+        ({"Đơn số", "Ngày HĐ", "Trạng thái giao", "Tổng thanh toán", "Nguồn",
+          "Hình thức thanh toán", "Mã khách", "Dòng", "Thành tiền (đ)"}, _COMBINED_ORDERS),
+        ({"Ma don", "Ngày TT", "Tiền thu", "Mã thanh toán"}, _COMBINED_PAYMENTS),
+        ({"Mã KH mua", "Khách hàng mua", "Kiểu khách"}, {
+            "Mã KH mua": "mã khách", "Khách hàng mua": "tên khách",
+        }),
+    )),
 )
 
 _DEBT_PROFILE_CANDIDATES = {
@@ -195,6 +214,10 @@ _DEBT_PROFILE_CANDIDATES = {
         ("payments", {"MaHoaDon", "SoTienThu"}, _DEBT_PROFILES[2][1][1][1]),
         ("payments", {"MaHoaDon", "NgayGioThu"}, _DEBT_PROFILES[2][1][1][1]),
         ("payments", {"NgayGioThu", "SoTienThu"}, _DEBT_PROFILES[2][1][1][1]),
+    ),
+    _COMBINED_PROFILE: (
+        ("orders", {"Đơn số", "Dòng"}, _COMBINED_ORDERS),
+        ("payments", {"Ma don", "Mã thanh toán"}, _COMBINED_PAYMENTS),
     ),
 }
 
@@ -219,6 +242,12 @@ def _profile_sections(catalog: Catalog, documented: list[Section],
     documented_fields = [_section_fields(section, references) for section in documented]
     mixed: list[Section] = []
     for version, signatures in _DEBT_PROFILES:
+        # A combined export repeats order-level fields on every product line.
+        if version == _COMBINED_PROFILE and (
+            "moi dong la mot dong hang" not in text
+            or not re.search(r"\bthong tin (?:hoa don|don hang) lap lai\b", text)
+        ):
+            continue
         found: list[Section] = []
         for table, header in headers:
             matched = False
@@ -636,6 +665,14 @@ def _role_sections(catalog: Catalog, sections: list[Section], references: dict[s
         if len(signatures) != 1:
             raise DebtSourceError("column_missing", "Sources of one debt role disagree",
                                   role=role)
+    combined = {filename_key(section.file) for section, _fields in roles["orders"]
+                if section.origin == _COMBINED_PROFILE}
+    order_families = {_file_family(name) for name in combined}
+    missing_orders = sorted(name for name in files.keys() - combined
+                            if _file_family(name) in order_families)
+    if missing_orders:
+        raise DebtSourceError("partial", "A listed combined order file could not be resolved",
+                              sources=missing_orders, role="orders")
     return roles, all_mappings
 
 
@@ -659,6 +696,16 @@ def _required(row: dict[str, Any], fields: Iterable[str], *, role: str, source: 
         code = "key" if "order_id" in missing else "column_missing"
         raise DebtSourceError(code, "Required debt value is blank",
                               role=role, source=source, fields=missing)
+
+
+def _order_summary(row: dict[str, Any]) -> bool:
+    """A dated subtotal label with amounts but none of the order-identifying fields."""
+    return bool(re.fullmatch(r"tong (?:ngay )?\d{1,2}/\d{1,2}(?:/\d{4})?"
+                             r"|cong thang \d{1,2}/\d{4}",
+                            fold(row.get("order_id") or ""))
+                and all(_blank(row.get(field)) for field in (
+                    "order_day", "status", "payment_method", "channel",
+                    "customer_id", "customer_name")))
 
 
 def _amount(value: Any, *, field: str, source: str,
@@ -836,18 +883,26 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
         customers[key] = str(row["customer_name"]).strip()
 
     raw_orders: list[dict[str, Any]] = []
-    seen_orders: set[str] = set()
+    seen_orders: dict[str, tuple[str, dict[str, Any]] | None] = {}
+    summary_rows_skipped = repeated_order_rows = 0
     label_counts: Counter[str] = Counter()
     for section, table_key, ordinal, row in _rows(catalog, roles["orders"]):
         source = f"{table_key}#{ordinal}"
+        if _order_summary(row):
+            summary_rows_skipped += 1
+            continue
         channel_recorded = "channel" in row
         _required(row, ("order_id", "order_day", "status", "order_total", "payment_method",
                         *(("channel",) if channel_recorded else ())),
                   role="orders", source=source)
         order_id = str(row["order_id"]).strip()
+        combined_order = (table_key, row) if section.origin == _COMBINED_PROFILE else None
         if order_id in seen_orders:
+            if combined_order is not None and combined_order == seen_orders[order_id]:
+                repeated_order_rows += 1
+                continue
             raise DebtSourceError("key", "Order list repeats an order id", source=source)
-        seen_orders.add(order_id)
+        seen_orders[order_id] = combined_order
         state = order_state(row["status"])
         if state is None:
             raise DebtSourceError("label", "Unknown order status", source=source,
@@ -887,7 +942,8 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
         if not uses_customer_codes and customer_id:
             raise DebtSourceError("customer_mode", "A no-code shop produced a customer code",
                                   source=raw["source"])
-        name = customers.get(customer_id or "") or raw["customer_name"]
+        source_name = raw["customer_name"]
+        name = customers.get(customer_id or "") or source_name
         if (not uses_customer_codes or customer_id is None) and name and normalize_label(
                 name) in _WALK_IN_NAMES:
             customer_id, name = None, None
@@ -903,6 +959,7 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
             raw["order_id"], raw["day"], raw["state"], raw["total"],
             raw["payment_method"], raw["on_credit"], raw["excluded"],
             customer_id, name, raw["source"],
+            source_customer_name=source_name if customer_id and source_name != name else None,
         ))
 
     payments: list[DebtPayment] = []
@@ -982,6 +1039,8 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
         "rules": list(rules),
         "checks": {
             "orders_unique": len(orders),
+            "summary_rows_skipped": summary_rows_skipped,
+            "repeated_order_rows": repeated_order_rows,
             "payments_joined": len(payments),
             "zero_payments": zero_payments,
             "orphan_payments": 0,
