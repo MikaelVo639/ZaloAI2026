@@ -9,6 +9,7 @@ import inspect
 import re
 from calendar import monthrange
 from collections import Counter, defaultdict
+from dataclasses import replace
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
@@ -37,7 +38,12 @@ from datamate.contracts import (
     DebtPayment,
     Plan,
 )
-from datamate.ingestion.business_measures import load_deliveries, load_delivery_order_dates, load_expenses
+from datamate.ingestion.business_measures import (
+    load_deliveries,
+    load_delivery_order_dates,
+    load_expenses,
+)
+from datamate.ingestion.credit_terms import CreditTerm, load_credit_terms
 from datamate.ingestion.debt import DebtSourceError, _coverage_day, load_debt_ledger
 from datamate.ingestion.drugs import Drug, ingredient_key, load_drugs
 from datamate.ingestion.expiry import load_lots
@@ -51,6 +57,12 @@ from datamate.ingestion.purchases import (
 from datamate.ingestion.readme_sales import field_meanings
 from datamate.ingestion.sales import Sale
 from datamate.ingestion.source_names import filename_key
+from datamate.ingestion.staff import (
+    StaffDirectory,
+    StaffSourceError,
+    load_repair_staff,
+    load_staff_directory,
+)
 from datamate.ingestion.stock import (
     StockItem,
     StockSnapshot,
@@ -285,7 +297,22 @@ def product_names(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -
     if not prepare_sales(cache, catalog, rulebook)["ok"]:
         return []
     sales, _ = cache["sales"]
-    return sorted({str(n) for s in sales for n in (s.product_name, s.product_id) if n})
+    return sorted({str(n) for s in sales for n in (s.product_name, s.product_id, s.phone_catalogue_name) if n})
+
+
+def phone_model(name: str) -> str:
+    return re.split(r"\s+\d+\s*gb\b", fold(name), maxsplit=1)[0]
+
+
+def _repair_staff_directory(cache: dict[str, Any], catalog: Catalog
+                            ) -> StaffDirectory | StaffSourceError | OSError:
+    key = ("repair_staff", _catalog_key(catalog), catalog.readme)
+    if key not in cache:
+        try:
+            cache[key] = load_repair_staff(catalog)
+        except (OSError, StaffSourceError) as exc:
+            cache[key] = exc
+    return cache[key]
 
 
 def vocabulary(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -> dict[str, list[str]]:
@@ -296,6 +323,23 @@ def vocabulary(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -> d
     result = {field: sorted({getattr(s, field) for s in sales if getattr(s, field)})
               for field in ("product_group", "customer_group", "product_brand",
                             "product_size")}
+    if any(row.staff_id for row in sales):
+        try:
+            directory = load_staff_directory(catalog)
+        except (OSError, StaffSourceError):
+            pass
+        else:
+            result["staff_terms"] = [f"seller|{name}|{code}" for name, code
+                                     in directory.codes_by_unique_name.items()]
+        repair = _repair_staff_directory(cache, catalog)
+        if not isinstance(repair, Exception) and repair.source:
+            result["repair_staff"] = [repair.source]
+            result.setdefault("staff_terms", []).extend(
+                f"repair|{fold(name)}|{name}" for name in repair.names_by_code)
+    result["phone_model"] = sorted({phone_model(s.phone_catalogue_name) for s in sales
+                                    if s.phone_catalogue_name and fold(s.phone_item_kind or "")
+                                    in {"may moi", "may cu"}})
+    result["phone_kind"] = sorted({fold(s.phone_item_kind) for s in sales if s.phone_item_kind})
     # Đợt 3 gói 1: payment method / channel labels and the words that name them.
     for kind, attribute in PAYMENT_FIELDS.items():
         labels = {getattr(s, attribute) for s in sales if getattr(s, attribute)}
@@ -359,15 +403,17 @@ INTENTS = (frozenset({"revenue", "order_count", "top_products", "average_order",
                      "purchase_total", "top_supplier", "main_supplier", "avg_purchase_price",
                      "delivered_order_count", "purchase_sales_difference", "daily_sale_price"})
            | C01_INTENTS | DEBT_INTENTS | INDEPENDENT_INTENTS | SALES_MEASURE_INTENTS
-           | {"top_product_brand", "average_amount_due", "average_phone_revenue"})
+           | {"top_product_brand", "average_amount_due", "average_phone_revenue", "credit_due_count"})
 # Plan filters this backend applies, and the intents each one may be combined with.
 FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock", "stock_split",
                                      "avg_purchase_price", "earliest_expiry",
                                      "purchase_sales_difference"}),
               "shift": frozenset({"revenue", "order_count"}),
               "staff": frozenset({"revenue", "order_count"}),
+              "phone_kind": frozenset({"revenue", "quantity"}),
+              "phone_model": frozenset({"quantity"}),
               "size": frozenset({"quantity"}),
-              "product_group": frozenset({"revenue", "top_products"}),
+              "product_group": frozenset({"revenue", "top_products", "order_count", "quantity"}),
               "customer_group": frozenset({"revenue", "average_order"}),
               "ingredient": frozenset({"revenue"}),
               "prescription": frozenset({"revenue"}),
@@ -396,6 +442,12 @@ def unsupported(plan: Plan) -> str:
                 or not isinstance(t.value, Decimal) or not t.value.is_finite()
                 or t.value < 1 or t.value != t.value.to_integral()):
             return "Invalid order cohort, observation date or delivery threshold"
+        return ""
+    if plan.intent == "credit_due_count":
+        if (plan.observed_on is None or plan.start > plan.end or plan.top_k != 1
+                or plan.filters or plan.periods or plan.shape or plan.unit or plan.rank_by
+                or plan.comparison or plan.compare_start or plan.compare_end or plan.threshold):
+            return "Invalid credit order observation or due-date window"
         return ""
     if plan.observed_on is not None:
         return "Observation date is only supported for delivery order cohorts"
@@ -468,7 +520,7 @@ def unsupported(plan: Plan) -> str:
         if plan.compare_start is not None or plan.compare_end is not None:
             return "Share does not support comparison periods"
         group_share = (plan.intent == "revenue" and len(plan.filters) == 1
-                       and plan.filters[0].field in GROUP_FIELDS + DRUG_FIELDS
+                       and plan.filters[0].field in GROUP_FIELDS + DRUG_FIELDS + ("phone_kind",)
                        + tuple(PAYMENT_FIELDS))
         if not group_share and (plan.intent != "count_where" or plan.threshold is None):
             return f"Comparison 'share' for {plan.intent!r} not supported"
@@ -554,6 +606,10 @@ def unsupported(plan: Plan) -> str:
         return f"Ranking by {plan.rank_by!r} not supported"
     if plan.intent == "top_customers" and not plan.rank_by:
         return "Customer ranking needs its measure"
+    sized_group = (plan.intent == "quantity" and not plan.comparison
+                   and tuple(item.field for item in plan.filters) == ("product_group", "product_size"))
+    if sized_group:
+        return ""
     if len(plan.filters) > 1:
         return "Several filters not supported"
     for item in plan.filters:
@@ -621,7 +677,8 @@ def _monthly_sales_start(catalog: Catalog, source: dict[str, Any]) -> tuple[date
 def select_product(sales: list[Sale], value: str) -> list[Sale]:
     """Rows whose product name or code equals the filter value (case/diacritics folded)."""
     key = fold(value)
-    return [s for s in sales if key in (fold(s.product_name or ""), fold(s.product_id or ""))]
+    return [s for s in sales if key in (fold(s.product_name or ""), fold(s.product_id or ""),
+                                        fold(s.phone_catalogue_name or ""))]
 
 
 def select_product_code(sales: list[Sale], code: str) -> list[Sale]:
@@ -1384,6 +1441,53 @@ def change_percent(current: Decimal, previous: Decimal) -> float | None:
     return float(change.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
+def credit_due_count(terms: tuple[CreditTerm, ...], sales: list[Sale],
+                     observed_on: date, start: date, end: date) -> int:
+    credit_ids = {term.order_id for term in terms}
+    placed: dict[str, tuple[date, str]] = {}
+    for row in sales:
+        if row.order_id not in credit_ids:
+            continue
+        state = (row.day, row.status)
+        if placed.setdefault(row.order_id, state) != state:
+            raise ValueError("Credit order has conflicting placement dates or status")
+    if any(term.order_id not in placed or term.due_date < placed[term.order_id][0]
+           or (term.term_days is not None
+               and (term.due_date - placed[term.order_id][0]).days != term.term_days)
+           for term in terms):
+        raise ValueError("Credit terms do not reconcile to the order ledger")
+    return sum(placed[term.order_id][0] <= observed_on
+               and placed[term.order_id][1] != "cancelled"
+               and start <= term.due_date <= end for term in terms)
+
+
+def _answer_credit_due_count(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                             rulebook: str, sales: list[Sale], evidence: dict[str, Any]) -> Candidate:
+    rules = read_rules(rulebook)
+    declaration = next((line for line in catalog.readme.splitlines()
+                        if "chi don ban no co han" in fold(line)), None)
+    if not (rules.until_end_of_day and rules.debt_orders and declaration):
+        return Candidate(reason="Source does not establish that due dates identify credit orders",
+                         evidence=evidence)
+    key = ("credit_terms", _catalog_key(catalog), catalog.readme)
+    try:
+        if key not in cache:
+            cache[key] = load_credit_terms(catalog)
+        terms, source = cache[key]
+        if not terms:
+            return Candidate(reason="Credit terms source is empty", evidence=evidence)
+        value = credit_due_count(terms, sales, plan.observed_on, plan.start, plan.end)
+    except (ValueError, OSError) as exc:
+        return Candidate(reason=str(exc), evidence=evidence)
+    observed, start, end = (d.isoformat() for d in (plan.observed_on, plan.start, plan.end))
+    evidence.update(credit_terms=source, credit_rule=declaration, observed_on=observed,
+                    calculation="Count recorded credit orders by due date through the observation day",
+                    code=_code(f"credit_due_count(terms, sales, date.fromisoformat({observed!r}), "
+                               f"date.fromisoformat({start!r}), date.fromisoformat({end!r}))",
+                               credit_due_count), result=value)
+    return Candidate("number", value, 1.0, "", evidence)
+
+
 def _answer_deliveries(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                        rulebook: str) -> Candidate:
     rules = read_rules(rulebook)
@@ -1706,6 +1810,8 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         "inputs": {"tables": source["tables"], "sales_rows": source["sales_rows"],
                    "data_first_day": prepared["data_first_day"],
                    "data_last_day": prepared["data_last_day"]}}
+    if plan.intent == "credit_due_count":
+        return _answer_credit_due_count(cache, catalog, plan, rulebook, sales, evidence)
     if plan.intent == "revenue_increasing":
         return _answer_revenue_trend(sales, catalog.readme, plan, evidence)
     if plan.compare_start:
@@ -1760,11 +1866,23 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
     if plan.filters and plan.filters[0].field == "shift":
         return _answer_shift(plan, sales, rulebook, evidence)
     if plan.filters and plan.filters[0].field == "staff" or plan.intent == "top_staff":
+        repair = _repair_staff_directory(cache, catalog)
+        if isinstance(repair, Exception):
+            return Candidate(reason=str(repair), evidence=evidence)
+        if repair.source:
+            evidence["staff_roster"] = repair.source
+            sales = [replace(row, staff_id=repair.codes_by_unique_name.get(fold(row.staff_id or "")))
+                     for row in sales]
         return _answer_staff(plan, sales, evidence)
+    if plan.filters and plan.filters[0].field in {"phone_kind", "phone_model"}:
+        if not read_rules(rulebook).average_phone_revenue:
+            return Candidate(reason="Split rulebook does not define sold phone models",
+                             evidence=evidence)
+        return _answer_phone_scope(plan, sales, evidence)
     if plan.filters and plan.filters[0].field in GROUP_FIELDS:
         if plan.intent == "top_products":
             return _answer_product_ranking(plan, sales, cache.get("ranking_eligible"), evidence)
-        return _answer_group(plan, sales, evidence)
+        return _answer_group(plan, sales, evidence, cache.get("ranking_eligible"))
     if plan.filters and plan.filters[0].field in PAYMENT_FIELDS:
         return _answer_payment(plan, sales, evidence)
     if plan.filters and plan.filters[0].field in DRUG_FIELDS:
@@ -1783,10 +1901,13 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         evidence["inputs"].update(product_rows=len(matched), product_codes=sorted(map(str, codes)))
         names_only = (len(codes) > 1 and all(s.product_id_is_name for s in matched)
                       and None not in codes and len({fold(c) for c in codes}) == 1)
-        if len(codes) != 1 and not names_only:
+        catalogue_name = bool(matched) and all(
+            s.product_id_is_name and fold(s.phone_catalogue_name or "") == fold(value)
+            for s in matched)
+        if len(codes) != 1 and not (names_only or catalogue_name):
             return Candidate(reason="Product filter matches no product or several product codes",
                              evidence=evidence)
-        code = None if names_only else next(iter(codes))
+        code = None if names_only or catalogue_name else next(iter(codes))
         if code is not None:
             # Rulebook "Tên gọi": a file with codes identifies the product by its code, so
             # every spelling of that product's name counts ("30ml" and "30 ml").
@@ -2127,7 +2248,64 @@ def _answer_drug_revenue(cache: dict[str, Any], catalog: Catalog, rulebook: str,
     return Candidate("number", result, 1.0, "", evidence)
 
 
-def _answer_group(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Candidate:
+def select_phone_scope(rows: list[Sale], field: str, value: str) -> list[Sale]:
+    phones = {"may moi", "may cu"}
+    selected = []
+    for row in rows:
+        kind = fold(row.phone_item_kind or "")
+        if kind not in phones | {"phu kien"}:
+            raise ValueError("Unclassified item in the phone sales ledger")
+        if field == "phone_model":
+            if kind in phones and not row.phone_catalogue_name:
+                raise ValueError("Missing phone catalogue name")
+            matches = kind in phones and phone_model(row.phone_catalogue_name) == value
+        else:
+            matches = kind in phones if value == "dien thoai" else kind == value
+        if matches:
+            selected.append(row)
+    return selected
+
+
+def sold_phones(rows: list[Sale]) -> int:
+    if any(row.quantity_sold is None or not row.quantity_sold.is_finite() or row.quantity_sold < 0
+           or row.quantity_sold != row.quantity_sold.to_integral_value() for row in rows):
+        raise ValueError("Missing or invalid sold phone quantity")
+    return sum(int(row.quantity_sold) for row in rows)
+
+
+def _answer_phone_scope(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Candidate:
+    item = plan.filters[0]
+    if (plan.intent == "quantity" and (plan.unit not in {"chiec", "may"} or item.value == "phu kien")
+            or plan.comparison == "share" and item.value != "may moi"):
+        return Candidate(reason="Unsupported phone unit or share", evidence=evidence)
+    valid = select_valid(sales, plan.start, plan.end)
+    try:
+        rows = select_phone_scope(valid, item.field, item.value)
+        if plan.intent == "quantity":
+            value, kind = sold_phones(rows), "number"
+            call, functions = "sold_phones(rows)", (sold_phones,)
+        elif plan.comparison == "share":
+            phones = select_phone_scope(valid, "phone_kind", "dien thoai")
+            value = share_percent(revenue_total(rows), revenue_total(phones))
+            kind = "percent"
+            call = "share_percent(revenue_total(rows), revenue_total(phones))"
+            functions = (revenue_total, share_percent)
+        else:
+            value, kind = revenue(rows), "number"
+            call, functions = "revenue(rows)", (revenue,)
+    except ValueError as exc:
+        return Candidate(reason=str(exc), evidence=evidence)
+    if value is None:
+        return Candidate(reason="No phone revenue in the period; share undefined", evidence=evidence)
+    evidence["inputs"].update(selected_rows=len(valid), scope_rows=len(rows))
+    evidence.update(calculation="Use catalogue item kind or full phone model, excluding trade-ins",
+                    code=_code(call, select_valid, phone_model, select_phone_scope, *functions),
+                    result=value)
+    return Candidate(kind, value, 1.0, "", evidence)
+
+
+def _answer_group(plan: Plan, sales: list[Sale], evidence: dict[str, Any],
+                  eligible: frozenset[int] | None = None) -> Candidate:
     """Revenue of one product group / customer group, or its share of the whole shop."""
     item = plan.filters[0]
     valid = select_valid(sales, plan.start, plan.end)
@@ -2137,12 +2315,36 @@ def _answer_group(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Ca
             and any(s.customer_id and not s.customer_group for s in valid)):
         return Candidate(reason="A recorded customer's group is unknown in the period",
                          evidence=evidence)
+    if item.field == "product_group" and plan.intent in {"order_count", "quantity"}:
+        product_rows = select_valid(ranking_candidates(sales, eligible), plan.start, plan.end)
+        if any(not row.product_group for row in product_rows):
+            return Candidate(reason="A product's group is missing in the period", evidence=evidence)
+        valid = product_rows
     part_rows = select_group(valid, item.field, item.value)
     evidence["inputs"].update(selected_rows=len(valid), group_rows=len(part_rows))
+    if len(plan.filters) == 2:
+        size = fold(plan.filters[1].value)
+        part_rows = [row for row in part_rows if fold(row.product_size or "") == size]
     part = revenue_total(part_rows)
     window = (f"date.fromisoformat({plan.start.isoformat()!r}), "
               f"date.fromisoformat({plan.end.isoformat()!r})")
     group_call = f"select_group(select_valid(sales, {window}), {item.field!r}, {item.value!r})"
+    if plan.intent == "order_count":
+        value = order_count(part_rows)
+        evidence["inputs"]["selected_orders"] = order_count(valid)
+        evidence.update(calculation="Count distinct orders containing a product from the group",
+                        code=_code("order_count(part_rows)", order_count), result=value)
+        return Candidate("number", value, 1.0, "", evidence)
+    if plan.intent == "quantity":
+        value = quantity_in_unit(part_rows, plan.unit)
+        if value is None or not any(fold(row.base_unit or "") == fold(plan.unit) for row in part_rows):
+            return Candidate(reason="Group products do not have a verified requested unit",
+                             evidence=evidence)
+        result = int(value) if value == value.to_integral_value() else float(value)
+        evidence.update(unit=plan.unit, calculation="Sum base-unit quantities in the group",
+                        code=_code(f"quantity_in_unit(part_rows, {plan.unit!r})", quantity_in_unit),
+                        result=result)
+        return Candidate("number", result, 1.0, "", evidence)
     if plan.intent == "average_order":
         value = average_order_value(part_rows)
         if value is None:

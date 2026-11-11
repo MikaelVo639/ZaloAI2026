@@ -12,7 +12,7 @@ from datamate.evaluation.validation import is_number, validate_record
 ANSWER_TYPES = {
     "revenue": "number", "order_count": "number", "average_order": "number",
     "cancel_count": "number", "cancel_rate": "percent", "best_day": "date",
-    "quantity": "number", "count_where": "number",
+    "quantity": "number", "count_where": "number", "credit_due_count": "number",
     "top_product_brand": "string", "average_amount_due": "number",
     "average_phone_revenue": "number",
     "revenue_increasing": "boolean", "top_debt_customers": "table",
