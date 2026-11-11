@@ -1247,15 +1247,17 @@ _REFERENCES = (
 _PURCHASE_TOTAL = re.compile(
     rf"\btong gia tri cac phieu nhap hang\b|\btong tien hang nhap vao\b|\btong tien nhap hang\b"
     rf"|\bbo ra {_AMOUNT} tien nhap hang\b|\bnhap hang het {_AMOUNT} tien\b"
-    rf"|\btien nhap hang (?=thang nay tong {_AMOUNT}$)")
+    rf"|\btien nhap hang (?=thang nay tong {_AMOUNT}$)"
+    r"|\btien hang nhap(?: vao| vo)?\b")
 _TOP_SUPPLIER = re.compile(
     r"\bnha cung cap nao duoc cua hang nhap hang (?:nhieu|nhiu) tien nhat\b"
     r"|\bcua hang nhap (?:nhieu|nhiu) tien hang nhat tu nha cung cap nao\b"
     r"|\btien nhap hang tu nha cung cap nao cao nhat\b"
-    r"|\bnha cung cap nao co tong tien nhap hang (?:cao|lon) nhat\b")
+    r"|\bnha cung cap nao co tong tien nhap hang (?:cao|lon) nhat\b"
+    r"|\b(?:cua hang )?nhap tien hang cua (?:nha cung cap|ncc) nao (?:cao|lon) nh(?:at|ut)\b")
 _MAIN_SUPPLIER = re.compile(r"\bnha cung cap chinh\b")
 _PURCHASE_DIFFERENCE = re.compile(
-    r"\b(?:(?:so|tong) (?P<unit>[a-z]+) nhap tru (?:so|tong) (?P=unit) ban"
+    r"\b(?:(?:so|tong) (?P<unit>[a-z]+) nhap(?: vao| vo)? tru (?:so|tong) (?P=unit) ban"
     r"|(?:so nhap tru so|nhap tru) ban)(?: ra)?\b")
 
 
@@ -1336,7 +1338,7 @@ def _purchase(text: str, today: date, rules: Rules) -> Plan | None:
             return None
         leftover = re.sub(r"\b(?:la ai|la nha cung cap nao|minh)\b", " ", leftover)
     elif intent == "purchase_total":
-        leftover = re.sub(rf"\btong {_AMOUNT}\b", " ", leftover)
+        leftover = re.sub(rf"\btong (?:la )?{_AMOUNT}\b", " ", leftover)
     if _FILLERS.sub(" ", leftover).strip() or start > min(end, today):
         return None
     rows = ("purchase_total", intent) if intent != "purchase_total" else (intent,)

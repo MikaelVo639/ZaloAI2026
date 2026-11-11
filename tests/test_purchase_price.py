@@ -1,8 +1,8 @@
 """Average purchase price of one product in a month (rulebook §5). Shops are synthetic."""
 import sqlite3
 import tempfile
-from contextlib import closing
 import unittest
+from contextlib import closing
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -129,6 +129,19 @@ class PurchasePriceTests(unittest.TestCase):
         candidate = check_executed(compute.answer_plan({}, self.catalog(readme, files),
                                                        parsed, rules), parsed)
         self.assertEqual((candidate.type, candidate.answer), ("number", 6), candidate.reason)
+        wording = Question("variant", "b", "Bia Tiger lon tháng 6/2026 lấy số lon nhập vô "
+                           "trừ số lon bán ra thì được bao nhiêu?", query.as_of_date)
+        wording_plan = plan_question(wording, read_rules(rules), ["Bia Tiger lon"])
+        self.assertEqual(wording_plan, parsed)
+        wording_answer = check_executed(compute.answer_plan({}, self.catalog(readme, files),
+                                                           wording_plan, rules), wording_plan)
+        self.assertEqual((wording_answer.type, wording_answer.answer), ("number", 6))
+        for text in ("Bia Tiger lon tháng 6/2026 số thùng nhập vô trừ số lon bán ra bao nhiêu?",
+                     "Bia Tiger lon tháng 6/2026 lấy số lon nhập vô trừ số lon bán ra "
+                     "thì được bao nhiêu, chỉ tính tiền mặt?"):
+            with self.subTest(text=text):
+                self.assertIsNone(plan_question(Question("extra", "b", text, query.as_of_date),
+                                                read_rules(rules), ["Bia Tiger lon"]))
         without_factor = self.catalog(readme.replace("  - Bia Tiger lon: 1 thùng = 10 lon\n", ""),
                                       files)
         self.assertEqual(compute.answer_plan({}, without_factor, parsed, rules).type, "abstain")

@@ -751,3 +751,38 @@ câu để ghép đủ 10 ID. Sáu ca thiếu danh tính ở bảng là các ID 
 
 Đây là kiểm kê phạm vi dữ liệu. Báo cáo sử dụng các benchmark đã có,
 gồm full train và robustness của main cùng các lượt đích đã hoàn tất.
+
+## Nhập hàng trong phần Mikael, nhóm 19, 21, 23 và 24 — 11/11/2026
+
+Đối chứng dùng `main@a82648c`, sau #47. Bộ tính đã có phép nhập trừ bán,
+tổng tiền nhập và xếp hạng nhà cung cấp theo tiền. Parser nhận thêm “nhập
+vô”, “tiền hàng nhập” và câu hỏi “nhập tiền hàng của NCC nào lớn nhất”,
+giữ kỳ, đơn vị và tên hàng đã đọc từ nguồn.
+
+| Nhóm được phân công | Đối chứng | Bản sửa | Tổng câu |
+| --- | ---: | ---: | ---: |
+| 19. Lý do hủy hoặc trả hàng | 0 | 0 | 2 |
+| 21. Đơn có nhiều đợt giao | 3 | 3 | 3 |
+| 23. Chênh lệch nhập trừ bán | 1 | 2 | 2 |
+| 24. Tiền nhập và nhà cung cấp | 0 | 2 | 2 |
+| **Tổng có đáp án** | **4** | **7** | **9** |
+
+Hai câu hỏi lý do hủy hoặc trả hàng giữ `abstain`. Rà header các bảng
+phát hành của hai shop cho thấy sổ đơn thiếu trường lý do. Các cột ghi
+chú tìm được nằm ở danh mục hàng, danh mục khách hoặc sổ nhập.
+
+Regression dùng shop giả lập để đối chiếu cùng phép tính trước và sau
+chuẩn hóa, gồm nhập trừ bán có quy đổi, đơn hủy/trả, tiền nhập theo phiếu
+và xếp hạng theo tiền. Bộ lọc nhà cung cấp chưa hỗ trợ, hai đơn vị khác
+nhau, xếp hạng theo số lần và yêu cầu so sánh vẫn được giữ ở đường
+`abstain`.
+
+Lượt public đủ 1.000 mã tăng từ 530 lên 533 câu có đáp án, cùng 5 câu
+`unanswerable`. Tổng có kết quả tăng từ 535 lên 538. Cả ba đáp án thêm
+nằm trong phân công Mikael, các kết quả cũ được giữ nguyên. Public chưa
+có nhãn để xác nhận độ đúng.
+
+A/B đủ 3.000 câu train cho cùng 2.925 đúng, 1 sai và 74 abstain, các bản ghi
+khớp nhau theo mã. Holdout 630 câu cùng 622 đúng, 0 sai và 8 abstain.
+Bộ chấm là local proxy. `uv sync --locked`, smoke và unittest qua. Unittest
+chạy 508 ca, 507 qua và 1 skip. Ruff qua trên các file Python sửa.
