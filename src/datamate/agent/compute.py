@@ -64,7 +64,7 @@ from datamate.ingestion.stock import (
 )
 from datamate.semantics.payment import FIELDS as PAYMENT_FIELDS
 from datamate.semantics.payment import label_terms
-from datamate.semantics.rule_spec import enabled_specs
+from datamate.semantics.rule_spec import RuleSpec, enabled_specs, ground
 from datamate.semantics.rules import DEBT_TABLE_FEATURES, line_with, read_rules
 from datamate.semantics.text import fold
 
@@ -740,10 +740,15 @@ def _stockout_rule(rulebook: str) -> str:
     return line_with(rulebook, "mat hang het hang cuoi ngay", "mua ve de ban", "ton kho bang 0")
 
 
-def _answer_rule_rank(cache: dict[str, Any], catalog: Catalog, plan: Plan,
-                      rulebook: str) -> Candidate:
-    """A ranking defined by an enabled rule spec of the current split (rule_spec.py)."""
-    specs = [spec for spec in enabled_specs(rulebook) if spec.nguon in plan.evidence]
+def _answer_rule_rank(cache: dict[str, Any], catalog: Catalog, plan: Plan, rulebook: str,
+                      specs: tuple[RuleSpec, ...] | None = None) -> Candidate:
+    """A ranking defined by an enabled rule spec of the current split (rule_spec.py).
+
+    The spec must cite a verbatim row of this rulebook and pass ``ground`` again here."""
+    lines = {line.strip() for line in rulebook.splitlines()}
+    specs = [spec for spec in (enabled_specs(rulebook) if specs is None else specs)
+             if spec.nguon in plan.evidence and spec.nguon.strip() in lines
+             and not ground(spec)]
     evidence: dict[str, Any] = {"intent": plan.intent, "start": plan.start.isoformat(),
                                 "end": plan.end.isoformat(), "rules": plan.evidence}
     if len(specs) != 1 or f"{specs[0].doi_tuong}:{specs[0].chi_tieu}" != plan.rank_by:
@@ -1490,10 +1495,11 @@ def daily_sale_price(sales: list[Sale], day: date, unit: str) -> Decimal | None:
 
 
 def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
-                rulebook: str = "") -> Candidate:
+                rulebook: str = "", specs: tuple[RuleSpec, ...] | None = None) -> Candidate:
     """Answer a plan; an abstain becomes ``unanswerable`` only when the rulebook's absence
-    row applies and the business records no trace of what the intent needs (absence.py)."""
-    candidate = _answer_plan(cache, catalog, plan, rulebook)
+    row applies and the business records no trace of what the intent needs (absence.py).
+    ``specs``: the agent's enabled rule specs (model-filled ones included) for rule_rank."""
+    candidate = _answer_plan(cache, catalog, plan, rulebook, specs)
     if candidate.type != "abstain" or plan.intent not in INTENT_CONCEPT:
         return candidate
     rule = _absence_rule(rulebook)
@@ -1509,7 +1515,7 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
 
 
 def _answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
-                 rulebook: str = "") -> Candidate:
+                 rulebook: str = "", specs: tuple[RuleSpec, ...] | None = None) -> Candidate:
     reason = unsupported(plan)
     if reason:
         return Candidate(reason=reason)
@@ -1524,7 +1530,7 @@ def _answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
     if plan.intent in ("purchase_total", "top_supplier"):
         return _answer_purchase(cache, catalog, plan)
     if plan.intent == "rule_rank":
-        return _answer_rule_rank(cache, catalog, plan, rulebook)
+        return _answer_rule_rank(cache, catalog, plan, rulebook, specs)
     if plan.intent == "avg_purchase_price":
         return _answer_avg_purchase(cache, catalog, plan, rulebook)
     c01_rules = ()

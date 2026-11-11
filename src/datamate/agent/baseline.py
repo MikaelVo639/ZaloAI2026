@@ -139,9 +139,11 @@ class BaselineAgent:
         if failure is not None:
             failure.evidence = {**planned, **failure.evidence}
             return failure
+        specs = ({"specs": self._rule_specs(context.split.rulebook)}
+                 if plan.intent == "rule_rank" else {})
         result = self.worker.run(self.compute, self.question_timeout,
                                  catalog=context.catalog, plan=plan,
-                                 rulebook=context.split.rulebook)
+                                 rulebook=context.split.rulebook, **specs)
         if not result.ok:
             return _execution_failure("Calculation", result, planned)
         candidate = check_executed(result.value, plan)

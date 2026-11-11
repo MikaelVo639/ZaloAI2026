@@ -210,25 +210,36 @@ Lỗi tính toán hay thiếu adapter không bao giờ được coi là bằng c
 
 ## Luật xếp hạng có tên (`semantics/rule_spec.py`, `agent/rule_rank.py`)
 
-Mỗi split, một lần: mỗi dòng rulebook có tên dạng "… nhất" được đọc thành một JSON cố định
-(`doi_tuong`, `chi_tieu`, `chon`, `don_hop_le`, `dieu_kien`, `cach_goi`, `nguon`) chỉ
-dùng giá trị trong danh sách cho phép. `ground` kiểm mọi giá trị có chỗ dựa trong chữ của
-dòng (số phải ghi trong dòng, "số ngày" phải có chữ "ngày", số lạ trong dòng làm tắt luật).
-Thiếu chỗ dựa, mơ hồ hay cần phép tính chưa có thì **tắt** luật, câu liên quan abstain.
-Mọi luật (bật/tắt, lý do) ghi trong `run.json` mục `rule_specs`;
-`scripts/rule_specs.py --split <split>` in cùng báo cáo.
+Mỗi split, một lần: mỗi dòng rulebook có tên dạng "… nhất" mà `read_rules` **chưa** nhận
+được đọc thành một JSON cố định (`doi_tuong`, `chi_tieu`, `chon`, `don_hop_le`,
+`dieu_kien`, `cach_goi`, `nguon`) chỉ dùng giá trị trong danh sách cho phép. Dòng
+`read_rules` đã nhận (luật có code viết tay, kiểm bằng nhãn train) không bao giờ bị đọc lại.
 
+- **Đối tượng lấy từ định nghĩa**: chủ ngữ mở đầu ("khách có …", "ngày có …"). Tên chỉ
+  phân xử "người có …". Tên và định nghĩa chỉ hai đối tượng khác nhau, hoặc không có chủ
+  ngữ rõ, thì tắt.
+- **Kiểm chiều ngược**: phần nào hiểu được thì lấy ra khỏi định nghĩa; còn sót từ mang
+  nghĩa (huỷ, trả, ngày, số, lãi, lượt, phiếu, bảo hành, kể cả, không …) thì tắt.
+  `ground` thêm: mọi giá trị có chỗ dựa trong chữ của dòng, và mọi từ nội dung của định
+  nghĩa được một trường giải thích (áp cho cả JSON do model điền).
+- Mọi luật (bật/tắt, lý do) ghi trong `run.json` mục `rule_specs`;
+  `scripts/rule_specs.py --split <split>` in cùng báo cáo. Xem báo cáo của split khác train
+  là được; sửa bộ đọc theo nó là chỉnh theo split đó.
 - Câu hỏi chỉ dùng luật khi grammar không lập được Plan, câu nêu đúng một `cach_goi` của
   một luật đang bật và một kỳ; chữ còn lại chỉ được là từ hỏi/lịch sự.
 - Bộ tính chung (`rule_rank.py`) nhóm theo đối tượng, đo theo chỉ tiêu, lọc theo điều kiện,
   xếp theo chọn; bằng nhau theo dòng "bằng nhau" của rulebook, không có dòng đó (hay xếp
   ngày) mà hoà ở vị trí cắt thì abstain. Khung giờ chưa có format đáp án nên đang tắt.
-- Đường model (`agent/rule_spec_model.py`): chỉ cho dòng xếp hạng mà bộ đọc code để tắt;
-  hai prompt khác thứ tự, hai JSON phải giống hệt và qua `ground` mới bật. Chưa nối vào
-  agent; bật sau khi đo trên L4.
-- Nghiệm thu với rulebook train: "Nhân viên bán giỏi nhất" bật (nhân viên / doanh thu /
-  lớn nhất), "Hàng lời nhất" và "Lô gần hết hạn nhất" tắt, khớp bản viết tay. Bộ đọc và test
-  dùng câu chữ tự soạn; không đọc rulebook public để chỉnh bộ đọc.
+- **Model** (`configs/rewrite.toml`, `agent/rule_spec_model.py`): một lần mỗi split, với dòng
+  xếp hạng bộ đọc code để tắt, model điền JSON từ hai prompt khác thứ tự; hai JSON phải
+  giống hệt và qua `ground` mới bật. Nhật ký trong `run.json` mục `rule_spec_model`. Bộ tính
+  nhận spec qua worker và kiểm lại: `nguon` phải là dòng nguyên văn của rulebook đang chạy
+  và vẫn qua `ground`.
+- **Viết lại câu hỏi**: tên các luật đang bật được đưa vào prompt viết lại làm câu đích
+  ("<tên luật> <kỳ> là ai?"); câu viết lại vẫn qua mọi kiểm tra cũ và phải được grammar
+  hoặc bộ đọc luật lập Plan giống nhau ở hai lần viết.
+- Bài thử giấu luật: `scripts/hidden_rule_check.py` bỏ lần lượt từng dòng được câu trả lời
+  train trích dẫn và trả lời lại; không câu nào được thành sai (53 dòng, 0 câu sai mới).
 
 ## Phần Plan còn cần Semantics + Data thống nhất
 

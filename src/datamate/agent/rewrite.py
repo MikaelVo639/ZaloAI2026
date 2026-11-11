@@ -22,7 +22,9 @@ from collections.abc import Iterable
 from typing import Any
 
 from datamate.agent.local_plan import LocalPlanAgent
+from datamate.agent.rule_spec_model import model_specs
 from datamate.contracts import BusinessContext, Candidate, Plan, Question
+from datamate.semantics.rule_spec import enabled_specs
 from datamate.semantics.text import fold, normalize_question
 
 REWRITE_CONFIDENCE = 0.5  # fixed diagnostic score, not a calibrated probability
@@ -205,10 +207,22 @@ def select_examples(question: str, k: int = 6) -> list[tuple[str, str]]:
     return [EXAMPLES[i] for i in scored[:k]]
 
 
-def build_rewrite_messages(question: str, examples: list[tuple[str, str]]) -> list[dict[str, str]]:
+def build_rewrite_messages(question: str, examples: list[tuple[str, str]],
+                           rule_names: Iterable[str] = ()) -> list[dict[str, str]]:
+    """Prompt; ``rule_names`` are the split's enabled named rankings, offered as standard
+    wordings ("<tên luật> tháng 2/2026 là ai?") for questions with the same meaning."""
     shots = "\n".join(f"Câu hỏi: {raw}\nViết lại: {standard}" for raw, standard in examples)
-    return [{"role": "system", "content": SYSTEM_PROMPT},
+    system = SYSTEM_PROMPT
+    names = [name for name in rule_names if name]
+    if names:
+        system += ("\nThis shop's rulebook also names these rankings; when the question asks "
+                   "for exactly one of them, restate it as '<name> <period> là ai/là gì/là ngày "
+                   "nào?' keeping the name exactly: " + "; ".join(names))
+    return [{"role": "system", "content": system},
             {"role": "user", "content": f"{shots}\nCâu hỏi: {question}\nViết lại:"}]
+
+
+SPEC_MAX_NEW_TOKENS = 320  # one rule spec JSON
 
 
 def parse_rewrite(text: str) -> str | None:
@@ -233,6 +247,29 @@ class RewriteAgent(LocalPlanAgent):
         if type(examples) is not int or not 1 <= examples <= len(EXAMPLES):
             raise ValueError("examples must be between 1 and the number of examples")
         self.votes, self.examples = votes, examples
+        self.rule_spec_audit: list[dict[str, Any]] = []
+
+    def _rule_specs(self, rulebook: str) -> tuple:
+        """Deterministic specs plus model-filled ones for ranking rows the reader leaves
+        off, once per rulebook. Without the model: the deterministic specs only."""
+        cache = self.__dict__.setdefault("_spec_cache", {})
+        if rulebook in cache:
+            return cache[rulebook]
+        if self._ensure_model() is not None:
+            cache[rulebook] = enabled_specs(rulebook)
+            return cache[rulebook]
+
+        def generate(messages: list[dict[str, str]]) -> str | None:
+            result = self.planner_worker.run(
+                self.generate, self.model_timeout, messages=messages,
+                max_input_tokens=self.max_input_tokens, max_new_tokens=SPEC_MAX_NEW_TOKENS)
+            return result.value.get("text", "") if result.ok else None
+
+        results, audit = model_specs(rulebook, generate)
+        self.rule_spec_audit.append({
+            "rulebook_sha256": hashlib.sha256(rulebook.encode()).hexdigest(), "rows": audit})
+        cache[rulebook] = tuple(r.spec for r in results if r.spec is not None)
+        return cache[rulebook]
 
     def answer(self, question: Question, context: BusinessContext) -> Candidate:
         plan = self._plan(question, context)
@@ -248,9 +285,12 @@ class RewriteAgent(LocalPlanAgent):
         for labels in self._vocabulary(context).values():
             names.extend(labels)
         chosen = select_examples(question.question, self.examples)
+        rule_names = [spec.nguon.strip().strip("|").split("|")[0].strip()
+                      for spec in self._rule_specs(context.split.rulebook)]
         # Independent restatements: the same examples, most similar first, then last.
-        prompts = [build_rewrite_messages(question.question, chosen),
-                   build_rewrite_messages(question.question, chosen[::-1])][:self.votes]
+        prompts = [build_rewrite_messages(question.question, chosen, rule_names),
+                   build_rewrite_messages(question.question, chosen[::-1], rule_names)
+                   ][:self.votes]
         evidence: dict[str, Any] = {"model": self._model_info,
                                     "planner_confidence": REWRITE_CONFIDENCE,
                                     "rewrites": []}

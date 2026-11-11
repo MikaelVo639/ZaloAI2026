@@ -173,7 +173,8 @@ def predict(data_dir: Path, output_dir: Path, config: Config,
                 "questions_sha256": hashlib.sha256((split.root / "questions.jsonl").read_bytes()).hexdigest(),
                 "calendar_sha256": hashlib.sha256(split.calendar_path.read_bytes()).hexdigest(),
                 "models": agent.models if isinstance(agent, LocalPlanAgent) else [],
-                "rule_specs": json.loads(rule_spec_report(split.rulebook))}
+                "rule_specs": json.loads(rule_spec_report(split.rulebook)),
+                "rule_spec_model": getattr(agent, "rule_spec_audit", [])}
     (output_dir / "run.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest
 

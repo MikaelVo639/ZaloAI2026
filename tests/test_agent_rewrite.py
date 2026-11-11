@@ -186,3 +186,53 @@ class RewriteAgentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# A synthetic ranking row the deterministic reader leaves off ("đơn nhiều nhất" matches no
+# measure pattern) and a fake model fills; rewrites may then target its name.
+RULE_ROW = "| Món đắt hàng nhất | món có đơn nhiều nhất |"
+RULE_SPEC = {"ten": "mon_dat_hang_nhat", "cach_goi": ["mon dat hang nhat"],
+             "doi_tuong": "mat_hang", "chi_tieu": "so_don", "chon": "lon_nhat",
+             "don_hop_le": "luat_chung", "dieu_kien": {}, "mau_so": "",
+             "kieu_dap_an": "string", "nguon": "ignored"}
+RULE_REWRITE = "Món đắt hàng nhất tháng 8/2026 là món gì?"
+
+
+def rule_generate(cache, messages, max_input_tokens, max_new_tokens):
+    if messages[0]["content"].startswith("Convert ONE"):
+        return {"text": json.dumps(RULE_SPEC, ensure_ascii=False)}
+    if "Món đắt hàng nhất" not in messages[0]["content"]:
+        return {"text": UNSURE}  # the rule name must be offered to the rewrite
+    return {"text": RULE_REWRITE}
+
+
+class RewriteRuleSpecTests(unittest.TestCase):
+    agent = RewriteAgentTests.agent
+
+    def setUp(self):
+        RewriteAgentTests.setUp(self)
+        from dataclasses import replace
+        self.split = replace(self.split, rulebook=self.split.rulebook + "\n" + RULE_ROW + "\n")
+        self.context = BusinessContext(self.split, self.context.catalog)
+
+    def test_model_fills_an_off_ranking_row_once_and_answers_its_name(self):
+        from datamate.semantics.rule_spec import enabled_specs
+        self.assertEqual(enabled_specs(self.split.rulebook), ())
+        agent = self.agent(rule_generate)
+        direct = agent.answer(Question("q1", "demo_csv", "Tháng 8/2026 món đắt hàng nhất là "
+                                       "món gì?", date(2026, 8, 27)), self.context)
+        self.assertEqual((direct.type, direct.answer), ("string", "Cà phê sữa"), direct.reason)
+        self.assertEqual(direct.evidence["spec"]["nguon"], RULE_ROW)
+        self.assertEqual([r["decision"] for r in agent.rule_spec_audit[0]["rows"]], ["on"])
+        rewritten = agent.answer(Question("q2", "demo_csv", "th8/2026 quán bán món nào ra "
+                                          "nhiều đơn nhứt", date(2026, 8, 27)), self.context)
+        self.assertEqual((rewritten.type, rewritten.answer), ("string", "Cà phê sữa"),
+                         rewritten.reason)
+        self.assertEqual(rewritten.confidence, 0.5)
+        self.assertEqual(len(agent.rule_spec_audit), 1)  # once per rulebook
+
+    def test_without_the_model_the_rule_stays_off(self):
+        agent = self.agent(rule_generate, load=failing_load)
+        candidate = agent.answer(Question("q1", "demo_csv", "Tháng 8/2026 món đắt hàng nhất "
+                                          "là món gì?", date(2026, 8, 27)), self.context)
+        self.assertEqual(candidate.type, "abstain")
