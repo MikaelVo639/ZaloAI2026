@@ -68,6 +68,7 @@ from datamate.ingestion.stock import (
     StockSnapshot,
     StockSourceError,
     load_conversions,
+    load_resale_products,
     load_stock,
     load_stock_costs,
 )
@@ -395,6 +396,7 @@ LOT_INTENTS = frozenset({"earliest_expiry", "expiring_lot_count", "expiring_lot_
 MONTHLY_MEASURE_INTENTS = frozenset({"delivery_count", "gross_profit", "top_gross_profit", "net_profit"})
 SALES_MEASURE_INTENTS = (MONTHLY_MEASURE_INTENTS - {"delivery_count"}) | {"unsold_count"}
 INDEPENDENT_INTENTS = LOT_INTENTS | {"stock", "stock_split", "delivery_count", "stock_value",
+                                    "out_of_stock_count",
                                     "delivered_order_count", "purchase_total", "top_supplier",
                                     "main_supplier"}
 INTENTS = (frozenset({"revenue", "order_count", "top_products", "average_order",
@@ -809,8 +811,16 @@ def debt_flow(ledger: DebtLedger, start: date, end: date,
 
 def _debt_customer(ledger: DebtLedger, name: str) -> tuple[str | None, int]:
     """The one customer key whose name folds to ``name``; (None, matches) otherwise."""
-    keys = {_debt_key(order, ledger) for order in ledger.orders
-            if order.customer_name and fold(order.customer_name) == name}
+    keys = set()
+    for order in ledger.orders:
+        if not order.customer_name:
+            continue
+        # Some exports append a telephone to the display name after a separator.
+        # Preserve the customer code and reject any ambiguous resulting lookup.
+        display = order.customer_name
+        bare = re.sub(r"\s+-\s+0(?:[ .-]*\d){9}\s*$", "", display)
+        if name in (fold(display), fold(bare)):
+            keys.add(_debt_key(order, ledger))
     keys.discard(None)
     return (next(iter(keys)), 1) if len(keys) == 1 else (None, len(keys))
 
@@ -1319,8 +1329,17 @@ def _answer_stock(cache: dict[str, Any], catalog: Catalog, plan: Plan,
     evidence.update(stock_source=snapshot.source, stock_convention=snapshot.convention,
                     stock_day=snapshot.day.isoformat())
     if plan.end != snapshot.day:
-        return Candidate(reason="Stock is known only at the end of the last data day",
-                         evidence=evidence)
+        if plan.end > snapshot.day:
+            return Candidate(reason="Stock date is after the documented data end",
+                             evidence=evidence)
+        try:
+            snapshot = load_stock(catalog, as_of=plan.end)
+        except StockSourceError as exc:
+            return Candidate(reason=str(exc), evidence=evidence)
+        if snapshot.day != plan.end:
+            return Candidate(reason="Stock is known only at the end of the last data day",
+                             evidence=evidence)
+        evidence["stock_day"] = snapshot.day.isoformat()
     name = plan.filters[0].value
     # Always load (or reuse) this business's sales so the codes used for matching never
     # depend on which question the worker answered before; a failed load means no codes.
@@ -1582,7 +1601,23 @@ def _answer_inventory_measure(cache: dict[str, Any], catalog: Catalog, plan: Pla
                 "rules": plan.evidence}
     kind = "number"
     try:
-        if plan.intent == "stock_value":
+        if plan.intent == "out_of_stock_count":
+            rule = next((line for line in rulebook.splitlines() if all(
+                phrase in fold(line) for phrase in ("mat hang het hang cuoi ngay",
+                                                   "mua ve de ban", "ton kho bang 0"))), "")
+            if not rule or start != end:
+                raise ValueError("Current rulebook does not define end-of-day stockouts")
+            snapshot = _stock_snapshot(cache, catalog)
+            if isinstance(snapshot, StockSourceError):
+                raise snapshot
+            if snapshot.day != end:
+                raise ValueError("No complete inventory snapshot at the requested cutoff")
+            resale, source = load_resale_products(catalog)
+            value = out_of_stock_count(snapshot.items, resale)
+            code = _code("out_of_stock_count(snapshot.items, resale)", out_of_stock_count)
+            sources = [snapshot.source, source]
+            evidence["rules"] = (*plan.evidence, rule)
+        elif plan.intent == "stock_value":
             if not (rules.stock_value and rules.until_end_of_day):
                 raise ValueError("Current rulebook does not define stock value")
             snapshot = _stock_snapshot(cache, catalog)
@@ -1631,6 +1666,13 @@ def _answer_inventory_measure(cache: dict[str, Any], catalog: Catalog, plan: Pla
         return Candidate(reason=str(exc), evidence=evidence)
     evidence.update(tables=sources, code=code, result=value)
     return Candidate(kind, value, 1.0, "", evidence)
+
+
+def out_of_stock_count(items: tuple[StockItem, ...], resale: dict[str, bool]) -> int:
+    counts = {item.product_id: item.quantity for item in items}
+    if len(counts) != len(items) or counts.keys() != resale.keys():
+        raise ValueError("Stock list and classified catalogue have different product codes")
+    return sum(counts[code] == 0 for code, eligible in resale.items() if eligible)
 
 
 def _answer_sales_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
@@ -1781,7 +1823,7 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return _answer_deliveries(cache, catalog, plan, rulebook)
     if plan.intent == "delivered_order_count":
         return _answer_delivered_orders(cache, catalog, plan, rulebook)
-    if plan.intent in LOT_INTENTS | {"stock_value"}:
+    if plan.intent in LOT_INTENTS | {"stock_value", "out_of_stock_count"}:
         return _answer_inventory_measure(cache, catalog, plan, rulebook)
     if plan.intent in DEBT_INTENTS:
         return _answer_debt_measure(cache, catalog, plan, rulebook)

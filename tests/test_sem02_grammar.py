@@ -44,6 +44,25 @@ def plan(text, today="2026-07-15", book=None, names=()):
 
 
 class MonthsGrammarTests(unittest.TestCase):
+    def test_product_name_that_starts_with_the_requested_unit(self):
+        names = ("Bộ vòi tưới",)
+        for text in ("Số bộ vòi tưới bán được tháng 2/2026 là bao nhiêu?",
+                     "Tháng 2/2026 bán ra bao nhiêu bộ vòi tưới?"):
+            with self.subTest(text=text):
+                result = plan(text, names=names)
+                self.assertEqual((result.intent, result.unit), ("quantity", "bo"))
+                self.assertEqual(result.filters[0].value, names[0])
+
+    def test_listed_revenue_range_in_chronological_order(self):
+        result = plan("Liệt kê doanh thu 3 tháng liên tiếp từ tháng 11/2025 đến tháng "
+                      "1/2026, theo thứ tự thời gian")
+        self.assertEqual(result.shape, "series")
+        self.assertEqual([start for start, _ in result.periods],
+                         [date(2025, 11, 1), date(2025, 12, 1), date(2026, 1, 1)])
+        self.assertIsNone(plan("Doanh thu tháng 2/2026 và tháng 1/2026 theo thứ tự thời gian"))
+        self.assertIsNone(plan("Doanh thu 200000000 tháng liên tiếp kết thúc ở tháng 1/2026 "
+                               "lần lượt là bao nhiêu"))
+
     def test_series_of_months_in_question_order(self):
         for text, first, last in (
                 ("dthu 3 tháng liền nhau kết thúc ở tháng 2/2026 là bnhiu mỗi tháng, từ tháng cũ "

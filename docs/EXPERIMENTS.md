@@ -898,3 +898,45 @@ Checksum mã nguồn của bản tích hợp khớp snapshot đã đo.
 
 `uv sync --locked`, smoke và unittest đều qua. Unittest chạy 515 ca,
 514 qua và 1 skip. Ruff qua trên các file sửa của bước ghép.
+
+
+## Phục hồi 23 câu train có đáp án — 11/11/2026
+
+Đối chứng là main@fe9bd86, cùng dữ liệu 3.000 câu, holdout 630 câu,
+config baseline và scorer local_proxy_v3_table_row_alias_not_official.
+
+Các nguyên nhân được sửa:
+- Benchmark từng nạp package từ checkout khác do dùng chung virtualenv.
+  Runner kiểm tra đường dẫn import của Python đích trước inference, ghi
+  target_python, target_package_path và checksum toàn bộ mã Python thực chạy.
+- Parser bỏ sót cách hỏi số lượng, đơn vị nằm trong tên hàng, lỗi gõ có ngữ cảnh,
+  lời dẫn hỏi nhà cung cấp, giá bán theo viên và từ “mang lại” trong câu lãi gộp.
+- Danh sách doanh thu nhiều tháng chưa nhận yêu cầu thứ tự thời gian.
+  Bổ sung kiểm tra số tháng, thứ tự và giới hạn tối đa 24 tháng.
+- Chưa xử lý kỳ Tết. Kỳ được tra từ calendar của split và kiểm tra rulebook,
+  gồm so với Tết năm trước hoặc kỳ ngay trước Tết có cùng độ dài.
+- Adapter giá vốn chưa nhận danh mục nằm trong sheet của workbook gộp.
+- Tên khách trong export có hậu tố số điện thoại khiến phép tìm tên không khớp.
+  Bỏ hậu tố khi tìm tên, giữ khóa khách và từ chối kết quả có nhiều khóa phù hợp.
+- Tồn kho từ thẻ kho chỉ dùng ngày cuối dữ liệu. Bổ sung cutoff cho nguồn thẻ kho,
+  cùng phép đếm hết hàng đối chiếu đủ mã tồn kho và phân loại hàng mua về để bán.
+
+| Chỉ tiêu local proxy | Đối chứng | Candidate |
+| --- | ---: | ---: |
+| Đúng / sai / abstain, toàn train | 2.926 / 1 / 73 | 2.949 / 1 / 50 |
+| PA toàn train | 0,975000 | 0,982667 |
+| Đúng / sai / abstain, validation | 623 / 0 / 7 | 628 / 0 / 2 |
+| Inference gồm startup, giây | 1.632,556 | 1.653,806 |
+
+Đối chiếu từng ID: phục hồi 23 abstain thành đúng, giữ đủ 2.926 câu đúng,
+không phát sinh câu sai mới và không có lỗi thực thi. Dữ liệu train và validation
+đã được xem. Kết quả là local proxy; public chưa được đo bằng bản sửa này.
+
+Một ca xếp hạng tháng 5/2025 vẫn lệch nhãn. Tính độc lập từ số lượng cơ bản,
+loại cả đơn hủy/trả và dòng phí phục vụ, cho Sài Gòn Special 303 lon và Tiger
+300 lon; nhãn chọn Tiger. Giữ phép tính theo nguồn và giữ nguyên nhãn/scorer.
+
+Smoke qua. Unittest chạy 520 ca, 519 qua và 1 skip. Diff check qua.
+50 câu còn abstain đều có nhãn unanswerable nhưng chưa được chứng nhận thiếu
+dữ liệu độc lập từng ca. Bản cuối chưa được chạy lặp lại để đo tính tái lập.
+Artifacts và bảng audit được giữ ngoài Git trong outputs/eval02/.

@@ -44,6 +44,7 @@ _SQLITE_MOVEMENTS = ("MaHangHoa", "NgayGioPhatSinh", "TonCuoi", "MaChiNhanh")
 _STOCK_COST_PROFILES = (
     ("san_pham", (*_SQLITE_PRODUCTS, "GiaVonHang")),
     ("DanhSachSanPham.xlsx", ("Mã hàng", "Tên hàng", "ĐVT", "Giá vốn")),
+    ("DanhSachSanPham", ("Mã hàng", "Tên hàng", "ĐVT", "Giá vốn")),
     ("BanHang_HangHoa.xlsx", ("ma_sp", "Món", "Đơn vị", "Giá vốn hiện tại")),
 )
 # Known conversion exports with an explicitly referenced source in the README.
@@ -185,6 +186,23 @@ def load_stock_costs(catalog: Catalog) -> tuple[dict[str, Decimal], str]:
     return costs, table.key
 
 
+def load_resale_products(catalog: Catalog) -> tuple[dict[str, bool], str]:
+    """Classify stock codes using the documented product-list export."""
+    fields = ("Mã hàng", "Tên hàng", "ĐVT", "Loại hàng hóa")
+    tables = _named_table(catalog, "DanhSachSanPham.xlsx", fields)
+    if len(tables) != 1:
+        raise StockSourceError("columns", "No unique product list with stock classification")
+    table = tables[0]
+    products = {}
+    for _, row in _records(table, fields):
+        code = str(row["Mã hàng"] or "").strip()
+        kind = fold(row["Loại hàng hóa"] or "")
+        if not code or code in products or kind not in {"hang hoa", "che bien", "dich vu"}:
+            raise StockSourceError("value", "Missing, repeated or unrecognized product classification")
+        products[code] = kind == "hang hoa"
+    return products, table.key
+
+
 def _movement_stock(catalog: Catalog, day: date, convention: str) -> StockSnapshot:
     movements = _named_table(catalog, "the_kho", _SQLITE_MOVEMENTS)
     products = _named_table(catalog, "san_pham", _SQLITE_PRODUCTS)
@@ -227,7 +245,7 @@ def _movement_stock(catalog: Catalog, day: date, convention: str) -> StockSnapsh
     return StockSnapshot(day, tuple(items), movements[0].key, convention)
 
 
-def load_stock(catalog: Catalog) -> StockSnapshot:
+def load_stock(catalog: Catalog, *, as_of: date | None = None) -> StockSnapshot:
     movement_convention = next((line.strip() for line in catalog.readme.splitlines()
                                 if fold(line.partition(":")[0]) == "ton kho"
                                 and "the kho toncuoi la ton sau lan nhap ban tra" in fold(line.replace("/", " "))
@@ -237,8 +255,10 @@ def load_stock(catalog: Catalog) -> StockSnapshot:
         day = _coverage_day(catalog.readme)
         if day is None:
             raise StockSourceError("coverage", "README states no last data day")
+        if as_of is not None and as_of > day:
+            raise StockSourceError("coverage", "Stock date is after the documented data end")
         try:
-            return _movement_stock(catalog, day, movement_convention)
+            return _movement_stock(catalog, as_of or day, movement_convention)
         except (ReadmeSalesError, TypeError, ValueError) as exc:
             if isinstance(exc, StockSourceError):
                 raise

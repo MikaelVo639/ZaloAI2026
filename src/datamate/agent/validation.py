@@ -23,7 +23,8 @@ ANSWER_TYPES = {
     "avg_purchase_price": "number", "daily_sale_price": "number",
     "unsold_count": "number", "delivery_count": "number",
     "gross_profit": "number", "top_gross_profit": "string", "net_profit": "number",
-    "stock_value": "number", "earliest_expiry": "date", "expiring_products": "list",
+    "stock_value": "number", "out_of_stock_count": "number",
+    "earliest_expiry": "date", "expiring_products": "list",
     "expiring_lot_count": "number", "expiring_lot_cost": "number", "expiring_product_count": "number",
 }
 
