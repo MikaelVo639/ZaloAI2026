@@ -18,7 +18,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 
-from datamate.semantics.rules import canonical
+from datamate.semantics.rules import canonical, read_rules
 from datamate.semantics.text import fold
 
 SPEC_VERSION = "rule_spec.v1"
@@ -66,7 +66,7 @@ def _text(value: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9]+", " ", canonical(fold(value))).split())
 
 
-_SUBJECTS = (  # (đối tượng, pattern); checked on the row name first, then the definition
+_SUBJECTS = (  # (đối tượng, pattern) as named in a row name
     ("nha_cung_cap", r"\bnha cung cap\b|\bncc\b"),
     ("nhan_vien", r"\bnhan vien\b|\btho\b"),
     ("khung_gio", r"\bkhung gio\b|\bgio cao diem\b|\bgio\b"),
@@ -75,33 +75,51 @@ _SUBJECTS = (  # (đối tượng, pattern); checked on the row name first, then
     ("ngay", r"\bngay\b"),
     ("don", r"\bdon\b"),
 )
-_MEASURES = (  # (chỉ tiêu, pattern); more specific first
-    ("so_ngay_co_mua", r"\bso ngay (?:co )?(?:mua|den|ghe|dat)\b"),
+# The subject a definition opens with ("khách có …", "ngày có …", "người có …").
+_LEAD = re.compile(r"^(?:la |nhung |cac )?(nha cung cap|ncc|nhan vien|tho|khung gio|gio|khach"
+                   r"|mat hang|san pham|mon|ngay|nguoi|don)\b")
+_LEAD_SUBJECT = {"nha cung cap": "nha_cung_cap", "ncc": "nha_cung_cap", "nhan vien": "nhan_vien",
+                 "tho": "nhan_vien", "khung gio": "khung_gio", "gio": "khung_gio", "khach": "khach",
+                 "mat hang": "mat_hang", "san pham": "mat_hang", "mon": "mat_hang",
+                 "ngay": "ngay", "don": "don", "nguoi": ""}
+_PERSONS = {"khach", "nhan_vien"}
+_MEASURES = (  # (chỉ tiêu, pattern); more specific first; direction words are not part of them
+    ("so_ngay_co_mua", r"\bso ngay khac nhau\b|\b(?:so )?ngay (?:khac nhau )?(?:co )?"
+                       r"(?:mua|den|ghe|dat|lam viec|lam|ban|di lam)(?: hang| don)?"
+                       r"(?: khac nhau)?\b"),
     ("gia_tri_tb_don", r"\b(?:gia tri )?(?:trung binh|binh quan) (?:mot |moi )?don\b"),
-    ("so_don_huy", r"\bso don huy\b|\bdon huy nhieu\b|\bhuy nhieu don\b"),
-    ("so_phieu_nhap", r"\bso phieu nhap\b|\bnhieu phieu nhap\b"),
+    ("so_don_huy", r"\bso don (?:bi )?huy\b|(?<=\bnhieu )don (?:bi )?huy\b"
+                   r"|(?<=\bit )don (?:bi )?huy\b|\bhuy nhieu don\b"),
+    ("so_phieu_nhap", r"\bso phieu nhap\b|(?<=\bnhieu )phieu nhap\b|(?<=\bit )phieu nhap\b"),
     ("so_luong_quy_doi", r"\bso luong quy (?:ve|doi)\b|\bso luong (?:da )?doi ra\b"),
     ("doanh_thu", r"\bdoanh thu\b"),
-    ("so_don", r"\bso don\b|\bnhieu don\b|\bit don\b"),
+    ("so_don", r"\bso don\b|(?<=\bnhieu )don\b|(?<=\bit )don\b"),
 )
-_PICKS = (("lon_nhat", r"\b(?:cao|nhieu|lon) nhat\b"),
-          ("nho_nhat", r"\b(?:thap|it|nho) nhat\b"))
-# A row name "<…> nhất" with no explicit choice in the definition means the most of its
-# measure, unless the name says the opposite.
+_UP, _DOWN = r"\b(?:cao|nhieu|lon)\b", r"\b(?:thap|it|nho)\b"
+# A row name "<…> nhất" with no direction in the definition means the most of its measure,
+# unless the name says the opposite.
 _NEGATIVE_NAME = re.compile(r"\b(?:it|thap|nho|kem|vang|e|cuoi|xau|lo)\b|\bcham\b(?! chi)")
-# "không theo số đơn": a measure named only to exclude it.
-_EXCLUDED = re.compile(r"\bkhong (?:theo|tinh|xet|dua tren) [a-z ]*?(?=\b(?:ma|nhung|va)\b|$)")
+# A clause "không theo / không xét theo / không dựa trên X": X is named only to exclude it.
+_EXCLUDED = re.compile(r"^(?:va |nhung )?khong (?:xet |phai )?(?:theo|dua tren)\b")
 _NOT_RANKING = re.compile(r"\bgan nhat\b|\bmoi nhat\b|\bsom nhat\b|\bmuon nhat\b")
-# Conditions are read (and removed) before the choice: "ít nhất 3 đơn" is not "ít nhất".
-_MIN_ORDERS = re.compile(r"\b(?:tu|it nhat|toi thieu|co tu|co it nhat) (\d+) don(?: tro len)?\b")
-_STRICT_ORDERS = re.compile(r"\b(?:tren|hon|qua) (\d+) don\b")
+_ONLY = r"(?:chi (?:xet|tinh|lay) (?:[a-z]+ ){0,3}?)?(?:co )?"
+_MIN_ORDERS = re.compile(rf"\b{_ONLY}(?:tu|it nhat|toi thieu|co tu|co it nhat) (\d+) don"
+                         r"(?: tro len)?\b")
+_STRICT_ORDERS = re.compile(rf"\b{_ONLY}(?:tren|hon|qua) (\d+) don\b")
 _EMPTY_DAYS_IN = re.compile(r"\b(?:ke|tinh) ca (?:ngay|gio|khung gio) khong (?:co )?don\b")
 _EMPTY_DAYS_OUT = re.compile(r"\b(?:khong tinh|bo) (?:ngay|gio|khung gio) khong (?:co )?don\b")
 _VALIDITY = (("chi_huy", r"\bchi (?:tinh |xet )?don huy\b"),
              ("moi_don", r"\bmoi (?:trang thai|don)\b"),
-             ("bo_huy_tra", r"\bbo (?:don )?huy(?: va)? (?:don )?tra\b"
-                            r"|\bkhong huy(?: va)? khong tra\b"),
-             ("bo_huy", r"\bbo (?:don )?huy\b|\bkhong tinh (?:don )?huy\b"))
+             ("bo_huy_tra", r"\bbo (?:don )?huy(?: va)? (?:don )?tra(?: hang)?\b"
+                            r"|\bkhong huy(?: va)? khong tra(?: hang)?\b"),
+             ("bo_huy", r"\bbo (?:don |phieu )?huy\b|\bkhong tinh (?:don |phieu )?huy\b"))
+# Words that carry meaning in a definition. Any left after the reader took what it
+# understood turns the rule off (a dropped "huỷ", "trả", "30 ngày", "lãi", "kể cả" …).
+_MEANING = re.compile(
+    r"\b(?:\d+|huy|tra|ngay|lai|loi|luot|lan|phieu|bao hanh|ke ca|khong|tru|chi|rieng|ngoai"
+    r"|trung binh|binh quan|doanh thu|so luong|gio|thang|tuan|quy|nam|phan tram|ti le|gia"
+    r"|tien|nhap|giao|no|doi|nhom|kenh|thanh toan|cod|chuyen khoan|tong|moi|cao|thap|nhieu"
+    r"|it|lon|nho)\b")
 _SAME = re.compile(r"\b(?:cung nghia|con goi la|goi la|tuc la)\b")
 
 
@@ -138,59 +156,104 @@ def is_ranking_row(name: str) -> bool:
     return bool(re.search(r"\bnhat\b|\bcao diem\b|\bchinh\b|\btrung thanh\b", text))
 
 
+def _take(pattern: str | re.Pattern, text: str) -> tuple[re.Match | None, str]:
+    """First match of ``pattern`` and the text with that match blanked out."""
+    match = re.search(pattern, text)
+    return match, (text if match is None else text[:match.start()] + " " + text[match.end():])
+
+
+def _subject(key: str, clauses: list[str]) -> tuple[str | None, list[str], str]:
+    """Đối tượng from the definition's opening subject; the name only arbitrates."""
+    named = set(_one(_SUBJECTS, key)) - {"don"}
+    if "khung_gio" in named:
+        named.discard("ngay")
+    lead = _LEAD.match(clauses[0]) if clauses else None
+    if lead:
+        clauses = [clauses[0][lead.end():], *clauses[1:]]
+        subject = _LEAD_SUBJECT[lead.group(1)]
+        if subject == "":  # "người có …": the name says which person
+            people = named & _PERSONS
+            if len(people) != 1:
+                return None, clauses, f"definition says 'người' and the name gives {sorted(named)}"
+            return people.pop(), clauses, ""
+        if named and subject not in named:
+            return None, clauses, f"name {sorted(named)} and definition '{lead.group(1)}' differ"
+        return subject, clauses, ""
+    if len(named) == 1:
+        return next(iter(named)), clauses, ""
+    return None, clauses, f"no subject in the definition and the name gives {sorted(named)}"
+
+
 def parse_row(name: str, definition: str, line: str) -> SpecResult | None:
-    """Deterministic spec of one row; ``None`` when the row is not a named ranking."""
+    """Deterministic spec of one row; ``None`` when the row is not a named ranking.
+
+    Every part the reader understands is taken out of the definition; a meaning word left
+    over (``_MEANING``) means part of the rule was not understood, so the rule is off.
+    """
     if not is_ranking_row(name):
         return None
-    key, body = _text(name), _text(definition)
+    key = _text(name)
+    # Sentences giving other names ("**A** cùng nghĩa với B") are used by ``cach_goi``.
+    meaning = " . ".join(s for s in re.split(r"[.;]\s", definition) if not _SAME.search(_text(s)))
+    clauses = [c for c in (_text(part) for part in re.split(r"[,.;:()]", meaning)) if c]
     reasons: list[str] = []
     conditions: dict = {}
-    for match in _MIN_ORDERS.finditer(body):
-        conditions.setdefault("so_don_toi_thieu", []).append(int(match.group(1)))
-    for match in _STRICT_ORDERS.finditer(body):
-        conditions.setdefault("so_don_hon", []).append(int(match.group(1)))
-    for bound in ("so_don_toi_thieu", "so_don_hon"):
-        values = conditions.pop(bound, [])
-        if values:
-            conditions[bound] = values[0]
+    subject, clauses, why = _subject(key, clauses)
+    if why:
+        reasons.append(why)
+    rest_clauses, excluded = [], []
+    for clause in clauses:
+        (excluded if _EXCLUDED.match(clause) else rest_clauses).append(clause)
+    rest = " ; ".join(rest_clauses)
+    for bound, pattern in (("so_don_toi_thieu", _MIN_ORDERS), ("so_don_hon", _STRICT_ORDERS)):
+        values = [int(m.group(1)) for m in pattern.finditer(rest)]
+        rest = pattern.sub(" ", rest)
         if len(values) > 1:
             reasons.append(f"several values for {bound}")
+        elif values:
+            conditions[bound] = values[0]
     if {"so_don_toi_thieu", "so_don_hon"} <= set(conditions):
         reasons.append("both an inclusive and a strict order minimum")
-    empty_in, empty_out = _EMPTY_DAYS_IN.search(body), _EMPTY_DAYS_OUT.search(body)
+    empty_in, rest = _take(_EMPTY_DAYS_IN, rest)
+    empty_out, rest = _take(_EMPTY_DAYS_OUT, rest)
     if empty_in and empty_out:
         reasons.append("contradictory empty-day wording")
     elif empty_in or empty_out:
         conditions["tinh_ngay_khong_don"] = bool(empty_in)
-    rest = _STRICT_ORDERS.sub(" ", _MIN_ORDERS.sub(" ", body))
-    rest = " ".join(_EXCLUDED.sub(" ", clause) for clause in re.split(r"\b(?:nhung|ma)\b", rest))
-
-    subjects = _one(_SUBJECTS, key) or _one(_SUBJECTS, rest)
-    # "khung giờ" also matches "giờ"; "đơn"/"ngày" words often qualify another subject.
-    if len(subjects) > 1:
-        subjects = tuple(s for s in subjects if s not in ("don", "ngay")) or subjects
-    measures = _one(_MEASURES, rest)
-    if "so_don" in measures and len(measures) > 1:
-        measures = tuple(m for m in measures if m != "so_don")
-    picks = _one(_PICKS, rest) or _one(_PICKS, key)
-    if not picks and re.search(r"\bnhat\b|\bcao diem\b", key):
-        picks = ("nho_nhat",) if _NEGATIVE_NAME.search(key) else ("lon_nhat",)
-    validity = _one(_VALIDITY, rest)
-    if len(subjects) != 1:
-        reasons.append(f"đối tượng: {list(subjects) or 'none'}")
+    validity = "luat_chung"
+    for value, pattern in _VALIDITY:
+        match, rest = _take(pattern, rest)
+        if match:
+            validity = value
+            break
+    measures = []
+    for value, pattern in _MEASURES:
+        match, rest = _take(pattern, rest)
+        if match:
+            measures.append(value)
     if len(measures) != 1:
-        reasons.append(f"chỉ tiêu: {list(measures) or 'none'}")
+        reasons.append(f"chỉ tiêu: {measures or 'none'}")
+    for clause in excluded:  # "không theo số đơn" must not name the chosen measure
+        if measures and re.search(dict(_MEASURES)[measures[0]], clause):
+            reasons.append(f"the definition excludes its own measure: {clause!r}")
+    picks = set()
+    if re.search(r"\bnhat\b", rest):
+        picks = {"lon_nhat"} if re.search(_UP, rest) else set()
+        picks |= {"nho_nhat"} if re.search(_DOWN, rest) else set()
+        rest = re.sub(rf"{_UP}|{_DOWN}|\bnhat\b", " ", rest)
+    if not picks and re.search(r"\bnhat\b|\bcao diem\b", key):
+        picks = {"nho_nhat"} if _NEGATIVE_NAME.search(key) else {"lon_nhat"}
     if len(picks) != 1:
-        reasons.append(f"chọn: {list(picks) or 'none'}")
-    if len(validity) > 1:
-        validity = validity[:1]  # most specific listed first
+        reasons.append(f"chọn: {sorted(picks) or 'none'}")
+    left = sorted(set(_MEANING.findall(rest)))
+    if left:
+        reasons.append(f"words not understood: {left}")
     if reasons:
         return SpecResult(line, None, tuple(reasons))
     spec = RuleSpec(
         ten=re.sub(r"\s+", "_", key), cach_goi=_names(name, definition),
-        doi_tuong=subjects[0], chi_tieu=measures[0], chon=picks[0],
-        don_hop_le=validity[0] if validity else "luat_chung", dieu_kien=conditions,
-        kieu_dap_an="string", nguon=line)
+        doi_tuong=subject, chi_tieu=measures[0], chon=picks.pop(), don_hop_le=validity,
+        dieu_kien=conditions, kieu_dap_an="string", nguon=line)
     problems = ground(spec)
     return SpecResult(line, None if problems else spec, tuple(problems))
 
@@ -268,7 +331,43 @@ def ground(spec: RuleSpec) -> list[str]:
         problems.append("nho_nhat over days needs the row to say whether empty days count")
     if not spec.cach_goi:
         problems.append("no name to recognise in questions")
+    # Only the definition must be fully used; the name is how questions call the rule.
+    definition = " ".join(s for s in re.split(r"[.;]\s", cells[1] if len(cells) >= 2 else "")
+                          if not _SAME.search(_text(s)))
+    unexplained = sorted(set(_CONTENT.findall(_text(definition))) - _explained(spec))
+    if unexplained:
+        problems.append(f"words of the row no field explains: {unexplained}")
     return problems
+
+
+# Content words of a definition and the spec fields that can explain them. Structural words
+# ("không", "kể cả", "chỉ", directions) are checked by parse_row, which sees the clauses.
+_CONTENT = re.compile(
+    r"\b(?:huy|tra|ngay|lai|loi|luot|lan|phieu|bao hanh|tru|rieng|ngoai|trung binh"
+    r"|binh quan|doanh thu|so luong|gio|thang|tuan|quy|nam|phan tram|ti le|gia|tien|nhap"
+    r"|giao|no|doi|nhom|kenh|thanh toan|cod|chuyen khoan|tong)\b")
+
+
+def _explained(spec: RuleSpec) -> set[str]:
+    words = set()
+    if spec.chi_tieu == "so_don_huy" or spec.don_hop_le in ("bo_huy", "bo_huy_tra", "chi_huy"):
+        words.add("huy")
+    if spec.don_hop_le == "bo_huy_tra":
+        words.add("tra")
+    if (spec.doi_tuong == "ngay" or spec.chi_tieu == "so_ngay_co_mua"
+            or "tinh_ngay_khong_don" in spec.dieu_kien):
+        words.add("ngay")
+    if spec.chi_tieu == "so_phieu_nhap" or spec.doi_tuong == "nha_cung_cap":
+        words |= {"phieu", "nhap"}
+    if spec.chi_tieu == "doanh_thu":
+        words.add("doanh thu")
+    if spec.chi_tieu == "gia_tri_tb_don":
+        words |= {"trung binh", "binh quan", "gia"}
+    if spec.chi_tieu == "so_luong_quy_doi":
+        words.add("so luong")
+    if spec.doi_tuong == "khung_gio":
+        words.add("gio")
+    return words
 
 
 def spec_from_json(data: dict, line: str) -> RuleSpec | None:
@@ -283,10 +382,21 @@ def spec_from_json(data: dict, line: str) -> RuleSpec | None:
     return spec
 
 
+def handled_rows(rulebook: str) -> set[str]:
+    """Rows the hand-written reader (rules.read_rules) already recognises; never re-read."""
+    rules = read_rules(rulebook)
+    return ({line.strip() for _, line in rules.rule_rows}
+            | {line.strip() for line in rules.source_rows})
+
+
 def normalize_rulebook(rulebook: str) -> list[SpecResult]:
-    """Specs of every named ranking row of the split, enabled or off with reasons."""
+    """Specs of every named ranking row of the split not already handled by read_rules,
+    enabled or off with reasons."""
     results = []
+    handled = handled_rows(rulebook)
     for name, definition, line in table_rows(rulebook):
+        if line.strip() in handled:
+            continue
         result = parse_row(name, definition, line)
         if result is not None:
             results.append(result)

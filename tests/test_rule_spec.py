@@ -43,6 +43,19 @@ EXPECTED = {
     ("Nhân viên bán giỏi nhất", "theo **doanh thu** (§1) của nhân viên trong kỳ, không theo "
                                 "số đơn"):
         ("nhan_vien", "doanh_thu", "lon_nhat", {}),
+    # The subject comes from the definition; the name only arbitrates.
+    ("Ngày đông khách nhất", "ngày có nhiều đơn nhất"): ("ngay", "so_don", "lon_nhat", {}),
+    ("Ngày bán ít nhất", "ngày có ít đơn nhất, kể cả ngày không có đơn"):
+        ("ngay", "so_don", "nho_nhat", {"tinh_ngay_khong_don": True}),
+    ("Thợ siêng nhất", "người có nhiều ngày làm việc nhất"):
+        ("nhan_vien", "so_ngay_co_mua", "lon_nhat", {}),
+    ("Khách đều đặn nhất", "khách có nhiều ngày mua khác nhau nhất"):
+        ("khach", "so_ngay_co_mua", "lon_nhat", {}),
+    ("Khách hay huỷ đơn nhất", "khách có nhiều đơn huỷ nhất"):
+        ("khach", "so_don_huy", "lon_nhat", {}),
+    # Meaning words in the name ("đổi") need no field; only the definition is checked.
+    ("Khách hay đổi món nhất", "khách có nhiều đơn huỷ nhất"):
+        ("khach", "so_don_huy", "lon_nhat", {}),
 }
 
 
@@ -66,11 +79,36 @@ class ParseRowTests(unittest.TestCase):
         for name, definition in (
                 ("Hàng lời nhất", "theo tổng lãi gộp của mặt hàng"),
                 ("Khách tốt nhất", "khách có doanh thu cao nhất trong 30 ngày"),
-                ("Ngày vắng nhất", "ngày có ít đơn nhất")):  # empty days not stated
+                ("Ngày bán ít nhất", "ngày có ít đơn nhất")):  # empty days not stated
             with self.subTest(row=name):
                 result = spec_of(name, definition)
                 self.assertIsNone(result.spec)
                 self.assertTrue(result.reasons)
+
+    def test_every_meaning_word_must_be_used(self):
+        for name, definition, word in (
+                ("Khách hay trả hàng nhất", "khách có nhiều đơn trả nhất", "tra"),
+                ("Khách mua lãi nhất", "khách có doanh thu cao nhất tính theo lãi", "lai"),
+                ("Mặt hàng hot nhất", "mặt hàng có nhiều đơn nhất, kể cả hàng bảo hành",
+                 "bao hanh"),
+                ("Ngày đông nhất", "ngày có nhiều lượt khách nhất", "luot")):
+            with self.subTest(row=name):
+                result = spec_of(name, definition)
+                self.assertIsNone(result.spec)
+                self.assertTrue(any(word in reason for reason in result.reasons), result.reasons)
+
+    def test_name_and_definition_must_agree_on_the_subject(self):
+        for name, definition in (("Mặt hàng đắt khách nhất", "ngày có nhiều đơn nhất"),
+                                 ("Người mua nhiều nhất", "người có doanh thu cao nhất"),
+                                 ("Khách, ngày đông nhất", "có nhiều đơn nhất")):
+            with self.subTest(row=name):
+                self.assertIsNone(spec_of(name, definition).spec)
+
+    def test_rows_read_by_read_rules_are_left_to_it(self):
+        row = ("| Nhân viên bán giỏi nhất | theo **doanh thu** (§1) của nhân viên trong kỳ, "
+               "không theo số đơn |")
+        self.assertTrue(read_rules(rulebook(extra=row)).best_staff)
+        self.assertEqual(normalize_rulebook(rulebook(extra=row)), [])
 
     def test_the_condition_is_not_read_as_the_choice(self):
         result = spec_of("Khách ruột nhất", "doanh thu cao nhất, chỉ xét khách mua ít nhất 2 đơn")
@@ -193,7 +231,7 @@ if __name__ == "__main__":
 class ModelSpecTests(unittest.TestCase):
     """The model path with a fake generator: agreement and grounding decide."""
 
-    ROW = "| Khách mua đều nhất | khách có nhiều ngày ghé quán nhất |"
+    ROW = "| Khách mua đều nhất | khách ghé quán vào nhiều ngày nhất |"
 
     def run_model(self, outputs):
         from datamate.agent.rule_spec_model import model_specs
