@@ -31,6 +31,7 @@ from datamate.ingestion.readme_sales import (
 )
 from datamate.ingestion.source_names import filename_key
 from datamate.ingestion.status import normalize_label, order_state
+from datamate.semantics.rules import rule_line, table_rows
 from datamate.semantics.text import fold
 
 ADAPTER_VERSION = "readme_debt.v1"
@@ -404,19 +405,9 @@ def _has_debt_hint(catalog: Catalog, sections: Iterable[Section],
 
 
 def _rule_rows(rulebook: str) -> tuple[str, ...]:
-    wanted = {
-        "don duoc tinh vao no": None,
-        "no mot don tai ngay x": None,
-        "don cod don ban qua san tmdt": None,
-    }
-    for line in rulebook.splitlines():
-        if not line.lstrip().startswith("|"):
-            continue
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if len(cells) >= 2:
-            key = fold(cells[0])
-            if key in wanted:
-                wanted[key] = line.strip()
+    rows = table_rows(rulebook)
+    wanted = {key: rule_line(rows, key) for key in (
+        "don duoc tinh vao no", "no mot don tai ngay x", "don cod don ban qua san tmdt")}
     missing = [key for key, row in wanted.items() if row is None]
     if missing:
         raise DebtSourceError("rules_missing", "Split rulebook lacks debt rules",

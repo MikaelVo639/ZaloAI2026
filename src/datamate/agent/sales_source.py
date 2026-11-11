@@ -38,7 +38,7 @@ from datamate.ingestion.readme_sales import (
 )
 from datamate.ingestion.sales import Sale, load_sales
 from datamate.ingestion.status import StatusError, status_policy
-from datamate.semantics.text import fold
+from datamate.semantics.rules import rule_line, table_rows
 
 _JOIN_COLUMNS = {
     "orders": {
@@ -58,20 +58,11 @@ _JOIN_ANCHORS = {
 }
 
 
-def _rule_rows(rulebook: str) -> list[tuple[str, str, str]]:
-    rows = []
-    for line in rulebook.splitlines():
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if line.lstrip().startswith("|") and len(cells) >= 2:
-            rows.append((fold(cells[0]), fold(cells[1]), line.strip()))
-    return rows
-
-
 def _required_rule(rows: list[tuple[str, str, str]], key: str,
                    *tokens: str) -> str:
-    for row_key, value, original in rows:
-        if row_key == key and all(token in value for token in tokens):
-            return original
+    line = rule_line(rows, key, *tokens)
+    if line is not None:
+        return line
     raise JoinedSalesError(
         "RULE_CAPABILITY_MISSING",
         "Joined schema requires an explicit capability in the current split rulebook",
@@ -80,7 +71,7 @@ def _required_rule(rows: list[tuple[str, str, str]], key: str,
 
 
 def _joined_rules(rulebook: str) -> RuleCapabilities:
-    rows = _rule_rows(rulebook)
+    rows = table_rows(rulebook)
     validity = _required_rule(
         rows, "don tinh vao doanh thu", "khong huy", "khong tra", "ca don",
         "dang giao van tinh",

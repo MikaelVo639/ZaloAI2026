@@ -135,12 +135,55 @@ def enabled(rules: Rules) -> frozenset[str]:
                      if f.name not in skip and getattr(rules, f.name) not in (False, 0, (), ""))
 
 
+def _found(read: Callable[[], object]) -> bool:
+    try:
+        return bool(read())
+    except ValueError:  # every loader signals a missing rule with a ValueError subclass
+        return False
+
+
+def source_rules(rulebook: str) -> frozenset[str]:
+    """Rows read outside ``read_rules``: the sales and debt loaders, Tết, stockouts and the
+    "không trả lời được" row. Losing one silently drops a whole business or intent."""
+    from datamate.agent.compute import _absence_rule, _stockout_rule
+    from datamate.agent.sales_source import _joined_rules
+    from datamate.ingestion.debt import _rule_rows as debt_rows
+    from datamate.ingestion.readme_sales import _rules as readme_rules
+    from datamate.ingestion.status import status_policy
+    from datamate.semantics.lunar_periods import tet_rule
+
+    checks = {
+        "source:order_states": lambda: status_policy(rulebook),
+        "source:joined_sales": lambda: _joined_rules(rulebook),
+        "source:debt_rows": lambda: debt_rows(rulebook),
+        "source:tet": lambda: tet_rule(rulebook),
+        "source:stockout": lambda: _stockout_rule(rulebook),
+        "source:no_answer": lambda: _absence_rule(rulebook),
+    }
+    found = {name for name, read in checks.items() if _found(read)}
+    try:
+        readme = readme_rules(rulebook)
+    except ValueError:
+        return frozenset(found)
+    found.add("source:readme_sales")
+    for name in ("blank_cells_inherit", "duplicate_rows_once", "whole_order_returns",
+                 "service_fee"):
+        if getattr(readme, name):
+            found.add(f"source:readme_{name}")
+    return frozenset(found)
+
+
+def recognised(rulebook: str) -> frozenset[str]:
+    """Every rule the code reads from this rulebook, by ``read_rules`` and by the loaders."""
+    return enabled(read_rules(rulebook)) | source_rules(rulebook)
+
+
 def compare(rulebook: str, names: tuple[str, ...] = PERTURBATIONS) -> dict[str, dict]:
     """Per perturbation: rules lost and gained against the original rulebook."""
-    original = enabled(read_rules(rulebook))
+    original = recognised(rulebook)
     report = {"original": {"enabled": len(original)}}
     for name in names:
-        changed = enabled(read_rules(perturb_rulebook(name, rulebook)))
+        changed = recognised(perturb_rulebook(name, rulebook))
         report[name] = {"enabled": len(changed), "lost": sorted(original - changed),
                         "gained": sorted(changed - original)}
     return report

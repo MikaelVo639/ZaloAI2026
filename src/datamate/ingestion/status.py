@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from datamate.semantics.rules import canonical, rule_line, table_rows
 from datamate.semantics.text import fold
 
 STATES = ("hoan thanh", "huy", "tra hang", "dang giao")
@@ -75,24 +76,6 @@ def order_state(label: object) -> str | None:
     return None
 
 
-def _rule_rows(rulebook: str) -> list[tuple[str, str, str]]:
-    rows = []
-    for line in rulebook.splitlines():
-        if not line.lstrip().startswith("|"):
-            continue
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if len(cells) >= 2:
-            rows.append((fold(cells[0]), fold(cells[1]), line.strip()))
-    return rows
-
-
-def _row(rows: list[tuple[str, str, str]], key: str, *tokens: str) -> str | None:
-    for row_key, value, original in rows:
-        if row_key == key and all(token in value for token in tokens):
-            return original
-    return None
-
-
 @dataclass(frozen=True)
 class StatusPolicy:
     """Maps the four states to the adapter's ``valid`` / ``cancelled`` / ``returned``."""
@@ -111,14 +94,14 @@ class StatusPolicy:
 
 def status_policy(rulebook: str) -> StatusPolicy:
     """Read which states exist and which count as revenue from the split's rulebook."""
-    rows = _rule_rows(rulebook)
-    states = _row(rows, "trang thai don", *STATES)
-    revenue = _row(rows, "don tinh vao doanh thu", "khong huy", "khong tra")
+    rows = table_rows(rulebook)
+    states = rule_line(rows, "trang thai don", *STATES)
+    revenue = rule_line(rows, "don tinh vao doanh thu", "khong huy", "khong tra")
     if states is None or revenue is None:
         raise StatusError("The split rulebook does not define the order states")
     mapping = {"hoan thanh": "valid", "huy": "cancelled", "tra hang": "returned"}
-    cancelled = _row(rows, "don bi huy", "trang thai huy")
+    cancelled = rule_line(rows, "don bi huy", "trang thai huy")
     evidence = [states, revenue] + ([cancelled] if cancelled else [])
-    if "dang giao van tinh" in fold(revenue):
+    if canonical("dang giao van tinh") in canonical(fold(revenue)):
         mapping["dang giao"] = "valid"
     return StatusPolicy(mapping, tuple(evidence))

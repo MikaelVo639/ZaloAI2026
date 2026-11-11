@@ -37,6 +37,7 @@ from datamate.ingestion.catalog import iter_rows
 from datamate.ingestion.sales import Sale, parse_date, parse_minute, price_per_base_unit
 from datamate.ingestion.source_names import filename_key
 from datamate.ingestion.status import StatusError, status_policy
+from datamate.semantics.rules import rule_line
 from datamate.semantics.text import fold
 
 ADAPTER_VERSION = "readme_sales.v1"
@@ -666,15 +667,6 @@ def _role_rows(
 
 # ---------------------------------------------------------------- rules
 
-def _rule_line(rulebook: str, key: str, *tokens: str) -> str | None:
-    for line in rulebook.splitlines():
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if line.lstrip().startswith("|") and len(cells) >= 2:
-            if fold(cells[0]) == key and all(t in fold(cells[1]) for t in tokens):
-                return line.strip()
-    return None
-
-
 @dataclass(frozen=True)
 class _Rules:
     status: Any
@@ -690,12 +682,12 @@ def _rules(rulebook: str) -> _Rules:
         status = status_policy(rulebook)
     except StatusError as exc:
         raise ReadmeSalesError("RULE_CAPABILITY_MISSING", str(exc)) from exc
-    blank = _rule_line(rulebook, "o de trong o cac dong sau cua cung mot nhom dong",
+    blank = rule_line(rulebook, "o de trong o cac dong sau cua cung mot nhom dong",
                        "giong o do o dong dau nhom")
-    duplicates = _rule_line(rulebook, "hai dong cua cung mot don giong nhau o moi o",
+    duplicates = rule_line(rulebook, "hai dong cua cung mot don giong nhau o moi o",
                             "tinh mot lan")
-    returns = _rule_line(rulebook, "don tinh vao doanh thu", "ca don")
-    fee = _rule_line(rulebook, "mat hang", "phi phuc vu", "khong xep hang")
+    returns = rule_line(rulebook, "don tinh vao doanh thu", "ca don")
+    fee = rule_line(rulebook, "mat hang", "phi phuc vu", "khong xep hang")
     evidence = tuple(x for x in (*status.evidence, blank, duplicates, returns, fee) if x)
     return _Rules(status, blank, duplicates, returns, fee, evidence)
 

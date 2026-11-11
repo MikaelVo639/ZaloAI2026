@@ -62,7 +62,7 @@ from datamate.ingestion.stock import (
 )
 from datamate.semantics.payment import FIELDS as PAYMENT_FIELDS
 from datamate.semantics.payment import label_terms
-from datamate.semantics.rules import DEBT_TABLE_FEATURES, read_rules
+from datamate.semantics.rules import DEBT_TABLE_FEATURES, line_with, read_rules
 from datamate.semantics.text import fold
 
 
@@ -726,12 +726,12 @@ def _debt_customer(ledger: DebtLedger, name: str) -> tuple[str | None, int]:
     return (next(iter(keys)), 1) if len(keys) == 1 else (None, len(keys))
 
 
+def _stockout_rule(rulebook: str) -> str:
+    return line_with(rulebook, "mat hang het hang cuoi ngay", "mua ve de ban", "ton kho bang 0")
+
+
 def _absence_rule(rulebook: str) -> str:
-    return next(
-        (line for line in rulebook.splitlines()
-         if "shop khong ghi loai thong tin cau hoi can thi khong tra loi duoc" in fold(line)),
-        "",
-    )
+    return line_with(rulebook, "shop khong ghi loai thong tin cau hoi can thi khong tra loi duoc")
 
 
 def _answer_debt_measure(cache: dict[str, Any], catalog: Catalog, plan: Plan,
@@ -1294,9 +1294,7 @@ def _answer_inventory_measure(cache: dict[str, Any], catalog: Catalog, plan: Pla
     kind = "number"
     try:
         if plan.intent == "out_of_stock_count":
-            rule = next((line for line in rulebook.splitlines() if all(
-                phrase in fold(line) for phrase in ("mat hang het hang cuoi ngay",
-                                                   "mua ve de ban", "ton kho bang 0"))), "")
+            rule = _stockout_rule(rulebook)
             if not rule or start != end:
                 raise ValueError("Current rulebook does not define end-of-day stockouts")
             snapshot = _stock_snapshot(cache, catalog)

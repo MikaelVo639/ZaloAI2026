@@ -109,6 +109,39 @@ def _find(rows: dict[str, str], *key_tokens: str) -> str | None:
     return min(keys, key=len) if keys else None
 
 
+def table_rows(rulebook: str) -> list[tuple[str, str, str]]:
+    """``(canonical key, canonical definition, original line)`` of every table row, in order."""
+    rows = []
+    for line in rulebook.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if line.lstrip().startswith("|") and len(cells) >= 2:
+            rows.append((canonical(fold(cells[0])), canonical(fold(cells[1])), line.strip()))
+    return rows
+
+
+def rule_line(rulebook: str | list[tuple[str, str, str]], key: str, *tokens: str) -> str | None:
+    """Original line of the row whose key contains ``key`` and whose definition contains every
+    token, compared in canonical form; the shortest such key wins, then the first row.
+    ``rulebook`` may be the text or the result of ``table_rows``."""
+    rows = table_rows(rulebook) if isinstance(rulebook, str) else rulebook
+    wanted, needed = canonical(key), [canonical(token) for token in tokens]
+    matches = [(row_key, line) for row_key, value, line in rows
+               if wanted in row_key and all(token in value for token in needed)]
+    return min(matches, key=lambda match: len(match[0]))[1] if matches else None
+
+
+def line_with(rulebook: str, *phrases: str, table_only: bool = False) -> str:
+    """First rulebook line containing every phrase in canonical form, or ``""``."""
+    needed = [canonical(phrase) for phrase in phrases]
+    for line in rulebook.splitlines():
+        if table_only and not line.strip().startswith("|"):
+            continue
+        text = canonical(fold(line))
+        if all(phrase in text for phrase in needed):
+            return line.strip()
+    return ""
+
+
 def read_rules(rulebook: str) -> Rules:
     """Recognize a small, explicit subset; new rule wording requires an adapter.
 

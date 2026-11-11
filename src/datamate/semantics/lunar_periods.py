@@ -7,8 +7,8 @@ from pathlib import Path
 
 from datamate.contracts import Plan, Question
 from datamate.semantics.planner import _AMOUNT
-from datamate.semantics.rules import Rules
-from datamate.semantics.text import fold, normalize_question
+from datamate.semantics.rules import Rules, line_with
+from datamate.semantics.text import normalize_question
 
 _TET = r"(?:dip |mua )?tet(?: am lich)? (?:nam )?"
 _TOP_SELLING = r"(?:ban chay|ban duoc nhieu|ban duoc nhiu|ban nhieu|ban nhiu|chay) nhat"
@@ -30,15 +30,17 @@ def _tet_windows(calendar: Path, years: set[int]) -> dict[int, tuple[date, date]
     return {year: (dates[(year - 1, 12, 23)], dates[(year, 1, 10)]) for year in years}
 
 
+def tet_rule(rulebook: str) -> str:
+    """The split's row defining the Tết period and its comparison window, or ``""``."""
+    return line_with(rulebook, "tet nam", "23 thang chap", "mung 10 thang gieng",
+                     "cung so ngay ngay truoc 23 thang chap", table_only=True)
+
+
 def plan_tet(question: Question, rules: Rules, rulebook: str, calendar: Path) -> Plan | None:
     text = normalize_question(question.question)
     if not re.search(r"\btet\b", text):
         return None
-    row = next((line for line in rulebook.splitlines()
-                if line.strip().startswith("|") and all(phrase in fold(line) for phrase in (
-                    "tet nam", "23 thang chap", "mung 10 thang gieng",
-                    "cung so ngay ngay truoc 23 thang chap",
-                ))), "")
+    row = tet_rule(rulebook)
     if not row or not rules.revenue:
         return None
     ranking = re.fullmatch(rf"{_TET}(\d{{4}}) (?:mat hang|san pham|mon|hang) nao {_TOP_SELLING}", text)
