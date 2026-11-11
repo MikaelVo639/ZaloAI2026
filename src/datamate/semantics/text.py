@@ -76,6 +76,25 @@ def _untranspose(token: str) -> str:
     return fixed.pop() if len(fixed) == 1 else token
 
 
+# Misspellings told apart by their diacritics, which folding would lose. "tiềng"/"tền" are
+# not words, so they are "tiền" (never "tiếng" = hour or "tên" = name); "nhân diên" is
+# "nhân viên" (not "điện"), "xố đơn" is "số đơn", "mí đơn" is "mấy đơn".
+_MARKED_SLIPS = (
+    (r"(?<!\w)(tiềng|tền)(?!\w)", "tiền"),
+    (r"(?<!\w)(tiền) báng(?!\w)", r"\1 bán"),
+    (r"(?<!\w)(nhân) diên(?!\w)", r"\1 viên"),
+    (r"(?<!\w)xố (đơn)(?!\w)", r"số \1"),
+    (r"(?<!\w)mí (đơn)(?!\w)", r"mấy \1"),
+)
+
+
+def _marked_slips(raw: str) -> str:
+    raw = unicodedata.normalize("NFC", raw)
+    for pattern, replacement in _MARKED_SLIPS:
+        raw = re.sub(pattern, replacement, raw, flags=re.IGNORECASE)
+    return raw
+
+
 def normalize_question(value: object, *, product_names: Iterable[str] | None = None,
                        as_of_year: int | None = None) -> str:
     """Fold a question for grammar matching: Telex leftovers, abbreviations, date spellings.
@@ -85,6 +104,7 @@ def normalize_question(value: object, *, product_names: Iterable[str] | None = N
     """
     # fold() drops "%", which would turn "bao nhiêu % đơn bị huỷ" into a count question.
     raw = str(value).replace("%", " phần trăm ")
+    raw = _marked_slips(raw)
     # fold() also drops "≥": "doanh thu ≥ 580.000 đồng", "mua ≥ 4 đơn" are the rulebook's
     # "từ N trở lên" (gồm N). "≤", "<", ">" stay unread, so those questions abstain.
     raw = re.sub(r"(?:≥|>=|⩾)\s*(\d[\d.,]*)\s*((?:đồng|dong|đ|vnđ|vnd|"
@@ -220,10 +240,55 @@ def _closing_wording(text: str, raw: str) -> str:
     if not ending:
         return text
     suffix = re.escape(fold(ending[1]))
-    slot = r"(?:gi|j|nao|phan tram|don(?: hang)?|tien|roi|khong|ko|chua)"
+    slot = r"(?:gi|j|nao|phan tram|don(?: hang)?|tien|roi|khong|ko|chua|huy)"
     if re.search(r"\b(?:doanh thu|dthu|tien|don|phan tram)\b", text):
         slot = rf"(?:{slot}|{_ASK_COUNT}|nh(?:at|ut)|doanh thu|dthu|cua hang|\d{{1,2}}/\d{{4}})"
     return re.sub(rf"\b({slot}) {suffix}$", r"\1", text)
+
+
+# Typing slips in grammar words: a dropped/swapped letter or two words typed without a space.
+# A slip is only fixed when none of its words occurs in a catalogue name of the shop.
+_SLIPS = (
+    (r"\bbna\b", "ban"),                            # "bná"
+    (r"\bban roa\b", "ban ra"),                     # "bán roa"
+    (r"\bdoanhthu\b", "doanh thu"),
+    (r"\bban(nhieu|nhiu)\b", r"ban \1"),            # "bánnhiều"
+    (r"\bnhieu(don|tien)\b", r"nhieu \1"),          # "nhiềuđơn"
+    (r"\btrung bih\b", "trung binh"),
+    (r"\bbin quan\b", "binh quan"),                 # "bìn quân"
+    (r"\btog cog\b", "tong cong"),                  # "tổg cộg"
+    (r"\bth(\d{1,2})\b(?!/)", r"thang \1"),         # "Th3" without a year
+)
+# "tháng ba" = "tháng 3". Not "tháng năm" (also "year") or "tháng sau" (also "next month").
+_SPOKEN_MONTHS = {"mot": 1, "hai": 2, "ba": 3, "tu": 4, "bay": 7, "tam": 8,
+                  "chin": 9, "muoi": 10, "muoi mot": 11, "muoi hai": 12}
+
+
+def _typing_slips(text: str, occupied: set[str]) -> str:
+    for pattern, replacement in _SLIPS:
+        text = re.sub(pattern, lambda m: m[0] if (set(m[0].split()) - GRAMMAR_WORDS) & occupied
+                      else m.expand(replacement), text)
+    spoken = "|".join(sorted(_SPOKEN_MONTHS, key=len, reverse=True))
+    text = re.sub(rf"\bthang ({spoken})\b(?! ?[\d/])",
+                  lambda m: f"thang {_SPOKEN_MONTHS[m[1]]}", text)
+    # "mua nhiều lần nhất, đếm theo số đơn" names the measure: most orders.
+    text = re.sub(r"\bmua nhieu lan nh(at|ut)(?: nhi)? dem theo so don(?: ay| nhe| nha)?$",
+                  r"mua nhieu don nh\1", text)
+    # An unaccented closing "the" (= "thế") after the amount of an average order; in other
+    # questions "bao nhiêu the" may still be the unit "thẻ".
+    if re.search(r"\b(?:trung binh|binh quan)\b.*\b(?:mot|moi|1) don\b", text):
+        text = re.sub(rf"\b({_ASK_COUNT}) the$", r"\1", text)
+    # "mấy o đờ" = "mấy order" (already read after "một"/"mỗi").
+    text = re.sub(rf"\b({_ASK_COUNT}) o do\b", r"\1 order", text)
+    text = re.sub(rf"\b(?:chot|len) duoc(?= (?:tong cong )?{_ASK_COUNT} order\b)", "ban duoc",
+                  text)
+    # Word order: "bán tổng cộng được", "bán tháng 7/2025 được", "bán chạy nhất là hàng nào".
+    text = re.sub(r"\bban tong cong duoc\b", "ban duoc tong cong", text)
+    text = re.sub(r"\bban (thang \d{1,2}/\d{4}|quy [1-4]/\d{4}|(?:thang|tuan) (?:nay|truoc)"
+                  r"|hom (?:nay|qua)) duoc\b", r"\1 ban duoc", text)
+    text = re.sub(r"\bban chay nh(at|ut) la (mat hang|san pham|mon|hang) nao$",
+                  r"\2 nao ban chay nh\1", text)
+    return text
 
 
 def _everyday_wording(text: str, original: str, value: str, names: tuple[str, ...],
@@ -271,6 +336,7 @@ def _everyday_wording(text: str, original: str, value: str, names: tuple[str, ..
     text = re.sub(rf"\btang dam (?={_ASK_COUNT} phan tram\b)", "tang giam ", text)
     text = re.sub(r"\bxo voi (?=(?:cung ky |cung )?thang\b)", "so voi ", text)
     text = re.sub(r"\bcaonhat\b", "cao nhat", text)
+    text = _typing_slips(text, occupied)
     text = _prior_year_reference(text, as_of_year)
     text = _CALLING.sub("", _closing_wording(text, raw))
     while True:
