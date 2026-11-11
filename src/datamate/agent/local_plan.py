@@ -230,6 +230,21 @@ class LocalPlanAgent(BaselineAgent):
     def models(self) -> list[dict[str, Any]]:
         return [dict(self._model_info)] if self._model_info else []
 
+    def _ensure_model(self) -> Candidate | None:
+        """Load once per planner worker; a failed load is cached for the whole run."""
+        if self._model_error is not None:
+            return Candidate(reason=self._model_error.reason, evidence=dict(self._model_error.evidence))
+        if self._model_generation != self.planner_worker.generation or not self.planner_worker.alive:
+            loaded = self.planner_worker.run(self.load_model, self.model_load_timeout,
+                                             model_path=self.model_path)
+            if not loaded.ok:
+                self._model_error = Candidate(reason=f"Local model unavailable: {loaded.error}",
+                                              evidence={"model_load_execution": loaded.execution()})
+                return self._model_error
+            self._model_generation = self.planner_worker.generation
+            self._model_info = {**loaded.value, "load_execution": loaded.execution()}
+        return None
+
     def answer(self, question: Question, context: BusinessContext) -> Candidate:
         plan = self._plan(question, context)
         if plan is not None:
@@ -250,15 +265,9 @@ class LocalPlanAgent(BaselineAgent):
             messages = build_messages(question, context, schema=context.cache["model_schema"])
         except (ValueError, TypeError, OSError) as exc:
             return Candidate(reason=f"Local context rejected: {exc}")
-        if self._model_generation != self.planner_worker.generation or not self.planner_worker.alive:
-            loaded = self.planner_worker.run(self.load_model, self.model_load_timeout,
-                                             model_path=self.model_path)
-            if not loaded.ok:
-                self._model_error = Candidate(reason=f"Local model unavailable: {loaded.error}",
-                                              evidence={"model_load_execution": loaded.execution()})
-                return self._model_error
-            self._model_generation = self.planner_worker.generation
-            self._model_info = {**loaded.value, "load_execution": loaded.execution()}
+        unavailable = self._ensure_model()
+        if unavailable is not None:
+            return unavailable
         evidence: dict[str, Any] = {"model": self._model_info,
                                     "planner_confidence": PROTOTYPE_CONFIDENCE}
         try:

@@ -56,7 +56,7 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--data-dir", type=Path, required=True)
     run.add_argument("--output-dir", type=Path, default=Path("outputs/baseline"))
     run.add_argument("--config", type=Path)
-    run.add_argument("--backend", choices=("baseline", "abstain", "local_plan"))
+    run.add_argument("--backend", choices=("baseline", "abstain", "local_plan", "rewrite"))
     validate = commands.add_parser("validate", help="Check format, IDs and completeness")
     validate.add_argument("submission", type=Path)
     validate.add_argument("--questions", type=Path, required=True)

@@ -15,6 +15,7 @@ from typing import Any, Callable
 from datamate import __version__
 from datamate.agent.baseline import AbstainAgent, BaselineAgent
 from datamate.agent.local_plan import LocalPlanAgent
+from datamate.agent.rewrite import RewriteAgent
 from datamate.contracts import Agent, BusinessContext, Candidate
 from datamate.evaluation.validation import finalize
 from datamate.ingestion import build_catalog
@@ -35,7 +36,7 @@ class Config:
     max_new_tokens: int = 1024
 
     def __post_init__(self) -> None:
-        if self.backend not in ("baseline", "abstain", "local_plan"):
+        if self.backend not in ("baseline", "abstain", "local_plan", "rewrite"):
             raise ValueError(f"Unknown backend: {self.backend}")
         if not math.isfinite(self.min_confidence) or not 0 <= self.min_confidence <= 1:
             raise ValueError("min_confidence must be between 0 and 1")
@@ -72,11 +73,12 @@ def predict(data_dir: Path, output_dir: Path, config: Config,
     if owns_agent:
         timeouts = {"question_timeout": config.question_timeout,
                     "ingestion_timeout": config.ingestion_timeout}
-        if config.backend == "local_plan":
-            agent = LocalPlanAgent(config.model_path, model_load_timeout=config.model_load_timeout,
-                                   model_timeout=config.model_timeout,
-                                   max_input_tokens=config.max_input_tokens,
-                                   max_new_tokens=config.max_new_tokens, **timeouts)
+        if config.backend in ("local_plan", "rewrite"):
+            model_agent = LocalPlanAgent if config.backend == "local_plan" else RewriteAgent
+            agent = model_agent(config.model_path, model_load_timeout=config.model_load_timeout,
+                                model_timeout=config.model_timeout,
+                                max_input_tokens=config.max_input_tokens,
+                                max_new_tokens=config.max_new_tokens, **timeouts)
         elif config.backend == "baseline":
             agent = BaselineAgent(**timeouts)
         else:

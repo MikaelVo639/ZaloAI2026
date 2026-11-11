@@ -154,6 +154,41 @@ mô thì không thể khẳng định dưới 6 giờ. `max_seconds=20000` đư�
 không phải hard deadline của toàn pipeline; runner benchmark có process deadline.
 Threshold chỉ được chọn bằng business train rồi kiểm lại validation một lần.
 
+## Hướng R: model chỉ viết lại câu hỏi (`configs/rewrite.toml`)
+
+Backend thử nghiệm `rewrite` (`src/datamate/agent/rewrite.py`) dùng cùng model Qwen,
+manifest và cách nạp offline như trên, nhưng model **không lập Plan**:
+
+1. Ngữ pháp hiểu câu hỏi thì chạy baseline, không gọi model.
+2. Ngữ pháp không hiểu: chọn 6 ví dụ gần nhất (trigram ký tự sau khi bỏ dấu) trong
+   `EXAMPLES`, model viết lại câu theo cách viết chuẩn của ví dụ, hoặc trả `KHONG_RO`.
+   Prompt chỉ có câu hỏi và ví dụ, không có id, business id, rulebook hay dữ liệu.
+3. Câu viết lại phải giữ đúng mọi số (sau khi bỏ dấu tách nghìn, đổi k/triệu; chữ "một"
+   có thể thay số 1), mọi tên trong danh mục, và các từ mang nghĩa (phủ định, huỷ, trả
+   hàng, %, so với, trung bình, nhất, nhân viên, khách, nhà cung cấp, nhập, tồn, nợ...).
+4. Ngữ pháp lập Plan từ câu viết lại theo rulebook của split hiện tại. Hai lần viết lại
+   (ví dụ theo thứ tự gần trước và gần sau) phải ra cùng một Plan.
+5. Bộ tính hiện có trả lời; confidence cố định 0,5. Đường này không bao giờ trả
+   `unanswerable`. Lỗi, timeout, không chắc hoặc không qua kiểm tra đều là `abstain`.
+
+`EXAMPLES` do nhóm tự viết với tên, mã, ngày và số tiền bịa; không lấy câu train,
+public hay private. Mỗi câu chuẩn phải được ngữ pháp lập Plan với rulebook train:
+
+```sh
+uv run python scripts/check_rewrite_examples.py --split data/raw/train
+```
+
+Trên máy GPU đã chuẩn bị (xem phần trên), đo trên train và các biến thể robustness, so
+với baseline cùng dữ liệu. Không chỉnh prompt hay ví dụ theo public.
+
+```sh
+uv run --no-sync datamate benchmark --checkout . --data-dir data/raw/train --holdout outputs/business_split.json --config configs/rewrite.toml --output-dir outputs/runs/rewrite-train
+uv run --no-sync python scripts/robustness_eval.py --data-dir data/raw/train --output-dir outputs/robustness/rewrite --config configs/rewrite.toml
+```
+
+Chỉ đề xuất bật khi số câu đúng thêm lớn hơn rõ rệt số câu sai thêm, và liệt kê từng
+câu chuyển sang sai.
+
 ## Phần Plan còn cần Semantics + Data thống nhất
 
 Contract C01 cho boolean tăng doanh thu liên tục, table công nợ và nguồn công nợ
