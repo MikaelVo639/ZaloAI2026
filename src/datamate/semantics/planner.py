@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from datamate.contracts import Filter, Plan, Question, Threshold
 from datamate.semantics.rules import DEBT_TABLE_FEATURES, Rules
-from datamate.semantics.text import fold, normalize_question
+from datamate.semantics.text import fold, normalize_catalogue_name, normalize_question
 
 _AMOUNT = r"(?:bao nhieu|bao nhiu|bnhiu|bn|nhieu|nhiu|may)"
 _DATE = r"(\d{1,2})/(\d{1,2})/(\d{4})"
@@ -191,12 +191,13 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     naming exactly one of them gets a product filter. Without names, it abstains as before.
     """
     names = tuple(names)
-    text = normalize_question(question.question)
+    labels = tuple(label for field in ("product_group", "customer_group")
+                   for label in (vocabulary or {}).get(field, ()))
+    text = normalize_question(question.question, product_names=names + labels,
+                              everyday_wording=False)
     plan = _plan_question(question, text, rules, names, vocabulary, price_increases, price_source)
     if plan is not None or not everyday_wording:
         return plan
-    labels = tuple(label for field in ("product_group", "customer_group")
-                   for label in (vocabulary or {}).get(field, ()))
     rewritten = normalize_question(question.question, product_names=names + labels,
                                    as_of_year=question.as_of_date.year)
     if rewritten != text:
@@ -344,10 +345,11 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
         used.append("product_names")
         # In "số bộ van ... bán được", the named item starts at the unit itself.
         # Restore the unit consumed with the name; the executor checks the base unit.
-        product_key = normalize_question(product)
+        product_key = normalize_catalogue_name(product)
         unit_word = product_key.split()[0]
         if unit_word in _PRODUCT_UNITS:
-            original = normalize_question(question.question)
+            original = normalize_question(question.question, product_names=(product,),
+                                          everyday_wording=False)
             if re.search(rf"\bso {re.escape(product_key)} ban(?: |$)", original):
                 text = re.sub(r"\bso (?=ban\b)", f"so {unit_word} ", text, count=1)
             elif re.search(rf"\bban(?: ra| duoc)? {_AMOUNT} {re.escape(product_key)}(?: |$)",
@@ -1229,13 +1231,13 @@ def _brand_ranking(text: str, today: date, rules: Rules,
         return False
     group_text = text[:match.start()].rstrip()
     groups = [name for name in set(vocabulary.get("product_group", ()))
-              if (key := normalize_question(name))
+              if (key := normalize_catalogue_name(name))
               and re.search(rf"\b{re.escape(key)}$", group_text)]
     size = f"so {match['number']}"
     sizes = [label for label in set(vocabulary.get("product_size", ())) if fold(label) == size]
     if len(groups) != 1 or len(sizes) != 1 or match["unit"] in _NOT_UNITS:
         return False
-    reduced = group_text[:-len(normalize_question(groups[0]))] + " " + text[match.end():]
+    reduced = group_text[:-len(normalize_catalogue_name(groups[0]))] + " " + text[match.end():]
     resolved = _period(reduced, today, rules, used)
     if resolved is None:
         return False
@@ -1419,7 +1421,7 @@ def _group(text: str, vocabulary: dict[str, Iterable[str]]) -> tuple | object | 
     found = []
     for field, prefix in _GROUP_PREFIX.items():
         for name in set(vocabulary.get(field, ())):
-            key = normalize_question(name)
+            key = normalize_catalogue_name(name)
             if not key:
                 continue
             # "các đơn do khách nhóm X mua", "các khách thuộc nhóm X mua …"
@@ -1434,7 +1436,7 @@ def _group(text: str, vocabulary: dict[str, Iterable[str]]) -> tuple | object | 
                  if (f[0], f[1]) == best[:2]}
     elsewhere = [f for f in found if f[1] <= best[0] or f[0] >= best[1]]
     if len(same_span) != 1 or any(
-            (f[2], normalize_question(f[3])) != (best[2], normalize_question(best[3]))
+            (f[2], normalize_catalogue_name(f[3])) != (best[2], normalize_catalogue_name(best[3]))
             for f in elsewhere):
         return _AMBIGUOUS  # two groups, or the same words name a product and a customer group
     return text[:best[0]] + " " + text[best[1]:], best[2], best[3]
@@ -1508,7 +1510,7 @@ _PRODUCT_WORDINGS = {
 def _product(text: str, names: Iterable[str]) -> tuple[str, object]:
     """Remove the one product the question names; several different products are ambiguous."""
     found = []
-    names_by_key = [(name, normalize_question(name)) for name in set(names)]
+    names_by_key = [(name, normalize_catalogue_name(name)) for name in set(names)]
     keys = {key for _, key in names_by_key}
     for name, key in names_by_key:
         # One-word names ("Trà") are too easy to confuse with grammar; codes carry digits.
@@ -1527,7 +1529,7 @@ def _product(text: str, names: Iterable[str]) -> tuple[str, object]:
     for item in sorted(found, key=lambda f: (f[0] - f[1], f[0], f[2])):  # longest first
         if all(item[1] <= c[0] or item[0] >= c[1] for c in chosen):
             chosen.append(item)
-    if len({normalize_question(c[2]) for c in chosen}) != 1:
+    if len({normalize_catalogue_name(c[2]) for c in chosen}) != 1:
         return text, _AMBIGUOUS
     for start, end, _ in sorted(chosen, reverse=True):
         before = _PRODUCT_MARKER.sub(" ", text[:start])
@@ -1699,7 +1701,7 @@ def _avg_purchase(text: str, today: date, rules: Rules, names: Iterable[str]) ->
     if not product or product is _AMBIGUOUS:
         return None
     text = re.sub(r"\s+", " ", text).strip()
-    product_key = normalize_question(product)
+    product_key = normalize_catalogue_name(product)
     unit_word = product_key.split()[0]
     if (unit_word in _PRODUCT_UNITS and
             re.search(rf"\bgia nhap binh quan (?:cua )?{_ONE} {re.escape(product_key)}(?: |$)",

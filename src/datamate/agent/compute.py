@@ -156,24 +156,29 @@ def _customer_name_key(value: str | None) -> str | None:
     return None if not name or fold(name) in WALK_IN_NAMES else name
 
 
-def customer_keys(sales: list[Sale]) -> dict[int, str | None]:
+def customer_keys(
+    sales: list[Sale], *, uses_customer_codes: bool | None = None,
+) -> dict[int, str | None]:
     """Customer of each sale by the rulebook's "Xác định khách": the customer code when the
     shop records codes, otherwise the name written on the order (spacing/case folded);
     walk-in orders (no code / no name / "Khách lẻ") belong to no customer."""
-    has_codes = any(s.customer_id for s in sales)
+    if uses_customer_codes is None:
+        uses_customer_codes = any(s.customer_id for s in sales)
     keys: dict[int, str | None] = {}
     for index, sale in enumerate(sales):
-        if has_codes:
+        if uses_customer_codes:
             keys[index] = sale.customer_id or None
             continue
         keys[index] = _customer_name_key(sale.customer_name)
     return keys
 
 
-def customer_totals(sales: list[Sale]) -> dict[str, dict[str, Any]]:
+def customer_totals(
+    sales: list[Sale], *, uses_customer_codes: bool | None = None,
+) -> dict[str, dict[str, Any]]:
     """Revenue, valid orders and a display name per customer (input: valid rows only)."""
     totals: dict[str, dict[str, Any]] = {}
-    for index, key in customer_keys(sales).items():
+    for index, key in customer_keys(sales, uses_customer_codes=uses_customer_codes).items():
         if key is None:
             continue
         sale = sales[index]
@@ -185,9 +190,10 @@ def customer_totals(sales: list[Sale]) -> dict[str, dict[str, Any]]:
     return totals
 
 
-def customer_ranking(selected: list[Sale], by: str) -> list[tuple[str, str, Decimal]]:
+def customer_ranking(selected: list[Sale], by: str, *,
+                     uses_customer_codes: bool | None = None) -> list[tuple[str, str, Decimal]]:
     """(key, display name, measure) descending; ties by code ascending (no code: name)."""
-    totals = customer_totals(selected)
+    totals = customer_totals(selected, uses_customer_codes=uses_customer_codes)
     measure = (lambda e: e["revenue"]) if by == "revenue" else (lambda e: Decimal(len(e["orders"])))
     rows = [(key, entry["code"] or entry["name"], entry["name"], measure(entry))
             for key, entry in totals.items()]
@@ -195,9 +201,10 @@ def customer_ranking(selected: list[Sale], by: str) -> list[tuple[str, str, Deci
     return [(key, name, value) for key, _tie, name, value in rows]
 
 
-def customers_meeting(selected: list[Sale], minimum_orders: int) -> tuple[int, int]:
+def customers_meeting(selected: list[Sale], minimum_orders: int, *,
+                      uses_customer_codes: bool | None = None) -> tuple[int, int]:
     """(customers with at least ``minimum_orders`` valid orders, customers who bought)."""
-    totals = customer_totals(selected)
+    totals = customer_totals(selected, uses_customer_codes=uses_customer_codes)
     return sum(len(e["orders"]) >= minimum_orders for e in totals.values()), len(totals)
 
 
@@ -205,8 +212,10 @@ def customers_meeting(selected: list[Sale], minimum_orders: int) -> tuple[int, i
 RULEBOOK_CUSTOMER_RANKS = ("purchase_days", "average_order", "cancelled_orders")
 
 
-def customer_rulebook_ranking(rows: list[Sale], by: str, minimum_orders: int = 0
-                              ) -> list[tuple[str, str, Decimal]]:
+def customer_rulebook_ranking(
+    rows: list[Sale], by: str, minimum_orders: int = 0, *,
+    uses_customer_codes: bool | None = None,
+) -> list[tuple[str, str, Decimal]]:
     """(key, display name, measure) descending; ties by code ascending (no code: name).
 
     ``rows`` are all rows ordered in the period, any status. "purchase_days": days with a
@@ -218,7 +227,7 @@ def customer_rulebook_ranking(rows: list[Sale], by: str, minimum_orders: int = 0
     if by not in RULEBOOK_CUSTOMER_RANKS:
         raise ValueError(f"Unknown customer measure {by!r}")
     entries: dict[str, dict[str, Any]] = {}
-    for index, key in customer_keys(rows).items():
+    for index, key in customer_keys(rows, uses_customer_codes=uses_customer_codes).items():
         if key is None:
             continue
         sale = rows[index]
@@ -2247,17 +2256,19 @@ def _answer_product_ranking(plan: Plan, sales: list[Sale], eligible: frozenset[i
 
 
 def _answer_rulebook_customers(plan: Plan, sales: list[Sale], evidence: dict[str, Any],
-                               window: str, source_expr: str) -> Candidate:
+                               window: str, source_expr: str,
+                               uses_customer_codes: bool) -> Candidate:
     rows = select_period(sales, plan.start, plan.end)
     minimum = int(plan.threshold.value) if plan.threshold is not None else 0
     evidence["inputs"].update(period_rows=len(rows))
     if not any(s.customer_id or s.customer_name for s in rows):
         return Candidate(reason="No customer recorded on the orders", evidence=evidence)
-    ranking = customer_rulebook_ranking(rows, plan.rank_by, minimum)
+    ranking = customer_rulebook_ranking(rows, plan.rank_by, minimum,
+                                        uses_customer_codes=uses_customer_codes)
     among = f" among customers with >= {minimum} valid orders" if minimum else ""
     evidence.update(calculation=f"customers by {plan.rank_by}{among}, descending; ties by code",
                     code=_code(f"customer_rulebook_ranking(select_period({source_expr}, {window}), "
-                               f"{plan.rank_by!r}, {minimum})",
+                               f"{plan.rank_by!r}, {minimum}, uses_customer_codes={uses_customer_codes!r})",
                                select_period, customer_rulebook_ranking, customer_keys),
                     ranking=[{"customer": name, "value": str(value)}
                              for _, name, value in ranking[:2]])
@@ -2361,14 +2372,24 @@ def _answer_extended(plan: Plan, sales: list[Sale], full: list[Sale],
                                    select_valid, count_at_least, daily_revenue),
                         result=value)
         return Candidate("number", value, 1.0, "", evidence)
+    # The identity mode belongs to the whole sales source. A date/status filter
+    # can remove every coded order while leaving names on walk-in orders.
+    uses_customer_codes = (
+        bool(evidence.get("uses_customer_codes"))
+        or "customer_id" in evidence.get("customer_order_columns", {})
+        or any(s.customer_id for s in full)
+    )
+    evidence["inputs"]["uses_customer_codes"] = uses_customer_codes
     if plan.intent == "top_customers" and plan.rank_by in RULEBOOK_CUSTOMER_RANKS:
-        return _answer_rulebook_customers(plan, sales, evidence, window, source_expr)
+        return _answer_rulebook_customers(plan, sales, evidence, window, source_expr,
+                                          uses_customer_codes)
     if not any(s.customer_id or s.customer_name for s in selected):
         return Candidate(reason="No customer recorded on the orders", evidence=evidence)
     if plan.intent == "top_customers":
-        ranking = customer_ranking(selected, plan.rank_by)
+        ranking = customer_ranking(selected, plan.rank_by, uses_customer_codes=uses_customer_codes)
         evidence.update(calculation=f"customers by {plan.rank_by}, descending; ties by code",
-                        code=_code(f"customer_ranking({selection}, {plan.rank_by!r})",
+                        code=_code(f"customer_ranking({selection}, {plan.rank_by!r}, "
+                                   f"uses_customer_codes={uses_customer_codes!r})",
                                    select_valid, customer_ranking, customer_totals,
                                    customer_keys),
                         ranking=[{"customer": name, "value": str(value)}
@@ -2380,10 +2401,11 @@ def _answer_extended(plan: Plan, sales: list[Sale], full: list[Sale],
         evidence["result"] = result
         return Candidate("string" if plan.top_k == 1 else "list", result, 1.0, "", evidence)
     minimum = int(plan.threshold.value)
-    meeting, bought = customers_meeting(selected, minimum)
+    meeting, bought = customers_meeting(selected, minimum, uses_customer_codes=uses_customer_codes)
     evidence.update(calculation=f"customers with >= {minimum} valid orders"
                     + (" / customers who bought x 100" if plan.comparison == "share" else ""),
-                    code=_code(f"customers_meeting({selection}, {minimum})", select_valid,
+                    code=_code(f"customers_meeting({selection}, {minimum}, "
+                               f"uses_customer_codes={uses_customer_codes!r})", select_valid,
                                customers_meeting, customer_totals, customer_keys),
                     customers_meeting=meeting, customers_bought=bought)
     if plan.comparison != "share":

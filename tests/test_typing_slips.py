@@ -6,12 +6,15 @@ import unittest
 from datetime import date
 
 from test_new_intents import ROWS as ORDER_ROWS
+from test_sale_context_fields import _Shop
 from test_sem02_grammar import rulebook
 from test_semantics_periods import GOODS
 from test_semantics_periods import ROWS as PERIOD_ROWS
 from test_staff import BEST
 
-from datamate.contracts import Question
+from datamate.agent.baseline import BaselineAgent
+from datamate.contracts import BusinessContext, Question, Split
+from datamate.demo import COLUMNS
 from datamate.semantics.planner import plan_question
 from datamate.semantics.rules import read_rules
 from datamate.semantics.text import normalize_question
@@ -81,6 +84,20 @@ class TypingSlipTests(unittest.TestCase):
                             plan("Tháng 3/2026 bán được bao nhiêu tiền?"))
         self.assertIsNone(plan("Tháng 3/2026 khách nào mua nhiều lần nhất?"))
 
+    def test_marked_slip_can_overlap_a_longer_catalogue_name(self):
+        question = "Tháng 3/2026 doanh thu Bột Tiền Báng 500g?"
+        names = ("Bột Tiền Báng 500g", "Bột Tiền Bán 500g")
+        self.assertEqual(plan(question, names).filters[0].value, names[0])
+
+    def test_compound_particle_after_a_name_can_still_be_removed(self):
+        names = ("Bột Nha E", "Bột Ngũ Cốc")
+        self.assertSamePlan("Tháng 3/2026 doanh thu Bột Nha E?",
+                            "Tháng 3/2026 doanh thu Bột Nha E nha e nha?", names)
+        self.assertEqual(plan("Tháng 3/2026 doanh thu SP Nha E?", ("SP Nha E",))
+                         .filters[0].value, "SP Nha E")
+        self.assertSamePlan("Tháng 3/2026 doanh thu Bột Ngũ Cốc?",
+                            "Tháng 3/2026 doanh thu Bột Ngũ Cốc nhe e?", names)
+
     def test_spoken_and_short_months(self):
         self.assertSamePlan("Tháng 3 cửa hàng có bao nhiêu đơn bị huỷ?",
                             "Tháng ba quán có tất cả bao nhiêu đơn bị huỷ thế?")
@@ -107,6 +124,29 @@ class TypingSlipTests(unittest.TestCase):
         # An unaccented closing "the" may be the unit "thẻ" outside an average-order question.
         self.assertEqual(normalize("Tuan truoc ban duoc bao nhieu the"),
                          normalize_question("Tuan truoc ban duoc bao nhieu the"))
+
+
+class CatalogueIdentityTests(_Shop):
+    def test_product_names_are_preserved_on_the_agents_first_pass(self):
+        names = ("Tiền Báng", "Tiền Bán", "Nha E", "Bánh Nhe E")
+        catalog = self.shop("", {"sales.csv": [
+            COLUMNS, *[(f"O{i}", "2026-03-01", "completed", f"P{i}", name, 1, amount)
+                       for i, (name, amount) in enumerate(zip(names, (100, 200, 300, 400)))],
+        ]})
+        split = Split(self.data.parent, (), BOOK, self.data.parent / "calendar.csv")
+        context = BusinessContext(split, catalog)
+        agent = BaselineAgent()
+        self.addCleanup(agent.close)
+        for text, expected in (
+            ("Doanh thu Tiền Báng tháng 3/2026?", 100),
+            ("Tháng 3/2026 doanh thu Tiền Bán?", 200),
+            ("Tháng 3/2026 doanh thu Nha E?", 300),
+            ("Tháng 3/2026 doanh thu Bánh Nhe E nha?", 400),
+            ("Tháng 3/2026 bán được bao nhiêu tền?", 1000),
+        ):
+            with self.subTest(text=text):
+                result = agent.answer(Question("q", "shop", text, date(2026, 4, 10)), context)
+                self.assertEqual((result.type, result.answer), ("number", expected), result.reason)
 
 
 if __name__ == "__main__":

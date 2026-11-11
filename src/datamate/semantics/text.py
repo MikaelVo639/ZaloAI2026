@@ -1,6 +1,8 @@
 import re
 import unicodedata
+from collections import Counter
 from collections.abc import Iterable
+from functools import lru_cache
 
 
 def fold(value: object) -> str:
@@ -59,9 +61,13 @@ _TRANSPOSABLE = frozenset("""
 # Closing particles that never carry a condition; removed only at the end of a question.
 # Not "do", "luon", "rua", "ta": at the end they may be part of a name ("áo đỏ", "lươn",
 # "nước rửa") or a unit ("tạ").
-_CLOSING = re.compile(
-    r"(?:\s+(?:vay|day|dzay|zay|zi|z|v|a|ak|ah|ha|nhi|nha|nhe|nhen|hen|ne|di|the nhi|roi"
-    r"|nha e|nhe e))+$")
+_CLOSING_PARTICLE = (
+    r"\s+(?:vay|day|dzay|zay|zi|z|v|a|ak|ah|ha|nhi|nha|nhe|nhen|hen|ne|di|the nhi|roi"
+    r"|nha e|nhe e)"
+)
+_CLOSING = re.compile(rf"(?:{_CLOSING_PARTICLE})+$")
+_LAST_PARTICLE = re.compile(rf"{_CLOSING_PARTICLE}$")
+_COMPOUND_PARTICLE = re.compile(r"\b(?:nha|nhe) e\b")
 # Calling someone at the start of a question: "em ơi", "ad ơi", "ủa".
 _CALLING = re.compile(r"^(?:(?:(?:e|em|a|anh|chi|ad|admin|ban|be|shop) )?oi |(?:ui|ua|e{2,}) )+")
 # Month/year with a two-digit year: "12/25", "th 3/26". The data years 2020-2039 are all
@@ -80,32 +86,77 @@ def _untranspose(token: str) -> str:
 # Misspellings told apart by their diacritics, which folding would lose. "tiềng"/"tền" are
 # not words, so they are "tiền" (never "tiếng" = hour or "tên" = name); "nhân diên" is
 # "nhân viên" (not "điện"), "xố đơn" is "số đơn", "mí đơn" is "mấy đơn".
-_MARKED_SLIPS = (
+_MARKED_SLIPS = tuple((re.compile(pattern, re.IGNORECASE), replacement)
+                      for pattern, replacement in (
     (r"(?<!\w)(tiềng|tền)(?!\w)", "tiền"),
     (r"(?<!\w)(tiền) báng(?!\w)", r"\1 bán"),
     (r"(?<!\w)(nhân) diên(?!\w)", r"\1 viên"),
     (r"(?<!\w)xố (đơn)(?!\w)", r"số \1"),
     (r"(?<!\w)mí (đơn)(?!\w)", r"mấy \1"),
-)
+    (r"(?<!\w)đơng(?!\w)", "đơn"),
+    (r"(?<!\w)(t[ỉỷ]) nệ(?!\w)", r"\1 lệ"),
+))
 
 
-def _marked_slips(raw: str) -> str:
+def _compound_closing(closing: re.Match[str] | None) -> bool:
+    return closing is not None and _COMPOUND_PARTICLE.search(closing[0]) is not None
+
+
+def catalogue_sensitive_wording(value: str) -> bool:
+    """Whether a rewrite needs the business vocabulary before the first planning pass."""
+    raw = unicodedata.normalize("NFC", value)
+    return (any(pattern.search(raw) for pattern, _ in _MARKED_SLIPS)
+            or _compound_closing(_CLOSING.search(fold(raw))))
+
+
+def _catalogue_mentions(text: str, keys: set[str]) -> Counter[str]:
+    words = text.split()
+    widths = {key.count(" ") + 1 for key in keys}
+    return Counter(phrase for width in widths for i in range(len(words) - width + 1)
+                   if (phrase := " ".join(words[i:i + width])) in keys)
+
+
+def _marked_slips(raw: str, names: tuple[str, ...]) -> str:
     raw = unicodedata.normalize("NFC", raw)
+    keys = None
     for pattern, replacement in _MARKED_SLIPS:
-        raw = re.sub(pattern, replacement, raw, flags=re.IGNORECASE)
+        if not names:
+            raw = pattern.sub(replacement, raw)
+        elif pattern.search(raw):
+            if keys is None:
+                keys = {normalize_catalogue_name(name) for name in names}
+            before = _catalogue_mentions(_question_text(raw), keys)
+
+            def replace(match: re.Match[str]) -> str:
+                new = match.expand(replacement)
+                updated = raw[:match.start()] + new + raw[match.end():]
+                mentions = _catalogue_mentions(_question_text(updated), keys)
+                return match[0] if before - mentions else new
+
+            raw = pattern.sub(replace, raw)
     return raw
 
 
-def normalize_question(value: object, *, product_names: Iterable[str] | None = None,
-                       as_of_year: int | None = None) -> str:
-    """Fold a question for grammar matching: Telex leftovers, abbreviations, date spellings.
+def _strip_closing(text: str, names: tuple[str, ...]) -> str:
+    closing = _CLOSING.search(text)
+    if closing is None:
+        return text
+    if not names or not _compound_closing(closing):
+        return text[:closing.start()]
+    keys = {normalize_catalogue_name(name) for name in names}
+    before = _catalogue_mentions(text, keys)
+    # A plain particle may follow a product whose name ends in "nha e".
+    while match := _LAST_PARTICLE.search(text):
+        shortened = text[:match.start()]
+        if before - _catalogue_mentions(shortened, keys):
+            break
+        text = shortened
+    return text
 
-    Only for planning. Ingestion and answer matching keep using `fold`/`normalize_answer`,
-    and names quoted in a question must still be read from the original text.
-    """
+
+def _question_text(raw: str) -> str:
     # fold() drops "%", which would turn "bao nhiêu % đơn bị huỷ" into a count question.
-    raw = str(value).replace("%", " phần trăm ")
-    raw = _marked_slips(raw)
+    raw = raw.replace("%", " phần trăm ")
     # fold() also drops "≥": "doanh thu ≥ 580.000 đồng", "mua ≥ 4 đơn" are the rulebook's
     # "từ N trở lên" (gồm N). "≤", "<", ">" stay unread, so those questions abstain.
     raw = re.sub(r"(?:≥|>=|⩾)\s*(\d[\d.,]*)\s*((?:đồng|dong|đ|vnđ|vnd|"
@@ -114,10 +165,6 @@ def normalize_question(value: object, *, product_names: Iterable[str] | None = N
     # fold() also drops "-": "15-3-2026" / "3-2026" are the same dates as "15/3/2026" / "3/2026".
     raw = re.sub(r"(?<![\d/-])(\d{1,2})-(\d{1,2})-(\d{4})(?![\d/-])", r"\1/\2/\3", raw)
     raw = re.sub(r"(?<![\d/-])(\d{1,2})-(\d{4})(?![\d/-])", r"\1/\2", raw)
-    # Misspellings that are not words, told apart by their marks: "đơng" = "đơn",
-    # "tỉ nệ" = "tỉ lệ".
-    raw = re.sub(r"(?<!\w)đơng(?!\w)", "đơn", raw, flags=re.IGNORECASE)
-    raw = re.sub(r"(?<!\w)(t[ỉỷ]) nệ(?!\w)", r"\1 lệ", raw, flags=re.IGNORECASE)
     tokens = [_untranspose(_untelex(token)) for token in fold(raw).split()]
     text = " ".join(ABBREVIATIONS.get(token, token) for token in tokens)
     # Central "ni" = "này": "năm ni", "tháng ni", "bữa ni".
@@ -154,10 +201,28 @@ def normalize_question(value: object, *, product_names: Iterable[str] | None = N
                   text)
     # "tiệm" as the subject: "hôm nay tiệm bán được…".
     text = re.sub(r"\btiem(?= (?:ban|co|dat|nhan|len|thu)\b)", "cua hang", text)
-    original = _CLOSING.sub("", _CALLING.sub("", text))
-    if product_names is None:
+    return text
+
+
+def normalize_question(value: object, *, product_names: Iterable[str] | None = None,
+                       as_of_year: int | None = None, everyday_wording: bool = True) -> str:
+    """Fold a question for grammar matching, preserving names during ambiguous rewrites."""
+    names = tuple(product_names) if product_names is not None else ()
+    text = _question_text(_marked_slips(str(value), names))
+    original = _strip_closing(_CALLING.sub("", text), names)
+    if product_names is None or not everyday_wording:
         return original
-    return _everyday_wording(text, original, str(value), tuple(product_names), as_of_year)
+    return _everyday_wording(text, original, str(value), names, as_of_year)
+
+
+@lru_cache(maxsize=8192)
+def normalize_catalogue_name(name: str) -> str:
+    """Use the same search keys without applying question-only edits to catalogue labels."""
+    text = _CALLING.sub("", _question_text(name))
+    closing = _CLOSING.search(text)
+    if closing is not None and not _compound_closing(closing):
+        return text[:closing.start()]
+    return text
 
 
 # Read amounts before folding so a decimal, a sign, or punctuation cannot become a
@@ -235,8 +300,8 @@ def _prior_year_reference(text: str, as_of_year: int | None) -> str:
     return re.sub(r"\b(so (?:voi|vs) )thang (\d{1,2}) nam (?:roi|ngoai)\b", replace, text)
 
 
-def _closing_wording(text: str, raw: str) -> str:
-    text = _CLOSING.sub("", text)
+def _closing_wording(text: str, raw: str, names: tuple[str, ...]) -> str:
+    text = _strip_closing(text, names)
     if re.search(r"\b(?:doanh thu|dthu)\b", text):
         text = re.sub(r"(?<=\bcua hang) luon$", "", text)
     if re.search(r"\b(?:rồi|roi) ta\W*$", raw):
@@ -310,7 +375,7 @@ def _everyday_wording(text: str, original: str, value: str, names: tuple[str, ..
     amounts = _SHOP_MARKED.sub(
         lambda match: match[0] if fold(match[0]) in occupied else "cửa hàng", amounts)
     if amounts != raw:
-        text = normalize_question(amounts)
+        text = normalize_question(amounts, product_names=names, everyday_wording=False)
     text = _store_subject(text, raw, names)
     text = _shop_plain(text, raw, names)
     text = re.sub(r"\b(?:doanh thu|dthu) bq(?= (?:moi|mot|1) don\b)",
@@ -345,7 +410,7 @@ def _everyday_wording(text: str, original: str, value: str, names: tuple[str, ..
     text = re.sub(r"\bcaonhat\b", "cao nhat", text)
     text = _typing_slips(text, occupied)
     text = _prior_year_reference(text, as_of_year)
-    text = _CALLING.sub("", _closing_wording(text, raw))
+    text = _CALLING.sub("", _closing_wording(text, raw, names))
     while True:
         shorter = _CALLING.sub("", _LEAD_IN.sub("", text))
         if shorter == text:
@@ -356,7 +421,7 @@ def _everyday_wording(text: str, original: str, value: str, names: tuple[str, ..
         # occurrence counts when rewriting the surrounding question.
         words = normalize_answer(value).split()
         for name in names:
-            key = normalize_question(name)
+            key = normalize_catalogue_name(name)
             if key and f" {original} ".count(f" {key} ") != f" {text} ".count(f" {key} "):
                 width = len(key.split())
                 occurrences = [" ".join(words[i:i + width]) for i in range(len(words) - width + 1)

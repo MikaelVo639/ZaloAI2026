@@ -1092,3 +1092,26 @@ cho toàn bộ 51 ca cần xem xét:
 Kết quả kiểm tra nền tảng trên bản ghép: smoke qua (21 đúng / 0 sai / 3 abstain, PA 0.875),
 unittest chạy 533 ca (532 qua, 1 skip). Bảng đối soát chi tiết từng câu lưu tại
 `source-audit.csv` trong thư mục audit `outputs/eval02/`.
+
+## Bảo toàn tên hàng và mã khách khi lập kế hoạch — 11/11/2026
+
+Đối chứng là `main@83e1154` sau #62–#64, dùng `configs/baseline.toml`.
+Agent nạp tên hàng và nhóm trước lượt lập kế hoạch có sửa lỗi gõ có dấu
+hoặc bỏ cụm cuối “nha e”, “nhe e”. Bộ chuẩn hóa giữ các tên khớp nguồn,
+kể cả khi câu còn có một tiểu từ thật đứng sau tên. Bộ tính xếp hạng và
+đếm khách xác định chế độ dùng mã từ nguồn bán hàng toàn cửa hàng trước
+khi lọc kỳ và trạng thái. Cột mã đã được nguồn xác nhận vẫn xác lập chế
+độ theo mã khi mọi ô mã trống.
+
+Fixture kiểm hai mặt hàng tên “Tiền Báng” và “Tiền Bán”, mặt hàng “Nha E”
+ở cuối câu, cửa hàng chỉ có mã khách ở ngoài kỳ, cột mã trống toàn bộ và
+cửa hàng chỉ ghi tên. `uv sync --locked`, smoke, Ruff và diff check qua.
+Unittest chạy 558 ca, 557 qua và 1 skip.
+
+Lượt đủ 1.000 câu public trùng từng kết quả theo ID, gồm 749 đáp án cụ
+thể, 5 unanswerable và 246 abstain. Public chưa có nhãn chấm độ đúng.
+
+Lượt train đủ 3.000 câu chạy thành bốn nhóm theo cửa hàng, dùng cùng
+rulebook, calendar và cấu hình với đối chứng. Sau khi ghép, tất cả kết
+quả trùng theo ID. Scorer local proxy ghi 2.949 đúng, 1 sai và 50 abstain.
+Cả train và public đều có 0 lỗi thực thi.

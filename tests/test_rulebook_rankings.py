@@ -8,8 +8,10 @@ from datetime import date
 from decimal import Decimal
 
 from test_new_intents import ROWS as INTENT_ROWS
+from test_sale_context_fields import _Shop
 from test_sem02_grammar import rulebook
 
+from datamate.agent.baseline import BaselineAgent
 from datamate.agent.compute import (
     customer_rulebook_ranking,
     daily_orders,
@@ -17,7 +19,7 @@ from datamate.agent.compute import (
     product_order_ranking,
     unsupported,
 )
-from datamate.contracts import Plan, Question, Threshold
+from datamate.contracts import BusinessContext, Plan, Question, Split, Threshold
 from datamate.ingestion.sales import Sale
 from datamate.semantics.planner import plan_question
 from datamate.semantics.rules import read_rules
@@ -145,6 +147,69 @@ class RulebookRankingComputeTests(unittest.TestCase):
         self.assertEqual(daily_orders(rows), [(date(2026, 3, 1), 2), (date(2026, 3, 2), 1)])
         self.assertEqual(hourly_orders(rows), [(9, 2), (8, 1)])
         self.assertIsNone(hourly_orders(rows + [sale("A4", 2)]))  # an order without a time
+
+
+class CustomerIdentityTests(_Shop):
+    def context(self, business, *, coded, earlier_code=None):
+        readme = """\
+## Cột trong `sales.csv`
+- **CT**: mã đơn
+- **Ngày**: ngày bán
+- **Xử lý**: trạng thái đơn
+- **Mã SP**: mã hàng
+- **Tên SP**: tên hàng
+- **SL**: số lượng đã đổi ra đơn vị cơ bản
+- **Tiền**: thành tiền sau giảm
+- **Tên KH**: tên khách
+"""
+        header = ["CT", "Ngày", "Xử lý", "Mã SP", "Tên SP", "SL", "Tiền", "Tên KH"]
+        rows = [
+            ["A", "2026-02-28", "completed", "P1", "Bánh mì", 1, 100, "Lan"],
+            ["B", "2026-03-01", "completed", "P1", "Bánh mì", 1, 100, "Bình"],
+            ["C", "2026-03-02", "completed", "P1", "Bánh mì", 1, 100, "Bình"],
+            ["D", "2026-03-02", "completed", "P1", "Bánh mì", 1, 100, "Bình"],
+            ["E", "2026-03-03", "cancelled", "P1", "Bánh mì", 1, 100, "Bình"],
+        ]
+        if coded:
+            readme += "- **Mã KH**: mã khách (trống nếu khách lẻ)\n"
+            header.append("Mã KH")
+            for row, code in zip(rows, (earlier_code, None, None, None, None)):
+                row.append(code)
+        catalog = self.shop(readme, {"sales.csv": [header, *rows]}, business=business)
+        rules = book() + (
+            "| Trạng thái đơn | mỗi đơn có đúng một trong bốn trạng thái: "
+            "hoàn thành, huỷ, trả hàng, đang giao |\n"
+        )
+        split = Split(self.data.parent, (), rules, self.data.parent / "calendar.csv")
+        return BusinessContext(split, catalog)
+
+    def test_identity_mode_survives_date_and_status_filters(self):
+        agent = BaselineAgent()
+        self.addCleanup(agent.close)
+        for business, coded, earlier_code in (
+            ("code-outside-period", True, "KH1"),
+            ("code-column-all-blank", True, None),
+            ("name-only", False, None),
+        ):
+            context = self.context(business, coded=coded, earlier_code=earlier_code)
+            for text in (
+                "Tháng 3/2026 ai là khách trung thành nhất?",
+                "Tháng 3/2026 khách sộp nhất là ai?",
+                "Tháng 3/2026 ai là khách hay đổi ý nhất?",
+                "Tháng 3/2026 khách nào mua nhiều tiền nhất?",
+            ):
+                with self.subTest(business=business, text=text):
+                    question = Question("q", business, text, date(2026, 4, 10))
+                    result = agent.answer(question, context)
+                    expected = ("abstain", None) if coded else ("string", "Bình")
+                    self.assertEqual((result.type, result.answer), expected, result.reason)
+                    self.assertIs(result.evidence["inputs"]["uses_customer_codes"], coded)
+            question = Question("q", business,
+                                "Tháng 3/2026 có bao nhiêu khách mua từ 2 đơn trở lên?",
+                                date(2026, 4, 10))
+            result = agent.answer(question, context)
+            self.assertEqual((result.type, result.answer), ("number", 0 if coded else 1),
+                             result.reason)
 
 
 if __name__ == "__main__":

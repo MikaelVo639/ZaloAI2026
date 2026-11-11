@@ -1343,6 +1343,10 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         "column_meanings": sorted({s.origin for e in roles.values() for s in e.sections}),
         "tables": sorted({table.key for entry in roles.values() for _, table in entry.tables}),
         "sales_rows": len(sales),
+        "uses_customer_codes": (
+            "customer_id" in line_fields
+            or ("orders" in roles and "customer_id" in roles["orders"].sections[0].fields)
+        ),
         "counts": {**counts, **order_counts, "orders_in_lines": len(order_state)},
         "status_counts": dict(sorted(status_counts.items())),
         "product_join": dict(product_join),
