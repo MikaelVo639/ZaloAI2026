@@ -148,7 +148,7 @@ def _best_day(text: str) -> str | None:
 def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
                   vocabulary: dict[str, Iterable[str]] | None = None, *,
                   price_increases: dict[tuple[str, Decimal], date] | None = None,
-                  price_source: str = "", everyday_wording: bool = True) -> Plan | None:
+                  price_source: str = "") -> Plan | None:
     """Closed grammar: leftover filters/comparisons cause abstention.
 
     `names` are product names/codes of the business (from the Agent's data); a question
@@ -157,24 +157,14 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     names = tuple(names)
     text = normalize_question(question.question)
     plan = _plan_question(question, text, rules, names, vocabulary, price_increases, price_source)
-    if plan is not None or not everyday_wording:
+    if plan is not None:
         return plan
     labels = tuple(label for field in ("product_group", "customer_group")
                    for label in (vocabulary or {}).get(field, ()))
-    rewritten = normalize_question(question.question, product_names=names + labels,
-                                   as_of_year=question.as_of_date.year)
-    if rewritten != text:
-        plan = _plan_question(question, rewritten, rules, names, vocabulary, price_increases,
+    corrected = _repair_grammar_tokens(text, names + labels)
+    if corrected != text:
+        return _plan_question(question, corrected, rules, names, vocabulary, price_increases,
                               price_source)
-        if plan is not None:
-            return plan
-    for wording in dict.fromkeys((text, rewritten)):
-        corrected = _repair_grammar_tokens(wording, names + labels)
-        if corrected != wording:
-            plan = _plan_question(question, corrected, rules, names, vocabulary,
-                                  price_increases, price_source)
-            if plan is not None:
-                return plan
     return None
 
 

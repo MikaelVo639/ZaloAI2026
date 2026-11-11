@@ -30,8 +30,7 @@ def _tet_windows(calendar: Path, years: set[int]) -> dict[int, tuple[date, date]
 
 
 def plan_tet(question: Question, rules: Rules, rulebook: str, calendar: Path) -> Plan | None:
-    text = normalize_question(question.question, product_names=(),
-                              as_of_year=question.as_of_date.year)
+    text = normalize_question(question.question)
     if not re.search(r"\btet\b", text):
         return None
     row = next((line for line in rulebook.splitlines()
