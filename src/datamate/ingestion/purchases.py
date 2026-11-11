@@ -1,8 +1,8 @@
 """Purchase receipts (phiếu nhập) of one business, from the lists its README describes.
 
-Receipt totals ("tổng tiền phiếu nhập") may appear once per receipt or repeat on documented
-detail rows. Purchase books carrying "tiền nhập của cả dòng" are summed per receipt.
-A KiotViet receipt export without a README
+Two documented shapes: a receipt list with the total of each receipt ("tổng tiền phiếu
+nhập", optional "trạng thái phiếu nhập"), or a purchase book whose lines carry "tiền nhập
+của cả dòng" and are summed per receipt. A KiotViet receipt export without a README
 section is read with the meanings KiotViet-export READMEs give its columns. Anything
 undocumented, inconsistent or with an unknown status raises ``PurchaseSourceError``.
 """
@@ -37,7 +37,6 @@ _FIELDS = {
     "tien nhap cua ca dong": "line_amount",
     "nha cung cap": "supplier_name",
     "ma nha cung cap": "supplier_code",
-    "so thu tu dong trong phieu nhap": "line_id",
     # Lines of a receipt (giá nhập bình quân, rulebook §5).
     "ma hang": "product_id",
     "ten hang": "product_name",
@@ -89,7 +88,6 @@ class Receipt:
     total: Decimal
     supplier: str | None  # supplier name, or code when the source only records a code
     cancelled: bool
-    supplier_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -97,7 +95,6 @@ class PurchaseBook:
     receipts: tuple[Receipt, ...]
     supplier_names: bool  # True when ``supplier`` is a name, False for codes / unknown
     source: str
-    supplier_codes: bool = False
 
 
 def _field(meaning: str) -> str | None:
@@ -211,20 +208,12 @@ def load_purchases(catalog: Catalog) -> PurchaseBook:
             day = parse_day(row.get(fields["day"]))
             supplier = row.get(fields[supplier_field]) if supplier_field else None
             supplier = None if supplier in (None, "") else str(supplier).strip()
-            code = row.get(fields.get("supplier_code", ""))
-            code = None if code in (None, "") else str(code).strip()
-            status = row.get(fields["status"]) if "status" in fields else None
-            cancelled = _cancelled(status) if "status" in fields else False
-            record = {"day": day, "supplier": supplier, "cancelled": cancelled, "code": code}
+            cancelled = _cancelled(row.get(fields["status"])) if "status" in fields else False
+            record = {"day": day, "supplier": supplier, "cancelled": cancelled}
             if headers:
-                amount = parse_amount(row.get(fields["total"]))
-                line_id = row.get(fields.get("line_id", ""))
-                if "line_id" in fields and (line_id is None or not str(line_id).strip()):
-                    raise PurchaseSourceError("key", "Receipt detail is missing its line number")
                 if key in receipts:
-                    if "line_id" not in fields or receipts[key] != record or totals[key] != amount:
-                        raise PurchaseSourceError("key", "Receipt headers repeat or disagree")
-                totals[key] = amount
+                    raise PurchaseSourceError("key", "Receipt list repeats a receipt id")
+                totals[key] = parse_amount(row.get(fields["total"]))
             else:
                 if key in receipts and receipts[key] != record:
                     raise PurchaseSourceError("key", "Lines of one receipt disagree")
@@ -241,10 +230,9 @@ def load_purchases(catalog: Catalog) -> PurchaseBook:
     return PurchaseBook(
         tuple(Receipt(key, r["day"], totals[key],
                       supplier_names.get(r["supplier"]) if supplier_names else r["supplier"],
-                      r["cancelled"], r["code"])
+                      r["cancelled"])
               for key, r in receipts.items()),
-        supplier_field == "supplier_name" or bool(supplier_names), section.label,
-        "supplier_code" in fields)
+        supplier_field == "supplier_name" or bool(supplier_names), section.label)
 
 
 @dataclass(frozen=True)
@@ -264,7 +252,6 @@ class PurchaseLines:
     lines: tuple[PurchaseLine, ...]
     source: str
     convention: str
-    product_codes: bool = False
 
 
 def _price_convention(readme: str) -> tuple[str, str]:
@@ -365,4 +352,4 @@ def load_purchase_lines(catalog: Catalog) -> PurchaseLines:
         raise PurchaseSourceError("value", f"Purchase line unreadable: {exc}") from exc
     if not lines:
         raise PurchaseSourceError("absent", "Purchase line list is empty")
-    return PurchaseLines(tuple(lines), section.label, convention, "product_id" in fields)
+    return PurchaseLines(tuple(lines), section.label, convention)
