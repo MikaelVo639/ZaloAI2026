@@ -2,10 +2,9 @@
 debt_collected and debt_flow. Rulebook rows and ledgers are synthetic, written for tests.
 """
 import unittest
-from dataclasses import replace
+from unittest.mock import patch
 from datetime import date
 from decimal import Decimal
-from unittest.mock import patch
 
 from test_s01_grammar import rulebook
 
@@ -184,27 +183,11 @@ class DebtExecutionTests(unittest.TestCase):
             readme="Sổ góp: mỗi đơn trả góp có dòng đầu ghi ngày mua.")
         self.assertEqual(candidate.type, "abstain")
 
-    def test_name_on_coded_order_resolves_without_merging_customers(self):
-        first, second, third, *other = LEDGER.orders
-        first = replace(first, source_customer_name="Nguyễn Hồng Lan")
-        ledger = replace(LEDGER, orders=(first, second, third, *other))
-        text = "Tháng 6/2026 khách Nguyễn Hồng Lan ghi nợ thêm bao nhiêu và trả nợ được bao nhiêu"
-        result, candidate = self.answer(text, ledger)
-        self.assertEqual(candidate.answer, [60000, 30000])
-        self.assertIs(check_executed(candidate, result), candidate)
-
-        third = replace(third, customer_name="Nguyễn Hồng Lan")
-        ledger = replace(LEDGER, orders=(first, second, third, *other))
-        _, candidate = self.answer(text, ledger)
-        self.assertEqual(candidate.type, "abstain")
-        self.assertEqual(candidate.evidence["customer"]["matching_keys"], 2)
-
-    def test_phone_suffix_is_removed_from_both_names_for_lookup(self):
+    def test_phone_suffix_is_removed_from_the_name_for_lookup(self):
         first, *others = LEDGER.orders
-        first = replace(first, customer_name="Trần Hải Lan - 090 123 4567",
-                        source_customer_name="Nguyễn Hồng Lan - 098 123 4567")
+        first = replace(first, customer_name="Trần Hải Lan - 090 123 4567")
         ledger = replace(LEDGER, orders=(first, *others))
-        for name in ("tran hai lan", "nguyen hong lan", "nguyen hong lan 098 123 4567"):
+        for name in ("tran hai lan", "tran hai lan 090 123 4567"):
             with self.subTest(name=name):
                 self.assertEqual(compute._debt_customer(ledger, name), ("K1", 1))
 
