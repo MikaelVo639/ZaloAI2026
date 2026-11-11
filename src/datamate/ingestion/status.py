@@ -33,12 +33,11 @@ SYNONYMS: dict[str, frozenset[str]] = {
         "khach huy", "huy don", "khong giao duoc", "cancelled", "canceled", "cancel",
     }),
     "tra hang": frozenset({
-        "doi tra", "hoan tra", "hang tra ve", "hoan hang", "tra lai", "khach tra",
-        "returned",
+        "doi tra", "hoan tra", "hang tra ve", "hoan hang", "tra lai", "returned",
     }),
     "dang giao": frozenset({
         "dang giao dich", "cho giao", "dang xu ly", "dang gui", "dang van chuyen",
-        "dang ship", "shipping",
+        "shipping",
     }),
 }
 
