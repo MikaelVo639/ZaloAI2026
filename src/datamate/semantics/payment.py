@@ -38,8 +38,7 @@ _GLOSSARY = {
     },
 }
 # Chat abbreviations of the Vietnamese wording, question side only.
-_ABBREVIATIONS = {"tien mat": ("tm", "tien tuoi"), "chuyen khoan": ("ck",),
-                  "cod": ("xi o di",)}
+_ABBREVIATIONS = {"tien mat": ("tm", "tien tuoi"), "chuyen khoan": ("ck",)}
 
 
 def _key(value: str) -> str:

@@ -152,8 +152,6 @@ def meaning_field(meaning: str) -> str | None:
         return "product_brand"
     if raw == "tiền phải trả cả đơn sau giảm trừ":
         return "order_amount_due"
-    if raw.startswith("quy đổi đơn vị lớn ra "):
-        return "catalogue_conversion"
     if raw == "loại hàng điện thoại":
         return "phone_item_kind"
     if (raw in {"số / size", "số/size", "size", "kích cỡ"}
@@ -298,9 +296,6 @@ _BANHANG_COMBINED = (
     ({"Mã H.hóa", "Tên hàng hóa", "Nhóm hàng", "DVT"}, {
         "Tên hàng hóa": "tên hàng", "Nhóm hàng": "nhóm hàng", "DVT": "đơn vị cơ bản",
     }),
-    ({"Mã KH mua", "Khách hàng mua", "Kiểu khách"}, {
-        "Mã KH mua": "mã khách", "Khách hàng mua": "tên khách", "Kiểu khách": "nhóm khách",
-    }),
 )
 POS_PROFILES = (
     ("pos_export_kiotviet.v1", _KIOTVIET),
@@ -376,7 +371,13 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
                 sections.append(Section(table.path.name, table.name, columns,
                                         origin="phone_ledger_conventions.v1"))
         ledgers = {section.file for section in sections}
-        sections.extend(_phone_catalogue(catalog.readme, headers, ledgers))
+        if "ghi tat cho ten day du va loai hang" in text:
+            for table, header in headers:
+                if (table.path.name in ledgers and fold(table.name) == "ghi tat"
+                        and {"Ghi tắt", "Tên hàng", "Loại"} <= header):
+                    sections.append(Section(table.path.name, table.name, {
+                        "Ghi tắt": "tên hàng", "Tên hàng": "tên", "Loại": "loại hàng điện thoại",
+                    }, origin="phone_ledger_conventions.v1"))
         if sections:
             return sections
 
@@ -388,9 +389,6 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
             for required, meanings in lists:
                 if required <= header:
                     if "Nhóm hàng" in meanings and f"`{table.name}`" not in catalog.readme:
-                        continue
-                    if "Kiểu khách" in meanings and not re.search(
-                            rf"(?<!\w){re.escape(table.name)}(?!\w)", catalog.readme):
                         continue
                     columns = {c: m for c, m in meanings.items() if c in header}
                     if "thanh tien sau giam" in map(fold, columns.values()):
@@ -407,20 +405,6 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
         if has_lines and has_orders:
             return sections
     return []
-
-
-def _phone_catalogue(readme: str, headers: Iterable[tuple[Table, set[str]]],
-                     ledgers: set[str]) -> list[Section]:
-    if "ghi tat cho ten day du va loai hang" not in fold(readme):
-        return []
-    return [
-        Section(table.path.name, table.name, {
-            "Ghi tắt": "tên hàng", "Tên hàng": "tên", "Loại": "loại hàng điện thoại",
-        }, origin="phone_ledger_conventions.v1")
-        for table, header in headers
-        if (table.path.name in ledgers and fold(table.name) == "ghi tat"
-            and {"Ghi tắt", "Tên hàng", "Loại"} <= header)
-    ]
 
 
 def sale_cost_column(readme: str, table: Table, header: set[str]) -> str | None:
@@ -886,12 +870,6 @@ def load_readme_sales(catalog: Catalog, rulebook: str
     Returns ``(sales, evidence, ranking_eligible)``.
     """
     sections = parse_sections(catalog.readme)
-    documented_ledgers = {section.file for section in sections
-                          if {"order_id", "amount", "quantity", "product_name"} <= section.fields.keys()
-                          and "IMEI" in section.columns}
-    sections += _phone_catalogue(catalog.readme,
-                                 ((t, set(t.columns)) for t in catalog.tables),
-                                 documented_ledgers)
     sections += profile_sections(catalog, sections)
     if not sections:
         raise ReadmeSalesError("README_COLUMNS_MISSING", "README has no column descriptions")
@@ -937,23 +915,6 @@ def _orders_index(roles: dict[str, _Role], rules: _Rules
     return orders, counts
 
 
-def _catalogue_conversions(raw: Any, base: Any) -> dict[str, Decimal]:
-    """Read per-item '1 thùng = 4 bịch' factors, keeping unknown factors unavailable."""
-    factors: dict[str, Decimal] = {}
-    if _blank(raw) or _blank(base):
-        return factors
-    for entry in str(raw).split(";"):
-        match = re.fullmatch(r"1\s+([^=]+?)\s*=\s*(\d+(?:[.,]\d+)?)\s+(.+)",
-                             entry.strip())
-        if not match or _name_key(match[3]) != _name_key(base):
-            return {}
-        unit, factor = _name_key(match[1]), Decimal(match[2].replace(",", "."))
-        if not unit or unit == _name_key(base) or factor <= 0 or unit in factors:
-            return {}
-        factors[unit] = factor
-    return factors
-
-
 def _products_index(
     roles: dict[str, _Role], headers: dict[tuple[Path, str], set[str]] | None = None,
 ) -> tuple[dict[str, dict], dict[str, dict]]:
@@ -973,9 +934,7 @@ def _products_index(
         record = {"id": key, "name": None if _blank(name) else str(name).strip(),
                   "base_unit": row.get("base_unit"), "group": row.get("product_group"),
                   "brand": row.get("product_brand"), "size": row.get("product_size"),
-                  "phone_item_kind": row.get("phone_item_kind"),
-                  "conversions": _catalogue_conversions(row.get("catalogue_conversion"),
-                                                        row.get("base_unit"))}
+                  "phone_item_kind": row.get("phone_item_kind")}
         if key is not None:
             by_id[key] = record
         names = {record["name"]}
@@ -1322,8 +1281,6 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
                           product_brand=_text((product or {}).get("brand")),
                           product_size=_text((product or {}).get("size")),
                           phone_item_kind=_text((product or {}).get("phone_item_kind")),
-                          phone_catalogue_name=(_text(product.get("name"))
-                                                if product and product["phone_item_kind"] else None),
                           order_amount_due=optional_sale_cost(line.get("order_amount_due")),
                           **context))
         if not is_fee and count_keys:
@@ -1420,9 +1377,6 @@ def _base_quantity(line: dict[str, Any], product: dict[str, Any] | None,
     base = _name_key((product or {}).get("base_unit") or "")
     if unit and base and unit == base:
         return quantity, "base_unit"
-    factor = (product or {}).get("conversions", {}).get(unit)
-    if factor is not None:
-        return quantity * factor, "catalogue_conversion"
     for name in names:
         if (name, unit) in conversions:
             return quantity * conversions[(name, unit)][0], "conversion"
