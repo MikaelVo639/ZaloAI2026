@@ -404,13 +404,14 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
     if not rules.revenue:
         return None
     if not reference and not group and not shift and not staff:
-        special = (_months(text, today, rules) or _customers(text, today, rules)
-                   or _thresholds(text, today, rules))
+        special = (_rulebook_ranking(text, today, rules) or _months(text, today, rules)
+                   or _customers(text, today, rules) or _thresholds(text, today, rules))
         if special is False:
             return None
         if special:
             if filters and (special.periods or special.intent == "top_customers" or (
-                    special.threshold is not None and special.threshold.subject == "customer")):
+                    special.threshold is not None and special.threshold.subject == "customer")
+                    or special.rank_by == "order_count" or special.intent == "peak_hour"):
                 return None
             return special
     intent = ""
@@ -1054,6 +1055,64 @@ def _customers(text: str, today: date, rules: Rules) -> Plan | None | bool:
         return False
     return Plan(intent, start, min(end, today), top_k, _rows(rules, *used),
                 comparison=comparison, threshold=threshold, rank_by=rank_by)
+
+
+# ------------------------------------------------- rankings defined by the rulebook
+# (intent, rank_by, rule feature, wording). Each measure is the split rulebook's own row,
+# e.g. "Khách trung thành nhất | nhiều ngày có mua nhất"; without the row the question abstains.
+_RULEBOOK_RANKINGS = (
+    ("top_customers", "purchase_days", "loyal_customer",
+     rf"(?:ai la )?(?:{_CUSTOMER}(?: nao)? |ai )trung thanh nh(?:at|ut)(?: la ai)?"),
+    ("top_customers", "average_order", "big_spender_orders",
+     rf"(?:ai la )?{_CUSTOMER}(?: nao)? sop nh(?:at|ut)(?: la ai)?"),
+    ("top_customers", "cancelled_orders", "fickle_customer",
+     rf"(?:ai la )?{_CUSTOMER}(?: nao)? hay doi y nh(?:at|ut)(?: la ai)?"),
+    ("top_products", "order_count", "popular_product",
+     r"(?:mat hang|san pham|hang|mon)(?: nao)? (?:duoc )?(?:khach (?:hang )?)?ua chuong nh(?:at|ut)"
+     r"(?: la (?:mat hang|san pham|hang|mon) nao)?"),
+    ("best_day", "order_count", "busiest_day",
+     r"ngay nao (?:cua hang )?dat khach nh(?:at|ut)|ngay dat khach nh(?:at|ut)(?: la ngay nao)?"),
+    ("peak_hour", "", "peak_hour",
+     r"gio cao diem(?: trong ngay)?(?: cua cua hang)?(?: la)? (?:may|bao nhieu) gio"
+     r"|(?:thuong )?dong khach nh(?:at|ut) (?:vao|dao) (?:luc )?(?:may|bao nhieu) gio"),
+)
+_RANKING_WORDS = re.compile(
+    rf"\b(?:trong (?:cac|nhung|so) {_CUSTOMER}|cua cua hang|cua hang|la ai|la)\b")
+
+
+def _rulebook_ranking(text: str, today: date, rules: Rules) -> Plan | None | bool:
+    for intent, rank_by, feature, wording in _RULEBOOK_RANKINGS:
+        match = re.search(rf"\b(?:{wording})\b", text)
+        if match:
+            break
+    else:
+        return None
+    features = [feature]
+    if intent == "top_customers":
+        features += ["customer_identity", "ties_by_code"]
+    elif intent == "top_products":
+        features.append("ties_by_code")
+    if rank_by != "purchase_days" and intent != "peak_hour" or intent == "peak_hour":
+        features.append("customers_bought")  # "Số đơn": orders not cancelled or returned
+    if rank_by == "cancelled_orders":
+        features.append("cancelled_order")
+    if not all(getattr(rules, name) for name in features):
+        return False
+    used = list(features)
+    reduced = _RANKING_WORDS.sub(" ", text[:match.start()] + " " + text[match.end():])
+    resolved = _period(reduced, today, rules, used)
+    if resolved is None:
+        return False  # "thường đông khách nhất vào mấy giờ" names no period
+    start, end, leftover = resolved
+    if _FILLERS.sub(" ", leftover).strip() or start > today:
+        return False
+    threshold = None
+    if rank_by == "average_order":
+        threshold = Threshold("customer", "order_count", ">=", Decimal(rules.big_spender_orders),
+                              rules.row("big_spender") or "")
+        used[used.index("big_spender_orders")] = "big_spender"
+    return Plan(intent, start, min(end, today), 1, _rows(rules, *used), threshold=threshold,
+                rank_by=rank_by)
 
 
 # ---------------------------------------------------------------- SEM-02: thresholds

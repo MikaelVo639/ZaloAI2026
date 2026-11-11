@@ -201,6 +201,90 @@ def customers_meeting(selected: list[Sale], minimum_orders: int) -> tuple[int, i
     return sum(len(e["orders"]) >= minimum_orders for e in totals.values()), len(totals)
 
 
+# Customer rankings whose measure the rulebook defines in a row of its own.
+RULEBOOK_CUSTOMER_RANKS = ("purchase_days", "average_order", "cancelled_orders")
+
+
+def customer_rulebook_ranking(rows: list[Sale], by: str, minimum_orders: int = 0
+                              ) -> list[tuple[str, str, Decimal]]:
+    """(key, display name, measure) descending; ties by code ascending (no code: name).
+
+    ``rows`` are all rows ordered in the period, any status. "purchase_days": days with a
+    valid order; "average_order": revenue per valid order, only customers with at least
+    ``minimum_orders`` valid orders; "cancelled_orders": cancelled orders. A customer
+    without the measured thing (no valid order, no cancellation) is not ranked. The display
+    name is the one written most often on the customer's orders ("Tên" over "Tên 09…").
+    """
+    if by not in RULEBOOK_CUSTOMER_RANKS:
+        raise ValueError(f"Unknown customer measure {by!r}")
+    entries: dict[str, dict[str, Any]] = {}
+    for index, key in customer_keys(rows).items():
+        if key is None:
+            continue
+        sale = rows[index]
+        entry = entries.setdefault(key, {"code": sale.customer_id, "names": Counter(),
+                                         "revenue": Decimal(0), "orders": set(), "days": set(),
+                                         "cancelled": set()})
+        if sale.customer_name and sale.customer_name.strip():
+            entry["names"][sale.customer_name.strip()] += 1
+        if sale.status == "valid":
+            entry["revenue"] += sale.amount
+            entry["orders"].add(sale.order_id)
+            entry["days"].add(sale.day)
+        elif sale.status == "cancelled":
+            entry["cancelled"].add(sale.order_id)
+    ranked = []
+    for key, entry in entries.items():
+        if by == "purchase_days" and entry["days"]:
+            value = Decimal(len(entry["days"]))
+        elif by == "average_order" and entry["orders"] and len(entry["orders"]) >= minimum_orders:
+            value = entry["revenue"] / len(entry["orders"])
+        elif by == "cancelled_orders" and entry["cancelled"]:
+            value = Decimal(len(entry["cancelled"]))
+        else:
+            continue
+        name = entry["names"].most_common(1)[0][0] if entry["names"] else key
+        ranked.append((key, entry["code"] or name, name, value))
+    ranked.sort(key=lambda row: (-row[3], fold(row[1])))
+    return [(key, name, value) for key, _tie, name, value in ranked]
+
+
+def product_order_ranking(selected: list[Sale]) -> list[tuple[str, str, Decimal]]:
+    """Products by the number of distinct valid orders they appear in; ties by id."""
+    orders: dict[str, set[str]] = defaultdict(set)
+    names: dict[str, str] = {}
+    for sale in selected:
+        orders[sale.product_id].add(sale.order_id)
+        names.setdefault(sale.product_id, sale.product_name)
+    ranked = sorted(orders, key=lambda key: (-len(orders[key]), key))
+    return [(key, names[key], Decimal(len(orders[key]))) for key in ranked]
+
+
+def daily_orders(selected: list[Sale]) -> list[tuple[date, int]]:
+    """Days by distinct valid orders, most first (then earliest)."""
+    by_day: dict[date, set[str]] = defaultdict(set)
+    for sale in selected:
+        by_day[sale.day].add(sale.order_id)
+    return sorted(((day, len(ids)) for day, ids in by_day.items()),
+                  key=lambda item: (-item[1], item[0]))
+
+
+def hourly_orders(selected: list[Sale]) -> list[tuple[int, int]] | None:
+    """Whole-hour windows of the order time by distinct valid orders, most first (then
+    earliest); None when an order has no recorded time."""
+    hours: dict[str, int] = {}
+    for sale in selected:
+        if sale.minute is None:
+            return None
+        hour = sale.minute // 60
+        if hours.setdefault(sale.order_id, hour) != hour:
+            return None
+    counts: dict[int, int] = defaultdict(int)
+    for hour in hours.values():
+        counts[hour] += 1
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+
+
 def count_at_least(selected: list[Sale], subject: str, minimum: Decimal) -> int:
     """Orders / days with revenue >= minimum, or products in >= minimum distinct orders
     (valid rows only; rulebook: "từ N trở lên" includes N)."""
@@ -400,7 +484,7 @@ INDEPENDENT_INTENTS = LOT_INTENTS | {"stock", "stock_split", "delivery_count", "
                                     "delivered_order_count", "purchase_total", "top_supplier",
                                     "main_supplier"}
 INTENTS = (frozenset({"revenue", "order_count", "top_products", "average_order",
-                     "cancel_count", "cancel_rate", "best_day",
+                     "cancel_count", "cancel_rate", "best_day", "peak_hour",
                      "top_customers", "count_where", "quantity", "top_staff", "stock", "stock_split",
                      "purchase_total", "top_supplier", "main_supplier", "avg_purchase_price",
                      "delivered_order_count", "purchase_sales_difference", "daily_sale_price"})
@@ -422,6 +506,10 @@ FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock
               "payment": frozenset({"revenue"}),
               "channel": frozenset({"revenue"})}
 GROUP_FIELDS = ("product_group", "customer_group")
+# (intent, rank_by) of rankings measured as a rulebook row defines them.
+RULEBOOK_RANKINGS = frozenset({("top_customers", by) for by in RULEBOOK_CUSTOMER_RANKS}
+                              | {("top_products", "order_count"), ("best_day", "order_count"),
+                                 ("peak_hour", "")})
 DRUG_FIELDS = ("ingredient", "prescription")
 SHAPES = {"series": "revenue", "best_period": "revenue"}  # shape -> the one intent it supports
 COVERAGE = re.compile(r"Khoảng dữ liệu:\s*(\d{4}-\d{2}-\d{2})\s+đến\s+(\d{4}-\d{2}-\d{2})")
@@ -453,6 +541,22 @@ def unsupported(plan: Plan) -> str:
         return ""
     if plan.observed_on is not None:
         return "Observation date is only supported for delivery order cohorts"
+    if (plan.intent, plan.rank_by) in RULEBOOK_RANKINGS:
+        if (plan.start > plan.end or plan.top_k != 1 or plan.filters or plan.periods
+                or plan.shape or plan.unit or plan.comparison or plan.compare_start
+                or plan.compare_end):
+            return f"Unsupported fields for a rulebook ranking of {plan.intent!r}"
+        t = plan.threshold
+        if plan.rank_by == "average_order":
+            if (t is None or (t.subject, t.measure, t.op) != ("customer", "order_count", ">=")
+                    or not isinstance(t.value, Decimal) or not t.value.is_finite()
+                    or t.value < 1 or t.value != t.value.to_integral()):
+                return "Average-order ranking needs a minimum number of orders"
+        elif t is not None:
+            return "Threshold not supported"
+        return ""
+    if plan.intent == "peak_hour":
+        return "Peak hour takes no ranking measure"
     if plan.intent in {"top_product_brand", "average_amount_due", "average_phone_revenue"}:
         if (plan.start > plan.end or plan.top_k != 1 or plan.periods or plan.shape
                 or plan.threshold or plan.comparison or plan.compare_start or plan.compare_end
@@ -2034,6 +2138,33 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
             return Candidate(reason="No valid orders in period; average undefined",
                              evidence=evidence)
         return Candidate("number", value, 1.0, "", evidence)
+    if plan.intent == "best_day" and plan.rank_by == "order_count":
+        days = daily_orders(selected)
+        evidence.update(calculation="day with the most distinct valid orders",
+                        code=_code(f"daily_orders({selection})[0]", select_valid, daily_orders),
+                        ranking=[{"day": d.isoformat(), "orders": n} for d, n in days[:2]])
+        if not days:
+            return Candidate(reason="No valid orders in period", evidence=evidence)
+        if len(days) > 1 and days[1][1] == days[0][1]:
+            return Candidate(reason="Tie for the busiest day; rulebook gives no date tie-break",
+                             evidence=evidence)
+        evidence["result"] = days[0][0].isoformat()
+        return Candidate("date", evidence["result"], 1.0, "", evidence)
+    if plan.intent == "peak_hour":
+        hours = hourly_orders(selected)
+        evidence.update(calculation="whole hour of order time with the most distinct valid orders",
+                        code=_code(f"hourly_orders({selection})[0]", select_valid, hourly_orders))
+        if hours is None:
+            return Candidate(reason="An order in the period has no single recorded time",
+                             evidence=evidence)
+        evidence["ranking"] = [{"hour": h, "orders": n} for h, n in hours[:2]]
+        if not hours:
+            return Candidate(reason="No valid orders in period", evidence=evidence)
+        if len(hours) > 1 and hours[1][1] == hours[0][1]:
+            return Candidate(reason="Tie for the peak hour; rulebook gives no hour tie-break",
+                             evidence=evidence)
+        evidence["result"] = hours[0][0]
+        return Candidate("number", hours[0][0], 1.0, "", evidence)
     if plan.intent == "best_day":
         days_ranked = daily_revenue(selected)
         evidence.update(calculation="argmax of daily revenue on valid whole orders",
@@ -2075,6 +2206,20 @@ def _answer_product_ranking(plan: Plan, sales: list[Sale], eligible: frozenset[i
         sources.append(select_base_unit)
         evidence["unit"] = plan.unit
 
+    if plan.rank_by == "order_count":
+        evidence["ranking_rows"] = len(ranked_rows)
+        if not ranked_rows or any(not s.product_id or not s.product_name for s in ranked_rows):
+            return Candidate(reason="Ranking needs product ids/names and rows in scope",
+                             evidence=evidence)
+        ranking = product_order_ranking(ranked_rows)
+        result = ranking[0][1]
+        evidence.update(
+            calculation="distinct valid orders by product_id, descending; ties by id",
+            code=_code(f"product_order_ranking({selection})[0]", *sources, product_order_ranking),
+            ranking=[{"product_id": key, "product_name": name, "orders": str(value)}
+                     for key, name, value in ranking[:2]],
+            result=result)
+        return Candidate("string", result, 1.0, "", evidence)
     by_revenue = plan.rank_by == "revenue"
     evidence["ranking_rows"] = len(ranked_rows)
     if not ranked_rows or any(not s.product_id or not s.product_name
@@ -2099,6 +2244,28 @@ def _answer_product_ranking(plan: Plan, sales: list[Sale], eligible: frozenset[i
                  for key, name, value in ranking[:plan.top_k + 1]],
         result=result)
     return Candidate("string" if plan.top_k == 1 else "list", result, 1.0, "", evidence)
+
+
+def _answer_rulebook_customers(plan: Plan, sales: list[Sale], evidence: dict[str, Any],
+                               window: str, source_expr: str) -> Candidate:
+    rows = select_period(sales, plan.start, plan.end)
+    minimum = int(plan.threshold.value) if plan.threshold is not None else 0
+    evidence["inputs"].update(period_rows=len(rows))
+    if not any(s.customer_id or s.customer_name for s in rows):
+        return Candidate(reason="No customer recorded on the orders", evidence=evidence)
+    ranking = customer_rulebook_ranking(rows, plan.rank_by, minimum)
+    among = f" among customers with >= {minimum} valid orders" if minimum else ""
+    evidence.update(calculation=f"customers by {plan.rank_by}{among}, descending; ties by code",
+                    code=_code(f"customer_rulebook_ranking(select_period({source_expr}, {window}), "
+                               f"{plan.rank_by!r}, {minimum})",
+                               select_period, customer_rulebook_ranking, customer_keys),
+                    ranking=[{"customer": name, "value": str(value)}
+                             for _, name, value in ranking[:2]])
+    if not ranking:
+        return Candidate(reason="No customer has the measured orders in the period",
+                         evidence=evidence)
+    evidence["result"] = ranking[0][1]
+    return Candidate("string", ranking[0][1], 1.0, "", evidence)
 
 
 def select_base_unit(sales: list[Sale], unit: str) -> list[Sale]:
@@ -2194,6 +2361,8 @@ def _answer_extended(plan: Plan, sales: list[Sale], full: list[Sale],
                                    select_valid, count_at_least, daily_revenue),
                         result=value)
         return Candidate("number", value, 1.0, "", evidence)
+    if plan.intent == "top_customers" and plan.rank_by in RULEBOOK_CUSTOMER_RANKS:
+        return _answer_rulebook_customers(plan, sales, evidence, window, source_expr)
     if not any(s.customer_id or s.customer_name for s in selected):
         return Candidate(reason="No customer recorded on the orders", evidence=evidence)
     if plan.intent == "top_customers":

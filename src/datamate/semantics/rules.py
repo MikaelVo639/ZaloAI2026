@@ -57,6 +57,13 @@ class Rules:
     debt_flow_rule: bool = False        # nợ thêm = chưa trả trong ngày mua; trả nợ = sau ngày mua
     debt_age: bool = False              # tuổi nợ tính từ ngày đặt, đơn đặt hôm nay 0 ngày
     best_staff: bool = False            # nhân viên bán giỏi nhất: theo doanh thu, không theo số đơn
+    # Rankings the rulebook defines by a measure of its own ("Khách trung thành nhất", ...).
+    loyal_customer: bool = False        # khách trung thành nhất: nhiều ngày có mua nhất
+    big_spender_orders: int = 0         # khách sộp nhất: chỉ xét khách từ N đơn (0: không có dòng)
+    fickle_customer: bool = False       # khách hay đổi ý nhất: nhiều đơn huỷ nhất
+    popular_product: bool = False       # mặt hàng được ưa chuộng nhất: có mặt trong nhiều đơn nhất
+    busiest_day: bool = False           # ngày đắt khách nhất: nhiều đơn nhất
+    peak_hour: bool = False             # giờ cao điểm: khung một giờ tròn theo giờ tạo đơn
     size_by_name: bool = False          # size M / L: tên món kết thúc bằng (M) / (L)
     purchase_total: bool = False        # tiền nhập hàng: tổng tiền phiếu theo ngày phiếu, bỏ phiếu huỷ
     top_supplier: bool = False          # nhà cung cấp nhập nhiều nhất = tiền nhập cao nhất
@@ -321,6 +328,16 @@ def read_rules(rulebook: str) -> Rules:
                             "khong phan biet hoa thuong"),
         best_staff=enable("best_staff", _find(rows, "nhan vien ban gioi nhat"), "theo doanh thu",
                           "khong theo so don"),
+        loyal_customer=enable("loyal_customer", _find(rows, "khach trung thanh nhat"),
+                              "nhieu ngay co mua nhat"),
+        big_spender_orders=_big_spender_orders(rows, enable),
+        fickle_customer=enable("fickle_customer", _find(rows, "khach hay doi y nhat"),
+                               "nhieu don huy nhat"),
+        popular_product=enable("popular_product", _find(rows, "mat hang duoc ua chuong nhat"),
+                               "co mat trong nhieu don nhat"),
+        busiest_day=enable("busiest_day", _find(rows, "ngay dat khach nhat"), "nhieu don nhat"),
+        peak_hour=enable("peak_hour", _find(rows, "gio cao diem"), "mot gio tron",
+                         "theo gio tao don", "nhieu don nhat", "gio bat dau khung"),
         payment_revenue=enable("payment_revenue",
                                _find(rows, "doanh thu theo hinh thuc thanh toan"),
                                "ghi tren don", "khong theo lan tra no ve sau",
@@ -328,6 +345,18 @@ def read_rules(rulebook: str) -> Rules:
                                "cod la hinh thuc rieng"),
         rule_rows=tuple(features.items()),
     )
+
+
+def _big_spender_orders(rows: dict[str, str], enable) -> int:
+    """"Khách sộp nhất | giá trị trung bình một đơn cao nhất, chỉ xét khách có từ N đơn trở
+    lên" -> N; 0 when the row is absent or worded otherwise."""
+    key = _find(rows, "khach sop nhat")
+    minimum = re.search(r"\bchi xet khach co tu (\d+) don tro len\b", rows.get(key or "", ""))
+    if not minimum or int(minimum.group(1)) < 1:
+        return 0
+    if not enable("big_spender", key, "gia tri trung binh mot don", "cao nhat"):
+        return 0
+    return int(minimum.group(1))
 
 
 _SHIFT_WINDOW = re.compile(r"\bca (sang|chieu)\s+(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})")
