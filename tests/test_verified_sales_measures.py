@@ -4,17 +4,17 @@ from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
+from test_group_share_wording import GROUP
+from test_ingestion_readme_sales import _Shop
+from test_ranking_threshold_wording import answer
+from test_sem02_grammar import rulebook, sale
+
 from datamate.agent.compute import answer_plan
 from datamate.agent.validation import check_executed
 from datamate.contracts import Question
 from datamate.ingestion.readme_sales import load_readme_sales
 from datamate.semantics.planner import plan_question
 from datamate.semantics.rules import read_rules
-from test_group_share_wording import GROUP
-from test_ingestion_readme_sales import _Shop
-from test_ranking_threshold_wording import answer
-from test_sem02_grammar import rulebook, sale
-
 
 PHONE_RULES = rulebook() + """
 | Trạng thái đơn | mỗi đơn có đúng một trong bốn trạng thái: hoàn thành, huỷ, trả hàng, đang giao |
@@ -31,6 +31,38 @@ TODAY = date(2026, 5, 31)
 
 
 class VerifiedSalesMeasureTests(_Shop):
+    def test_documented_combined_customer_directory_supplies_group_average(self):
+        from test_customer_group_wording import GROUPS
+
+        from datamate.agent.compute import product_names, vocabulary
+
+        group_rules = PHONE_RULES + GROUPS
+
+        readme = ("Excel xuất từ phần mềm bán hàng. File `Sales.xlsx` có sheet `Lines` và "
+                  "danh sách khách hàng `Customers`.")
+        header = ["Đơn số", "Ngày HĐ", "Trạng thái giao", "Hàng hóa", "S.L",
+                  "Thành tiền (đ)", "SL (ĐV cơ bản)", "ĐV", "Mã khách"]
+        catalog = self.shop(readme, {"Sales.xlsx": {
+            "Lines": [header,
+                      ["A", "01/05/2026", "completed", "Món A", 1, 10, 1, "ly", "C1"],
+                      ["A", "01/05/2026", "completed", "Món B", 1, 20, 1, "ly", "C1"],
+                      ["B", "02/05/2026", "completed", "Món A", 1, 60, 1, "ly", "C2"],
+                      ["C", "03/05/2026", "completed", "Món A", 1, 90, 1, "ly", ""],
+                      ["D", "04/05/2026", "cancelled", "Món A", 1, 90, 1, "ly", "C1"]],
+            "Customers": [["Mã KH mua", "Khách hàng mua", "Kiểu khách"],
+                          ["C1", "An", "Thân thiết"], ["C2", "Bình", "Thân thiết"]],
+        }})
+        cache = {}
+        names = product_names(cache, catalog, group_rules)
+        vocab = vocabulary(cache, catalog, group_rules)
+        question = Question("fixture", "shop", "Khách nhóm thân thiết tháng 5/2026 mua trung "
+                            "bình bao nhiêu doanh thu mỗi đơn?", TODAY)
+        plan = plan_question(question, read_rules(group_rules), names, vocab)
+        result = check_executed(answer_plan(cache, catalog, plan, group_rules), plan)
+        self.assertEqual((result.type, result.answer), ("number", 45))
+        undocumented = replace(catalog, readme=readme.split(" và ")[0])
+        self.assertEqual(vocabulary({}, undocumented, group_rules)["customer_group"], [])
+
     def test_brand_ranking_aggregates_base_quantities_in_requested_size(self):
         vocab = {"product_group": ["Sữa"], "product_brand": ["A", "B"],
                  "product_size": ["Số 1", "Số 3"]}

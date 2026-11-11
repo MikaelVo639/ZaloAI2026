@@ -52,6 +52,7 @@ class CustomerGroupWordingTests(unittest.TestCase):
 
     def test_share_wordings(self):
         for text in (
+            "Khách nhóm thân thiết tháng 1/2026 mang về mấy % trên tổng doanh thu?",
             "Tỉ trọng doanh thu của khách nhóm thân thiết trong tổng doanh thu tháng 1/2026 là "
             "bao nhiêu phần trăm?",
             "Trong tổng doanh thu tháng 1/2026, phần của khách nhóm thân thiết là mấy phần trăm?",

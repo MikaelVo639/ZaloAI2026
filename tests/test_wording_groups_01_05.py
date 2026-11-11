@@ -51,6 +51,7 @@ class LeadInTests(unittest.TestCase):
 
     def test_lead_in_gives_the_plan_of_the_bare_question(self):
         for lead in ("Cho em hỏi, ", "cho mình hỏi xíu ", "Anh xem giúp em, ", "nhờ bạn tính giúp ",
+                     "Chị cho em hỏi ",
                      "check jum ", "chị ơi mik mún bít xíu, ", "alo, ", "hỏi nhanh, ",
                      "Cho tôi hỏi ", "Nho xem "):
             for bare in ("Doanh thu ca chiều hôm qua bao nhiêu?",
@@ -101,6 +102,20 @@ class ClosingParticleTests(unittest.TestCase):
         # Right after a name, a particle is not removed: the question stays unread.
         self.assertIsNone(plan("tháng 5/2026 bán được bao nhiêu chai Nước rửa chén Sunlight rứa?"))
 
+    def test_particles_after_revenue_period_and_store_keep_source_names(self):
+        for text, bare in (
+                ("Bình quân mỗi đơn tháng 5/2026 đem về bao nhiêu doanh thu thế?",
+                 "Bình quân mỗi đơn tháng 5/2026 bao nhiêu doanh thu?"),
+                ("Doanh thu tháng 5/2026 zạ?", "Doanh thu tháng 5/2026?"),
+                ("Dthu của quán tháng 5/2026 bnhiu rứa?", "Doanh thu tháng 5/2026?")):
+            with self.subTest(text=text):
+                self.assertEqual(key(plan(text, names=NAMES + ("Rửa", "Quần áo",))),
+                                 key(plan(bare)))
+        self.assertIsNone(plan("Doanh thu tháng 5/2026 bnhiu rua?", names=NAMES + ("Rửa",)))
+        ambiguous = Question("fixture", "shop", "Doanh thu tháng 5/2026 bnhiu rứa?", TODAY)
+        self.assertIsNone(plan_question(ambiguous, read_rules(BOOK), NAMES + ("Rứa",)))
+        self.assertIsNone(plan("Doanh thu tháng 5/2026 bnhiu luon?", names=NAMES + ("Lươn xào",)))
+
 
 def sale(order, day, status, amount, **extra):
     return Sale(order, day, status, Decimal(amount), "P1", "Trà", Decimal(1), **extra)
@@ -122,6 +137,9 @@ class AverageOrderTests(unittest.TestCase):
 
     def test_wordings(self):
         for text in ("Tuần trước bình quân mỗi đơn bnhiu tiền?",
+                     "Tuần trước bình quân mỗi o đờ mang về bao nhiêu doanh thu?",
+                     "Dthu bq mỗi đơn tuần trc là bnhiu?",
+                     "Nhờ bạn tính dúp doanh thu bình quân chên mỗi đơn của tuần trước?",
                      "Tuần trước mỗi đơn trung bình đem về bao nhiêu doanh thu vậy?",
                      "Tuần trước mỗi đơn bình quân được bao nhiêu doanh thu nhỉ?",
                      "Tuần trước trung bình một đơn có doanh thu bao nhiêu?",
@@ -155,6 +173,8 @@ class AverageOrderTests(unittest.TestCase):
                  sale("B", day, "valid", 120000), sale("C", day, "cancelled", 900000)]
         result = answer("Hôm qua mỗi đơn trung bình thu được bao nhiêu tiền?", sales)
         self.assertEqual((result.type, result.answer), ("number", 100000))
+        result = answer("Doanh thu bq mỗi đơn hôm qua là bao nhiêu?", sales)
+        self.assertEqual((result.type, result.answer), ("number", 100000))
 
 
 class ShopAndTotalTests(unittest.TestCase):
@@ -162,6 +182,13 @@ class ShopAndTotalTests(unittest.TestCase):
 
     def test_shop_and_total_words(self):
         same = {
+            "Tháng 5/2026 doanh thu bao nhiêu tiền?": "doanh thu tháng 5/2026",
+            "Tháng 5/2026 tiệm mình thu được bao nhiêu doanh thu thế?": "doanh thu tháng 5/2026",
+            "Tháng 5/2026 sốp có doanh thu bao nhiêu tiền?": "doanh thu tháng 5/2026",
+            "Tháng 5/2026 dthu cũa tiệm ra bao nhiêu rứa?": "doanh thu tháng 5/2026",
+            "Tháng 5/2026 tiệm tổng dthu được bao nhiêu vậy?": "doanh thu tháng 5/2026",
+            "Tháng 5/2026 doanh thu mấy đồng?": "doanh thu tháng 5/2026",
+            "Tháng 5/2026 bán ra được mấy đơn rồi?": "tháng 5/2026 có mấy đơn",
             "Tính tất cả doanh thu của tiệm hôm qua là bao nhiêu?": "doanh thu hôm qua",
             "Hôm qua quán bán được nhiêu tiền rứa?": "doanh thu hôm qua",
             "Hôm qua tiệm thu về bao nhiêu doanh thu?": "doanh thu hôm qua",
@@ -193,6 +220,8 @@ class ShopAndTotalTests(unittest.TestCase):
         self.assertEqual(named.filters[0].value, "Quần ống suông")
         # "bình quân", "thuốc tiêm" are not the shop.
         self.assertIsNone(plan("Tháng 5/2026 thuoc tiem ban duoc bao nhieu tien?"))
+        self.assertEqual(key(plan("Tháng 5/2026 dthu wan mik được nhiêu?", names=clothes)),
+                         key(plan("Doanh thu tháng 5/2026?")))
 
 
 class CancelledOrderTests(unittest.TestCase):
@@ -200,6 +229,7 @@ class CancelledOrderTests(unittest.TestCase):
 
     def test_wordings(self):
         for text in ("có bao nhiêu đơn huỷ trong th5/2026", "5-2026 huỷ mất mấy đơn z?",
+                     "Tháng 5/2026 kó bnhiu đơn bị huỷ vậy?",
                      "Th5/2026 đếm đh huỷ được bnhiu?", "Th5/2026 có mấy đơn huỷ z?",
                      "Thang 5 nam 2026 quan co may don bi huy?", "alo th5/2026 wan mik huy bnhiu don"):
             with self.subTest(text=text):
@@ -209,6 +239,7 @@ class CancelledOrderTests(unittest.TestCase):
 
     def test_negation_reason_and_rate_stay_apart(self):
         for text in ("Th5/2026 có mấy đơn không bị huỷ?", "Th5/2026 có bao nhiêu đơn chưa huỷ?",
+                     "Th5/2026 ko bnhiu đơn bị huỷ?",
                      "Th5/2026 có mấy đơn bị huỷ vì giao trễ z?",
                      "Th5/2026 đơn huỷ chiếm bao nhiêu %?"):
             with self.subTest(text=text):
