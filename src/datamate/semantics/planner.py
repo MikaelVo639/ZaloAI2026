@@ -115,7 +115,13 @@ _TOP_SELLING = r"(?:ban chay|ban duoc nhieu|ban duoc nhiu|ban nhieu|ban nhiu|cha
 _INTENTS = (
     ("cancel_rate", "cancel_rate",
      rf"t[iy] le (?:{_ORDER} )?(?:bi )?huy(?: {_ORDER})?"
-     rf"|(?:co )?{_AMOUNT} phan tram {_ORDER} (?:bi |da )?huy",
+     rf"|(?:co )?{_AMOUNT} phan tram {_ORDER} (?:bi |da )?huy"
+     # "đơn (bị) huỷ chiếm mấy % (toàn bộ đơn)", "bị huỷ mấy % đơn".
+     # Not after an asked count: "có bao nhiêu đơn bị huỷ, chiếm bao nhiêu %" asks two things.
+     rf"|(?<!nhieu )(?<!nhiu )(?<!bnhiu )(?<!bn )(?<!may )"
+     rf"{_ORDER} (?:bi |da )?huy chiem {_AMOUNT} phan tram"
+     rf"(?: (?:(?:toan bo|tat ca|tong(?: so)?|moi|cac) )+{_ORDER})?"
+     rf"|\bbi huy {_AMOUNT} phan tram {_ORDER}",
      (rf"\b(?:{_AMOUNT} )?phan tram\b",)),
     ("cancel_count", "cancelled_order",
      rf"(?:dem )?so {_ORDER} (?:bi |da )?huy"
@@ -987,20 +993,31 @@ _TOP_CUSTOMERS = re.compile(
     r"(?P<what>co tong tien mua cao nhat|mua (?:nhieu|nhiu) tien nhat|chi tieu (?:nhieu|nhiu) nhat"
     r"|chi (?:nhieu|nhiu) tien nhat|(?:mua|co) (?:nhieu|nhiu) don(?: hang)? nh(?:at|ut)"
     r"|co so don mua (?:nhieu|nhiu) nh(?:at|ut)"
-    r"|mua (?:nhieu|nhiu) lan nh(?:at|ut) (?:tinh|dem) theo so don(?: hang)?)\b")
+    r"|mua (?:nhieu|nhiu) lan nh(?:at|ut) (?:tinh|dem) theo so don(?: hang)?"
+    r"|(?:co )?tong tien mua(?: hang)? (?:cao|nhieu) nh(?:at|ut))\b")
 _WHO_BY_REVENUE = re.compile(r"\bai mua hang (?:nhieu|nhiu) tien nhat\b")
 _WHO_BY_ORDERS = re.compile(r"\bai mua (?:nhieu|nhiu) don(?: hang)? nh(?:at|ut)\b")
 _CUSTOMER_PERCENT = re.compile(rf"\bphan tram {_CUSTOMER}\b")
-_BOUGHT_CUSTOMERS = re.compile(rf"\b(?:trong )?so {_CUSTOMER} (?:da|co) mua(?: hang)?\b")
+# The denominator of a customer share: "(trong) số khách đã mua", "trong (tất cả / những)
+# khách có mua (hồi) <kỳ>", "tổng số khách mua", "tính trên số khách có mua (tháng đó)".
+_BOUGHT_CUSTOMERS = re.compile(
+    rf"\b(?:(?:tinh tren|trong) )?(?:(?:tat ca|tong|nhung|cac) )?(?:so )?{_CUSTOMER} "
+    rf"(?:(?:da|co) mua(?: hang)?|mua(?= thang\b|$))(?: hoi)?(?: thang do)?\b"
+    rf"|\b(?:tinh tren|trong) (?:so )?{_CUSTOMER} (?:da|co) mua(?: hang)?\b")
 _AT_LEAST = re.compile(r"\b(?:mua )?(?:tu (\d+) don(?: hang)? tro (?:len|leen)|it nhat (\d+) don(?: hang)?)\b")
 _CUSTOMER_WORDS = re.compile(
     rf"\b(?:trong so {_CUSTOMER} (?:da|co) mua(?: hang)?|(?:dem )?so {_CUSTOMER} da mua(?: hang)?|"
     rf"dem so {_CUSTOMER} da|"
     rf"so {_CUSTOMER}|{_CUSTOMER}|chiem|t[iy] le|(?:{_AMOUNT} )?phan tram|la (?:nhung )?ai|ai|"
+    rf"(?:la |co |dem duoc |dem )?{_AMOUNT} nguoi|dem so|dem|thanks(?: e| em)?|"
     r"cho cua hang)\b")
+# "Mình muốn tặng quà khách quen, đếm giúp …": why the shop asks, before the question.
+_CUSTOMER_PREFACE = re.compile(
+    r"^(?:minh|toi|em) (?:muon|mun|dinh|tinh) tang qua(?: cho)? (?:khach(?: quen| than)?) ")
 
 
 def _customers(text: str, today: date, rules: Rules) -> Plan | None | bool:
+    text = _CUSTOMER_PREFACE.sub("", text)
     top = _TOP_CUSTOMERS.search(text)
     who_orders = _WHO_BY_ORDERS.search(text) if not top else None
     who = who_orders or (_WHO_BY_REVENUE.search(text) if not top else None)
@@ -1062,14 +1079,18 @@ _MONEY_VALUE = r"(\d{1,3}(?: \d{3})+|\d+)"
 _AT_LEAST_MONEY = re.compile(rf"\b(?:dat )?(?:tu )?{_MONEY_VALUE} (?:dong |d |vnd )?tro (?:len|lne)\b")
 _AT_LEAST_ORDERS = re.compile(
     r"\b(?:(?:co mat |xuat hien )?o (?:tu )?(\d+) (?:don|bill)(?: hang)? khac nhau tro len"
-    r"|(?:co mat |xuat hien )(?:o |trong )it nhat (\d+) (?:don|bill)(?: hang)?(?: khac nhau)?)\b")
+    r"|(?:co mat |xuat hien )(?:o |trong )it nhat (\d+) (?:don|bill)(?: hang)?(?: khac nhau)?"
+    # "có mặt / nằm / góp mặt / được gọi trong từ N đơn (khác nhau) trở lên / ít nhất N đơn".
+    r"|(?:co mat|xuat hien|nam|gop mat|duoc goi|duoc mua) (?:o|trong|chong) "
+    r"(?:tu (\d+) (?:don|bill)(?: hang)?(?: khac nhau)? tro len"
+    r"|it nhat (\d+) (?:don|bill)(?: hang)?(?: khac nhau)?))\b")
 _THRESHOLD_SUBJECTS = (
     ("day", re.compile(rf"\b(?:dem )?(?:so |co )?(?:(?:{_AMOUNT} )?ngay(?! {_DATE}\b)"
                        rf"|{_AMOUNT} bua)\b")),
     ("order", re.compile(rf"\b(?:dem )?(?:so |co )?(?:{_AMOUNT} )?{_ORDER}\b")),
 )
 _THRESHOLD_WORDS = re.compile(
-    rf"\b(?:ma|co|dat|ca ngay|cua hang|ban duoc|ban|tien hang|tien ban|(?:tong )?{_REVENUE}|"
+    rf"\b(?:dem|ma|co|dat|ca ngay|cua hang|ban duoc|ban|tien hang|tien ban|(?:tong )?{_REVENUE}|"
     r"duoc mua|la bao nhieu|la)\b")
 _THRESHOLD_PREFACE = re.compile(
     r"^(?:minh|toi) (?:tinh|dang|dinh|du dinh) (?:dat|set) nguo(?:ng|g)"
@@ -1089,13 +1110,13 @@ def _thresholds(text: str, today: date, rules: Rules) -> Plan | None | bool:
         return False
     used = ["threshold_inclusive"]
     if orders:
-        products = re.search(r"\b(?:dem )?(?:co )?(?:{0} )?(?:so )?(?:mat hang|san pham)\b".format(_AMOUNT),
-                             text)
+        products = re.search(
+            r"\b(?:dem )?(?:co )?(?:{0} )?(?:so )?(?:mat hang|san pham|mon)\b".format(_AMOUNT), text)
         if not products or not rules.customers_bought:  # "Số đơn ... đếm số đơn có một mặt hàng"
             return False
         used.append("customers_bought")
         subject, measure = "product", "order_count"
-        value = Decimal(orders.group(1) or orders.group(2))
+        value = Decimal(next(group for group in orders.groups() if group))
         reduced = text[:orders.start()] + " " + text[orders.end():]
         reduced = reduced[:products.start()] + " " + reduced[products.end():] \
             if products.end() <= orders.start() else reduced.replace(products.group(), " ", 1)
@@ -1115,6 +1136,9 @@ def _thresholds(text: str, today: date, rules: Rules) -> Plan | None | bool:
             used.append("money_is_revenue")
         measure = "revenue"
         reduced = dict(_THRESHOLD_SUBJECTS)[subject].sub(" ", reduced, count=1)
+        # "... đơn có doanh thu từ X trở lên đếm được mấy đơn": the subject asked again.
+        word = r"ngay" if subject == "day" else _ORDER
+        reduced = re.sub(rf"\bdem duoc {_AMOUNT} {word}$", " ", reduced)
     reduced = _THRESHOLD_WORDS.sub(" ", reduced)
     resolved = _period(reduced, today, rules, used)
     if resolved is None:
