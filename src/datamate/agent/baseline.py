@@ -14,7 +14,6 @@ from datamate.semantics.planner import (
     stock_question,
 )
 from datamate.semantics.rules import read_rules
-from datamate.semantics.text import catalogue_sensitive_wording
 
 QUESTION_TIMEOUT_SECONDS = 30.0
 INGESTION_TIMEOUT_SECONDS = 300.0
@@ -64,18 +63,11 @@ class BaselineAgent:
         if "rules" not in context.cache:
             context.cache["rules"] = read_rules(context.split.rulebook)
         rules = context.cache["rules"]
-        # Ambiguous spelling and closing particles need the catalogue even on the first pass.
-        names = ()
-        vocabulary = None
-        if catalogue_sensitive_wording(question.question):
-            names = tuple(self._product_names(context))
-            vocabulary = self._vocabulary(context) if names else None
-        plan = plan_question(question, rules, names, vocabulary, everyday_wording=False)
+        # Wording rewrites may depend on catalogue names. Give the original grammar
+        # its normal first pass before trying rewrites with business context.
+        plan = plan_question(question, rules, everyday_wording=False)
         if plan is None:
-            labels = tuple(label for field in ("product_group", "customer_group")
-                           for label in (vocabulary or {}).get(field, ()))
-            plan = plan_tet(question, rules, context.split.rulebook, context.split.calendar_path,
-                            product_names=names + labels)
+            plan = plan_tet(question, rules, context.split.rulebook, context.split.calendar_path)
         if plan is None and rules.earliest_expiry and lot_product_question(question):
             result = self.worker.run(tasks.lot_names, self.question_timeout,
                                      catalog=context.catalog, day=question.as_of_date)
