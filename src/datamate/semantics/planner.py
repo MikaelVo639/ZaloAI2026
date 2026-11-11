@@ -477,6 +477,7 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
         if kind == "quantity":
             if not filters:
                 text = re.sub(rf"\b(?:cong moi (?:mat hang|mon) tinh theo"
+                              rf"|tat ca (?:cac )?mat hang tinh theo"
                               rf"|tinh (?:het|tat ca) (?:cac )?mat hang ban theo) {re.escape(unit)}\b",
                               " ", text)
             if size:
@@ -1857,7 +1858,7 @@ def _stock_unit(text: str) -> str | None:
 _STAFF = re.compile(r"\b(?:cac )?don (?:hang )?do nhan vien (?:ma )?(nv\d{1,4}) ban\b"
                     r"|\b(?:cua )?nhan vien (?:ma )?(nv\d{1,4})\b")
 _BEST_STAFF = re.compile(
-    r"\b(?:ai la )?nhan vien ban gioi nhat(?: la ai)?\b"
+    r"\b(?:ai la )?nhan vien (?:nao )?ban gioi nhat(?: la ai)?\b"
     r"|\b(?:ai la )?(?:nhan vien|nguoi ban|nv) (?:nao )?"
     rf"(?:(?:(?:co|ban(?: duoc)?) )?{_REVENUE}(?: cao)?|ban(?: duoc)? (?:nhieu|nhiu) tien) nh(?:at|ut)(?: la ai)?\b"
     rf"|\btho nao lam ra {_REVENUE} cao nh(?:at|ut)\b")
