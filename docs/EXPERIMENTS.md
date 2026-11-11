@@ -1038,3 +1038,57 @@ Giữ các câu đúng cũ theo mã và có thêm 20 câu đúng trên train, g�
 Hai lượt dùng cùng cấu hình, rulebook, calendar và mã câu.
 `uv sync --locked`, smoke và Ruff trên các file giải quyết xung đột
 đều qua. Unittest có 532 ca qua và 1 skip.
+
+## Kiểm chứng độc lập và rà soát bằng chứng nguồn PR #60 — 11/11/2026
+
+Kiểm chứng độc lập candidate PR #60 (commit `4c844b0` và bản ghép `49e1139`)
+bằng `scripts/verify_candidate.py` trên môi trường Python riêng của checkout,
+hoàn tất chạy lặp độc lập và chứng nhận toàn bộ 50 ca abstain.
+
+### 1. Kiểm tra nhanh và tính toàn vẹn artifact
+Lệnh kiểm tra nhanh hoàn tất sau 1,031 giây với trạng thái `artifact_integrity=passed`.
+Checksum mã nguồn thực chạy `target_source_sha256` đạt `1be9e3e9d870ed57633669fdc75aed1d9ec2f09f1af6ef0a34faee7c2a905273`.
+160 tệp mã nguồn và tệp tracked được bảo vệ giữ nguyên vẹn 100% SHA256 trước và sau chạy.
+
+| Chỉ tiêu local proxy | Toàn train (3.000 câu) | Validation (630 câu) |
+| --- | ---: | ---: |
+| Đúng / sai / abstain | 2.949 / 1 / 50 | 628 / 0 / 2 |
+| Tỷ lệ PA | 0,982667 | 0,996825 |
+
+### 2. Chạy lặp độc lập (Repeat replay)
+Lệnh `--repeat` chạy lại toàn bộ 3.000 câu train trong 1.703,392 giây (~28,4 phút),
+đạt `repeat_status=passed` và `repeat_verified=true`.
+Đối chiếu `verify-runs` xác nhận `identical_answers_by_id=true`: trùng khớp 100%
+từng đáp án theo ID giữa hai lượt chạy độc lập. Mã băm submission đạt
+`644a7dbae74c38f7baeed35880a0799d1119ea680ed00ff729139df4468353d6` trên cả hai lượt.
+Số câu gặp lỗi thực thi là 0.
+
+### 3. Rà soát chứng nhận 50 ca abstain và ca lệch nhãn
+Đã rà soát chi tiết nguồn dữ liệu gốc (CSV, XLSX, SQLite chỉ đọc, README và Rulebook)
+cho toàn bộ 51 ca cần xem xét:
+- **50 ca abstain**: 100% được chứng nhận thiếu dữ liệu (`verified_missing_data`),
+  không còn ca nào `unresolved`. Căn cứ Rulebook mục 7:
+  - 7 ca kỳ nằm hoàn toàn ngoài phạm vi hoạt động của cửa hàng (biz_121 tháng 2/2025;
+    biz_106 tháng 1/2025; không tính thành 0).
+  - 10 ca cửa hàng không có sổ kho và không ghi nhận số lượng tồn kho (biz_103, biz_112,
+    biz_118, biz_130).
+  - 5 ca không có dữ liệu nhập hàng hoặc file nhập không có đơn giá nhập (biz_103,
+    biz_112, biz_118, biz_121, biz_122).
+  - 1 ca không có giá vốn hay đơn giá nhập để tính lãi gộp (biz_122).
+  - 3 ca tồn kho không theo dõi số lô và không có cột hạn sử dụng (biz_106, biz_117, biz_130).
+  - 6 ca hỏi đánh giá định tính, mức độ tận tâm, lễ phép hay tay nghề nhân viên mà dữ
+    liệu không ghi nhận (biz_105, biz_106, biz_112, biz_123, biz_124, biz_130).
+  - 11 ca hỏi địa chỉ đường phố, giới tính khách hàng hoặc nhóm thân thiết mà hồ sơ
+    khách hàng không lưu (Rulebook cấm suy diễn từ tên).
+  - 7 ca hỏi phương thức thanh toán, kênh bán (điện thoại, Zalo OA), hoặc lý do cụ thể
+    của đơn huỷ/trả mà dữ liệu không lưu.
+- **1 ca xếp hạng tháng 5/2025 (`q_02eb42db6665`, biz_125)**:
+  Tính toán độc lập từ `ban_hang.csv` sau khi quy về đơn vị cơ bản (lon), loại đơn
+  huỷ/trả và phí phục vụ: Bia Sài Gòn Special lon đạt 303 lon (129 dòng đơn), Bia Tiger
+  lon đạt 300 lon (140 dòng đơn). Thuật toán trả lời Bia Sài Gòn Special lon là hoàn
+  toàn đúng luật; nhãn tham chiếu chọn Tiger do đếm số dòng đơn (140 > 129) hoặc chưa
+  quy đổi đơn vị. Giữ nguyên thuật toán candidate.
+
+Kết quả kiểm tra nền tảng trên bản ghép: smoke qua (21 đúng / 0 sai / 3 abstain, PA 0.875),
+unittest chạy 533 ca (532 qua, 1 skip). Bảng đối soát chi tiết từng câu lưu tại
+`source-audit.csv` trong thư mục audit `outputs/eval02/`.
