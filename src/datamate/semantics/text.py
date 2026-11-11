@@ -149,7 +149,7 @@ _STORE_SUBJECT = re.compile(r"\bquan(?= (?:ban|co|duoc|bi|chot|len|thu|dat|da)\b
 _COMPARISON_CUE = r"(?:tang hay giam|tang giam|thay doi|tang truong|hon hay kem)"
 # Read with their marks: folded, "hỉ", "gồi" (= "rồi"), "zạ", "hả" would be "hi", "goi",
 # "za", "ha", and "goi" may be the unit "gói".
-_ENDING_WORDS = r"(?:thế|hè|rứa|nghe|nghen|za|hỉ|gồi|nhoa|zạ|dzạ|zị|hả|luôn)"
+_ENDING_WORDS = r"(?:thế|hè|rứa|nghe|nghen|za|hỉ|gồi|nhoa|zạ|dzạ|zị|z|hả|luôn)"
 _COLLOQUIAL_ENDING = re.compile(rf"\b({_ENDING_WORDS}(?: {_ENDING_WORDS})*)\W*$")
 # Asking to be told, at the start only: "cho em hỏi", "anh xem giúp em", "nhờ bạn tính
 # giúp", "hỏi nhanh xíu", "mình muốn biết", "alo". The rest is parsed as usual.
@@ -214,6 +214,8 @@ def _closing_wording(text: str, raw: str) -> str:
         text = re.sub(r"(?<=\bcua hang) luon$", "", text)
     if re.search(r"\b(?:rồi|roi) ta\W*$", raw):
         return re.sub(r"\broi ta$", "", text).rstrip()
+    if re.search(r"\b(?:rồi|rooif) đó\W*$", raw):
+        return re.sub(r"\broi do$", "", text).rstrip()
     ending = _COLLOQUIAL_ENDING.search(raw)
     if not ending:
         return text
@@ -246,7 +248,7 @@ def _everyday_wording(text: str, original: str, value: str, names: tuple[str, ..
     text = re.sub(rf"\b((?:doanh thu|dthu)(?: cua cua hang)?) ra(?= {_ASK_COUNT}\b)",
                   r"\1", text)
     text = re.sub(r"\btiem(?= (?:duoc|bi|chot|da)\b)", "cua hang", text)
-    text = re.sub(rf"\b(?:chot|len) duoc(?= {_ASK_COUNT} don\b)", "ban duoc", text)
+    text = re.sub(rf"\b(?:chot|len) duoc(?= (?:tong cong )?{_ASK_COUNT} don\b)", "ban duoc", text)
     if re.search(rf"\b{_COMPARISON_CUE}\b", text) and not re.search(r"\bsố\b", raw):
         text = re.sub(r"(\b(?:thang|quy) \d{1,2}/\d{4}|\bca (?:sang|chieu)|\bphan tram)"
                       r" so (?=(?:thang|ca|cung|t|th)\b)", r"\1 so voi ", text)
@@ -264,6 +266,11 @@ def _everyday_wording(text: str, original: str, value: str, names: tuple[str, ..
                   r"|ca (?=(?:thang|quy|nam|tuan)\b))", "", text)
     if re.match(r"^\s*cả ngày hôm\b", raw):
         text = re.sub(r"^ca (?=ngay hom\b)", "", text)
+    if re.search(r"\bmí\s*(?:%|phần trăm)", raw):
+        text = re.sub(r"\bmi (?=phan tram\b)", "bao nhieu ", text)
+    text = re.sub(rf"\btang dam (?={_ASK_COUNT} phan tram\b)", "tang giam ", text)
+    text = re.sub(r"\bxo voi (?=(?:cung ky |cung )?thang\b)", "so voi ", text)
+    text = re.sub(r"\bcaonhat\b", "cao nhat", text)
     text = _prior_year_reference(text, as_of_year)
     text = _CALLING.sub("", _closing_wording(text, raw))
     while True:

@@ -898,3 +898,40 @@ Checksum mã nguồn của bản tích hợp khớp snapshot đã đo.
 
 `uv sync --locked`, smoke và unittest đều qua. Unittest chạy 515 ca,
 514 qua và 1 skip. Ruff qua trên các file sửa của bước ghép.
+
+## Kỳ, so sánh và doanh thu theo tháng của Dương, nhóm 06–10 — 11/11/2026
+
+Đối chứng dùng `main@fe9bd86`, sau #56–58. Parser đọc các mốc tính tới
+hôm nay, khoảng gần nhất có tính hôm nay, kỳ đối chiếu đứng trước và
+cách viết “ca chiều so ca sáng”. Danh sách tháng có thể dùng chung năm.
+Dãy doanh thu giữ thứ tự câu hỏi, hoặc xếp theo thời gian khi câu hỏi yêu
+cầu. Câu hỏi tăng liên tiếp so doanh thu của từng cặp tháng kề nhau.
+
+| Nhóm được phân công | Có đáp án trước | Có đáp án sau | Tổng câu |
+| --- | ---: | ---: | ---: |
+| 06. Khoảng ngày và mốc hôm nay | 0 | 17 | 17 |
+| 07. So sánh hai kỳ và chiều phần trăm | 0 | 9 | 9 |
+| 08. So sánh ca | 0 | 1 | 1 |
+| 09. Danh sách tháng và tháng cao nhất | 1 | 21 | 21 |
+| 10. Doanh thu tăng liên tiếp | 0 | 5 | 5 |
+| **Tổng** | **1** | **53** | **53** |
+
+Trên đủ 1.000 câu public, số đáp án cụ thể tăng từ 614 lên 669, cùng
+5 câu `unanswerable`. Tổng có kết quả tăng từ 619 lên 674. Có thêm 52
+đáp án trong phần Dương và 3 đáp án ở các câu có cách hỏi tương tự.
+Đối chiếu theo mã giữ nguyên 619 kết quả cũ. Public chưa có nhãn để
+chấm độ đúng.
+
+| Chấm local proxy | Đối chứng đúng / sai / abstain | Bản sửa đúng / sai / abstain |
+| --- | ---: | ---: |
+| Train, 3.000 câu | 2.926 / 1 / 73 | 2.928 / 1 / 71 |
+| Holdout theo shop, 630 câu | 623 / 0 / 7 | 623 / 0 / 7 |
+
+Hai câu train trả thêm đều là dãy doanh thu theo thứ tự thời gian.
+Giữ toàn bộ câu đúng cũ, cùng một câu lệch nhãn đã có sau #47. Hai lượt
+dùng cùng cấu hình, rulebook, calendar và mã câu.
+
+`uv sync --locked`, smoke và Ruff trên các tệp Python sửa đều qua.
+Unittest chạy 520 ca, 519 qua và 1 skip. Regression dùng dữ liệu giả lập,
+kiểm thứ tự dãy, chiều so sánh, mẫu số bằng 0, kỳ chưa kết thúc, tháng
+thiếu dữ liệu và chuỗi tăng có một tháng giảm hoặc bằng tháng trước.
