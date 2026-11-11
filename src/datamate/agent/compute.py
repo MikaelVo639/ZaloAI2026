@@ -9,11 +9,12 @@ import inspect
 import re
 from calendar import monthrange
 from collections import Counter, defaultdict
-from datetime import date
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
 from typing import Any, Callable
 
+from datamate.agent.absence import INTENT_CONCEPT, missing_concept, recorded
 from datamate.agent.business_measures import (
     delivery_count,
     earliest_expiry,
@@ -730,6 +731,33 @@ def _stockout_rule(rulebook: str) -> str:
     return line_with(rulebook, "mat hang het hang cuoi ngay", "mua ve de ban", "ton kho bang 0")
 
 
+def attribute_recorded(cache: dict[str, Any], catalog: Catalog, attribute: str) -> bool:
+    """Worker task: whether the business shows any trace of an asked attribute."""
+    return recorded(catalog, attribute)
+
+
+def _outside_rule(rulebook: str) -> str:
+    return line_with(rulebook, "hoan toan ngoai khoang ngay co du lieu", "khong tra loi duoc")
+
+
+# A shop that sells on at least 5 of its first 7 days records daily; nothing before its
+# first sale means its data starts there, not that it sold nothing.
+DENSE_START_DAYS, DENSE_START_MIN = 7, 5
+
+
+def _dense_sales_start(sales: list[Sale]) -> tuple[date, dict[str, Any]] | None:
+    days = {s.day for s in sales}
+    if not days:
+        return None
+    first = min(days)
+    week = [first + timedelta(days=offset) for offset in range(DENSE_START_DAYS)]
+    selling = sum(day in days for day in week)
+    if selling < DENSE_START_MIN:
+        return None
+    return first, {"first_sale_day": first.isoformat(),
+                   "selling_days_in_first_week": selling}
+
+
 def _absence_rule(rulebook: str) -> str:
     return line_with(rulebook, "shop khong ghi loai thong tin cau hoi can thi khong tra loi duoc")
 
@@ -1413,6 +1441,25 @@ def daily_sale_price(sales: list[Sale], day: date, unit: str) -> Decimal | None:
 
 def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                 rulebook: str = "") -> Candidate:
+    """Answer a plan; an abstain becomes ``unanswerable`` only when the rulebook's absence
+    row applies and the business records no trace of what the intent needs (absence.py)."""
+    candidate = _answer_plan(cache, catalog, plan, rulebook)
+    if candidate.type != "abstain" or plan.intent not in INTENT_CONCEPT:
+        return candidate
+    rule = _absence_rule(rulebook)
+    concept = missing_concept(catalog, plan.intent) if rule else ""
+    if not concept:
+        return candidate
+    evidence = {**candidate.evidence, "abstain_reason": candidate.reason,
+                "coverage_source": {"absent_concept": concept, "rule": rule,
+                                    "searched": [table.key for table in catalog.tables]}}
+    return Candidate("unanswerable", None, 1.0,
+                     f"Shop không ghi thông tin {concept}: không README, tên file/sheet hay "
+                     "cột có giá trị nào nhắc tới", evidence)
+
+
+def _answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                 rulebook: str = "") -> Candidate:
     reason = unsupported(plan)
     if reason:
         return Candidate(reason=reason)
@@ -1475,6 +1522,12 @@ def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                 return Candidate("unanswerable", None, 1.0,
                                  "Kỳ hỏi trước tháng đầu của các sheet bán hàng đã xác minh",
                                  evidence)
+            outside_rule = _outside_rule(rulebook)
+            start = _dense_sales_start(sales)
+            if outside_rule and start and window_end < start[0]:
+                evidence["coverage_source"] = {**start[1], "rule": outside_rule}
+                return Candidate("unanswerable", None, 1.0,
+                                 "Kỳ hỏi nằm hoàn toàn trước ngày bắt đầu ghi bán hàng", evidence)
             return Candidate(reason="No sales in period; business coverage is not established",
                              evidence=evidence)
     needs_customer = plan.intent == "top_customers" or (

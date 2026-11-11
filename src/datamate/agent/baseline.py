@@ -6,6 +6,7 @@ from datamate.agent import compute as tasks
 from datamate.agent.validation import check_executed
 from datamate.agent.worker import Worker, WorkerResult
 from datamate.contracts import BusinessContext, Candidate, Plan, Question
+from datamate.semantics.attributes import asked_attribute
 from datamate.semantics.lunar_periods import plan_tet
 from datamate.semantics.planner import (
     lot_product_question,
@@ -54,8 +55,27 @@ class BaselineAgent:
     def answer(self, question: Question, context: BusinessContext) -> Candidate:
         plan = self._plan(question, context)
         if plan is None:
-            return Candidate(reason="Question or split rules outside baseline grammar")
+            return (self._unrecorded(question, context)
+                    or Candidate(reason="Question or split rules outside baseline grammar"))
         return self._answer_plan(plan, context, as_of_date=question.as_of_date)
+
+    def _unrecorded(self, question: Question, context: BusinessContext) -> Candidate | None:
+        """``unanswerable`` for an unplanned question about a kind of information the shop
+        records no trace of, under the split's absence row; ``None`` otherwise."""
+        attribute = asked_attribute(question.question)
+        rule = tasks._absence_rule(context.split.rulebook) if attribute else ""
+        if not rule:
+            return None
+        result = self.worker.run(tasks.attribute_recorded, self.question_timeout,
+                                 catalog=context.catalog, attribute=attribute)
+        if not result.ok or result.value is not False:
+            return None
+        evidence = {"asked_attribute": attribute, "coverage_source": {
+            "absent_concept": attribute, "rule": rule,
+            "searched": [table.key for table in context.catalog.tables]},
+            "execution": result.execution()}
+        return Candidate("unanswerable", None, 1.0,
+                         f"Shop không ghi thông tin {attribute}", evidence)
 
     def _plan(self, question: Question, context: BusinessContext) -> Plan | None:
         """Shared deterministic planning, including SEM-01's product-name retry."""

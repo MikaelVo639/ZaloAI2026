@@ -249,6 +249,9 @@ class LocalPlanAgent(BaselineAgent):
         plan = self._plan(question, context)
         if plan is not None:
             return self._answer_plan(plan, context, as_of_date=question.as_of_date)
+        unrecorded = self._unrecorded(question, context)
+        if unrecorded is not None:
+            return unrecorded
         if not _capabilities(context.split.rulebook) or resolved_period(question, context.split.rulebook) is None:
             return Candidate(reason="Local planner requires supported split rules and one resolved period")
         if _UNSUPPORTED.search(normalize_question(question.question)):

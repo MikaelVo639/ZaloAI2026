@@ -238,6 +238,9 @@ class RewriteAgent(LocalPlanAgent):
         plan = self._plan(question, context)
         if plan is not None:
             return self._answer_plan(plan, context, as_of_date=question.as_of_date)
+        unrecorded = self._unrecorded(question, context)
+        if unrecorded is not None:
+            return unrecorded
         unavailable = self._ensure_model()
         if unavailable is not None:
             return unavailable
