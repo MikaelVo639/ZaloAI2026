@@ -27,6 +27,7 @@ _FILLERS = re.compile(
 _ORDER = r"(?:don|bill|order)(?: hang)?"
 _REVENUE = r"(?:doanh thu|dthu)"
 _ONE = r"(?:mot|moi|1)"
+_PRODUCT_UNITS = frozenset({"bo", "cai", "chai", "hop", "lon", "vien", "goi", "cay"})
 _AVERAGE = r"(?:trung binh|binh quan)"
 # Money on one order, after "trung bình mỗi đơn": "được bao nhiêu doanh thu", "hết bao
 # nhiêu tiền", "giá trị bao nhiêu". Without a money word ("mấy món") it is not this measure.
@@ -83,7 +84,7 @@ def _package_period(text: str, today: date, rules: Rules) -> Plan | bool:
             intent, features = "net_profit", ("gross_profit", "net_profit", "calendar_month")
         else:
             intent, features = "gross_profit", ("gross_profit", "calendar_month")
-        remove = (r"\b(?:mat hang|san pham|hang mo|hang|mon|tong|mang ve|"
+        remove = (r"\b(?:mat hang|san pham|hang mo|hang|mon|tong|mang (?:ve|lai)|"
                   r"(?:lai|loi) (?:gop(?: cao nhat)?|rong|nhat)|"
                   r"tru het chi phi(?: roi thi)?|tinh ca thang thi|quan|tiem|con|rua|ta)\b")
     else:
@@ -137,7 +138,7 @@ _INTENTS = (
      (r"\bla (?:nhung )?(?:mon|hang) nao$",)),
     ("quantity", "unit_quantity",
      rf"\bban(?: ra)?(?: duoc)?(?: tong cong)? {_AMOUNT} (?P<unit>[a-z][a-z0-9]*)\b"
-     rf"|\bso (?P<unit2>[a-z0-9]+) (?:ban ra|ban duoc|ban)\b",
+     rf"|\b(?:tong )?so (?P<unit2>[a-z0-9]+) (?:ban ra|ban duoc|ban)\b",
      ()),
     ("revenue", None, rf"(?:tong )?{_REVENUE}", ()),
     ("order_count", None,
@@ -192,10 +193,38 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
                    for label in (vocabulary or {}).get(field, ()))
     rewritten = normalize_question(question.question, product_names=names + labels,
                                    as_of_year=question.as_of_date.year)
-    if rewritten == text:
-        return None
-    return _plan_question(question, rewritten, rules, names, vocabulary, price_increases,
-                          price_source)
+    if rewritten != text:
+        plan = _plan_question(question, rewritten, rules, names, vocabulary, price_increases,
+                              price_source)
+        if plan is not None:
+            return plan
+    for wording in dict.fromkeys((text, rewritten)):
+        corrected = _repair_grammar_tokens(wording, names + labels)
+        if corrected != wording:
+            plan = _plan_question(question, corrected, rules, names, vocabulary,
+                                  price_increases, price_source)
+            if plan is not None:
+                return plan
+    return None
+
+
+def _repair_grammar_tokens(text: str, names: tuple[str, ...]) -> str:
+    corrections = (
+        (r"vaf(?= thang \d)", "va"),
+        (r"lan luwowtj(?= theo thu tu)", "lan luot"),
+        (r"trowr(?= len)", "tro"),
+        (r"xuaats(?= hien trong)", "xuat"),
+        (r"its(?= nhat \d+ don)", "it"),
+        (r"nhaapj(?= hang)", "nhap"),
+        (r"(?<=nhap hang het bnhiu )tienf", "tien"),
+        (r"(?<=chi )tieeu(?= nhieu nhat)", "tieu"),
+        (r"(?<=^coi )gium(?= nha cung cap)", "giup"),
+    )
+    protected = {word for name in names for word in fold(name).split()}
+    for pattern, replacement in corrections:
+        text = re.sub(rf"\b(?:{pattern})\b",
+                      lambda m: m[0] if set(m[0].split()) & protected else replacement, text)
+    return text
 
 
 def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str, ...],
@@ -208,6 +237,19 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
         return _delivered_orders(text, today, rules)
     if "ngay phai tra" in text and "don ban chiu" in text:
         return _credit_due_count(text, today, rules)
+    out_of_stock = re.fullmatch(
+        rf"(?:den |vao )?cuoi ngay {_DATE} (?:shop |cua hang )?co {_AMOUNT} "
+        r"(?:mat hang|san pham) (?:dang )?het hang", text)
+    if out_of_stock:
+        row = rules.row("until_end_of_day")
+        try:
+            day, month, year = map(int, out_of_stock.groups())
+            cutoff = date(year, month, day)
+        except ValueError:
+            return None
+        if row and cutoff <= today:
+            return Plan("out_of_stock_count", cutoff, cutoff, evidence=(row,))
+        return None
     package = _package_period(text, today, rules)
     if package:
         return package if isinstance(package, Plan) else None
@@ -294,6 +336,18 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
             return None
         filters.append(Filter("product", product, rules.row("product_names") or ""))
         used.append("product_names")
+        # In "số bộ van ... bán được", the named item starts at the unit itself.
+        # Restore the unit consumed with the name; the executor checks the base unit.
+        product_key = normalize_question(product)
+        unit_word = product_key.split()[0]
+        if unit_word in _PRODUCT_UNITS:
+            original = normalize_question(question.question)
+            if re.search(rf"\bso {re.escape(product_key)} ban(?: |$)", original):
+                text = re.sub(r"\bso (?=ban\b)", f"so {unit_word} ", text, count=1)
+            elif re.search(rf"\bban(?: ra| duoc)? {_AMOUNT} {re.escape(product_key)}(?: |$)",
+                           original):
+                text = re.sub(rf"\b(ban(?: ra| duoc)? {_AMOUNT})(?= |$)",
+                              rf"\1 {unit_word}", text, count=1)
     if product and _STOCK_CUE.search(text):
         return _stock_plan(text, today, rules, filters)
     if product and _PURCHASE_DIFFERENCE.search(text):
@@ -618,7 +672,7 @@ def _months(text: str, today: date, rules: Rules) -> Plan | None | bool:
     if run:
         count = _COUNT_WORD.get(run.group(1)) or int(run.group(1))
         year, month = int(run.group(3)), int(run.group(2))
-        if not 1 <= month <= 12 or not 2 <= count <= 12 * (year - 1) + month:
+        if not 1 <= month <= 12 or not 2 <= count <= min(24, 12 * (year - 1) + month):
             return False
         for _ in range(count):
             months.append((year, month))
@@ -643,7 +697,7 @@ def _months(text: str, today: date, rules: Rules) -> Plan | None | bool:
         stated = re.search(r"\b(\d+|hai|ba|bon|nam|sau) thang\b", reduced)
         if stated and (_COUNT_WORD.get(stated.group(1)) or int(stated.group(1))) != len(months):
             return False
-    if len(months) < 2 or len(set(months)) != len(months):
+    if not 2 <= len(months) <= 24 or len(set(months)) != len(months):
         return False
     best = re.search(r"\bthang nao\b", reduced) and (money_best or re.search(
         rf"\b(?:cao|lon|nhieu|{_REVENUE}) nhat\b", reduced))
@@ -1328,7 +1382,7 @@ def _share(text: str) -> tuple[str, bool]:
 
 _SALE_PRICE = (
     re.compile(rf"gia ban {_ONE} (?P<unit>[a-z][a-z0-9]*)(?: vao)? "
-               rf"(?:la )?{_AMOUNT}(?: tien)?(?: ta)?"),
+               rf"(?:la )?{_AMOUNT}(?: tien)?(?: ta| do)?"),
     re.compile(rf"(?:cua hang )?ban(?: ra)? (?:(?:voi )?don gia|gia) {_AMOUNT}(?: tien)? "
                rf"{_ONE} (?P<unit>[a-z][a-z0-9]*)"),
 )
@@ -1556,10 +1610,18 @@ def _avg_purchase(text: str, today: date, rules: Rules, names: Iterable[str]) ->
     """"Giá nhập bình quân một <đơn vị> <hàng> tháng M/Y" (rulebook §5), in the purchase unit."""
     if not rules.avg_purchase_price or not rules.product_names:
         return None
+    original = text
     text, product = _product(text, names)
     if not product or product is _AMBIGUOUS:
         return None
     text = re.sub(r"\s+", " ", text).strip()
+    product_key = normalize_question(product)
+    unit_word = product_key.split()[0]
+    if (unit_word in _PRODUCT_UNITS and
+            re.search(rf"\bgia nhap binh quan (?:cua )?{_ONE} {re.escape(product_key)}(?: |$)",
+                      original)):
+        text = re.sub(rf"\b(gia nhap binh quan (?:cua )?{_ONE})(?= |$)",
+                      rf"\1 {unit_word}", text, count=1)
     found = [m for pattern in _AVG_PURCHASE for m in pattern.finditer(text)]
     if len(found) != 1 or found[0].group("unit") in _NOT_UNITS:
         return None

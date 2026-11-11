@@ -85,11 +85,16 @@ class StockTests(unittest.TestCase):
                 INSERT INTO san_pham VALUES ('SP1', 'Bia Tiger lon', 'lon', 20);
                 CREATE TABLE the_kho (MaHangHoa, NgayGioPhatSinh, TonCuoi, MaChiNhanh);
                 INSERT INTO the_kho VALUES ('SP1', '2026-07-14 18:00:00', 9, 'A'),
+                    ('SP1', '2026-07-13 09:00:00', 18, 'A'),
                     ('SP1', '2026-07-14 09:00:00', 14, 'A'),
                     ('SP1', '2026-07-15 07:00:00', 3, 'A');
             """)
         catalog = build_catalog(Path(self.directory.name), "b")
         self.assertEqual(load_stock(catalog).items[0].quantity, Decimal(9))
+        self.assertEqual(load_stock(catalog, as_of=date(2026, 7, 13)).items[0].quantity,
+                         Decimal(18))
+        with self.assertRaisesRegex(StockSourceError, "after the documented data end"):
+            load_stock(catalog, as_of=date(2026, 7, 15))
         self.assertEqual(stock_source.load_stock_costs(catalog)[0], {"SP1": Decimal(20)})
         with closing(sqlite3.connect(path)) as database:
             database.executescript(
@@ -111,6 +116,16 @@ class StockTests(unittest.TestCase):
                      "Tồn kho Bia Tiger lon ở chi nhánh 2 cuối ngày hôm nay là bao nhiêu lon?"):
             with self.subTest(text=text):
                 self.assertIsNone(plan(text))
+
+    def test_stockout_count_requires_a_complete_classified_snapshot(self):
+        from datamate.ingestion.stock import StockItem
+
+        items = (StockItem("A", "A", "cái", Decimal(0)),
+                 StockItem("B", "B", "cái", Decimal(0)),
+                 StockItem("C", "C", "cái", Decimal(3)))
+        self.assertEqual(compute.out_of_stock_count(items, {"A": True, "B": False, "C": True}), 1)
+        with self.assertRaisesRegex(ValueError, "different product codes"):
+            compute.out_of_stock_count(items, {"A": True, "B": False})
 
     def answer(self, text, today="2026-07-14"):
         result = plan(text, today)

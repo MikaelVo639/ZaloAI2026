@@ -185,12 +185,42 @@ def wait_windows_log_release(paths, timeout=5):
             time.sleep(0.01)
 
 
-def run_process(command, cwd, timeout, stdout, stderr):
-    options = {"start_new_session": True} if os.name != "nt" else {}
+def inference_environment():
     environment = dict(os.environ)
     environment.pop("PYTHONPATH", None)
     environment.pop("PYTHONHOME", None)
     environment["PYTHONNOUSERSITE"] = "1"
+    return environment
+
+
+def target_runtime(python: Path, checkout: Path) -> dict[str, str]:
+    """Verify that the target interpreter resolves the package from this checkout."""
+    try:
+        result = subprocess.run(
+            [str(python), "-c", "import datamate; print(datamate.__file__)"],
+            cwd=checkout, env=inference_environment(), capture_output=True,
+            encoding="utf-8", check=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f"Could not import datamate with target interpreter {python}") from exc
+    actual = Path(result.stdout.strip()).resolve()
+    expected = (checkout / "src" / "datamate" / "__init__.py").resolve()
+    if actual != expected or not expected.is_file():
+        raise ValueError(f"Wrong datamate package: expected {expected}, imported {actual}")
+    files = {p.relative_to(actual.parent).as_posix(): digest(p)
+             for p in sorted(actual.parent.rglob("*.py"))}
+    return {
+        "target_python": str(python),
+        "target_package_path": str(actual),
+        "target_source_sha256": hashlib.sha256(
+            json.dumps(files, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def run_process(command, cwd, timeout, stdout, stderr):
+    options = {"start_new_session": True} if os.name != "nt" else {}
+    environment = inference_environment()
     with stdout.open("wb") as out, stderr.open("wb") as err:
         try:
             process = subprocess.Popen(
@@ -496,6 +526,7 @@ def benchmark(checkout, data_dir, holdout, config, output_dir, compare_to=None,
     }
     metadata = {
         **source_metadata(checkout),
+        **target_runtime(python, checkout),
         **identity,
         "status": "running",
         "config": vars(settings),

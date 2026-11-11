@@ -6,6 +6,7 @@ from datamate.agent import compute as tasks
 from datamate.agent.validation import check_executed
 from datamate.agent.worker import Worker, WorkerResult
 from datamate.contracts import BusinessContext, Candidate, Plan, Question
+from datamate.semantics.lunar_periods import plan_tet
 from datamate.semantics.planner import (
     lot_product_question,
     plan_question,
@@ -65,6 +66,8 @@ class BaselineAgent:
         # Wording rewrites may depend on catalogue names. Give the original grammar
         # its normal first pass before trying rewrites with business context.
         plan = plan_question(question, rules, everyday_wording=False)
+        if plan is None:
+            plan = plan_tet(question, rules, context.split.rulebook, context.split.calendar_path)
         if plan is None and rules.earliest_expiry and lot_product_question(question):
             result = self.worker.run(tasks.lot_names, self.question_timeout,
                                      catalog=context.catalog, day=question.as_of_date)

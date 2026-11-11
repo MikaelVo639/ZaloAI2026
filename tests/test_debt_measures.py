@@ -199,6 +199,15 @@ class DebtExecutionTests(unittest.TestCase):
         self.assertEqual(candidate.type, "abstain")
         self.assertEqual(candidate.evidence["customer"]["matching_keys"], 2)
 
+    def test_phone_suffix_is_removed_from_both_names_for_lookup(self):
+        first, *others = LEDGER.orders
+        first = replace(first, customer_name="Trần Hải Lan - 090 123 4567",
+                        source_customer_name="Nguyễn Hồng Lan - 098 123 4567")
+        ledger = replace(LEDGER, orders=(first, *others))
+        for name in ("tran hai lan", "nguyen hong lan", "nguyen hong lan 098 123 4567"):
+            with self.subTest(name=name):
+                self.assertEqual(compute._debt_customer(ledger, name), ("K1", 1))
+
 
 if __name__ == "__main__":
     unittest.main()

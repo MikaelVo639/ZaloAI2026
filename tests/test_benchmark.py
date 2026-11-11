@@ -213,6 +213,7 @@ class BenchmarkTests(unittest.TestCase):
                 return_value={"revision": "test", "dirty": False},
             ),
             patch("datamate.evaluation.benchmark.run_process", side_effect=fake_process),
+            patch("datamate.evaluation.benchmark.target_runtime", return_value={}),
             patch.object(Path, "open", guarded),
         ):
             report = benchmark(checkout, self.data, self.root / "holdout.json", config, output)
@@ -242,6 +243,7 @@ class BenchmarkTests(unittest.TestCase):
                 "datamate.evaluation.benchmark.source_metadata", return_value={"revision": "test"}
             ),
             patch("datamate.evaluation.benchmark.run_process", return_value=(1, False)),
+            patch("datamate.evaluation.benchmark.target_runtime", return_value={}),
         ):
             with self.assertRaisesRegex(ValueError, "Predict failed"):
                 benchmark(checkout, self.data, self.root / "holdout.json", config, failed)
@@ -249,6 +251,14 @@ class BenchmarkTests(unittest.TestCase):
             json.loads((failed / "experiment.json").read_text())["status"], "incomplete"
         )
         self.assertTrue((failed / "artifact.zip").is_file())
+
+    def test_runtime_rejects_package_from_another_checkout(self):
+        from datamate.evaluation.benchmark import target_runtime
+
+        checkout = self.root / "other_checkout"
+        checkout.mkdir()
+        with self.assertRaisesRegex(ValueError, "Wrong datamate package"):
+            target_runtime(Path(sys.executable), checkout)
 
     def test_cli_benchmark_arguments(self):
         from datamate.cli import parser

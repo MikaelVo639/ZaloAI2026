@@ -973,3 +973,122 @@ Regression dùng dữ liệu giả lập để kiểm tra đơn nhiều dòng, p
 cùng số tiền và ngày, tệp thiếu phân đoạn, đầu đơn mâu thuẫn, dòng cộng,
 đơn thật thiếu trường và tên trùng nhiều mã. `uv sync --locked`, smoke và
 Ruff trên các file sửa đều qua. Unittest chạy 524 ca, 523 qua và 1 skip.
+
+## Phục hồi 23 câu train có đáp án — 11/11/2026
+
+Đối chứng là main@fe9bd86, cùng dữ liệu 3.000 câu, holdout 630 câu,
+config baseline và scorer local_proxy_v3_table_row_alias_not_official.
+
+Các nguyên nhân được sửa:
+- Benchmark từng nạp package từ checkout khác do dùng chung virtualenv.
+  Runner kiểm tra đường dẫn import của Python đích trước inference, ghi
+  target_python, target_package_path và checksum toàn bộ mã Python thực chạy.
+- Parser bỏ sót cách hỏi số lượng, đơn vị nằm trong tên hàng, lỗi gõ có ngữ cảnh,
+  lời dẫn hỏi nhà cung cấp, giá bán theo viên và từ “mang lại” trong câu lãi gộp.
+- Danh sách doanh thu nhiều tháng chưa nhận yêu cầu thứ tự thời gian.
+  Bổ sung kiểm tra số tháng, thứ tự và giới hạn tối đa 24 tháng.
+- Chưa xử lý kỳ Tết. Kỳ được tra từ calendar của split và kiểm tra rulebook,
+  gồm so với Tết năm trước hoặc kỳ ngay trước Tết có cùng độ dài.
+- Adapter giá vốn chưa nhận danh mục nằm trong sheet của workbook gộp.
+- Tên khách trong export có hậu tố số điện thoại khiến phép tìm tên không khớp.
+  Bỏ hậu tố khi tìm tên, giữ khóa khách và từ chối kết quả có nhiều khóa phù hợp.
+- Tồn kho từ thẻ kho chỉ dùng ngày cuối dữ liệu. Bổ sung cutoff cho nguồn thẻ kho,
+  cùng phép đếm hết hàng đối chiếu đủ mã tồn kho và phân loại hàng mua về để bán.
+
+| Chỉ tiêu local proxy | Đối chứng | Candidate |
+| --- | ---: | ---: |
+| Đúng / sai / abstain, toàn train | 2.926 / 1 / 73 | 2.949 / 1 / 50 |
+| PA toàn train | 0,975000 | 0,982667 |
+| Đúng / sai / abstain, validation | 623 / 0 / 7 | 628 / 0 / 2 |
+| Inference gồm startup, giây | 1.632,556 | 1.653,806 |
+
+Đối chiếu từng ID: phục hồi 23 abstain thành đúng, giữ đủ 2.926 câu đúng,
+không phát sinh câu sai mới và không có lỗi thực thi. Dữ liệu train và validation
+đã được xem. Kết quả là local proxy; public chưa được đo bằng bản sửa này.
+
+Một ca xếp hạng tháng 5/2025 vẫn lệch nhãn. Tính độc lập từ số lượng cơ bản,
+loại cả đơn hủy/trả và dòng phí phục vụ, cho Sài Gòn Special 303 lon và Tiger
+300 lon; nhãn chọn Tiger. Giữ phép tính theo nguồn và giữ nguyên nhãn/scorer.
+
+Smoke qua. Unittest chạy 520 ca, 519 qua và 1 skip. Diff check qua.
+50 câu còn abstain đều có nhãn unanswerable nhưng chưa được chứng nhận thiếu
+dữ liệu độc lập từng ca. Bản cuối chưa được chạy lặp lại để đo tính tái lập.
+Artifacts và bảng audit được giữ ngoài Git trong outputs/eval02/.
+
+## Đối chiếu PR #60 sau khi cập nhật main — 11/11/2026
+
+Đối chứng dùng `main@301db0f`, đã có #59 và bản sửa công nợ #61.
+Parser sắp tháng khi câu hỏi yêu cầu thứ tự thời gian, giữ thứ tự liệt
+kê cho cách hỏi “lần lượt” và áp dụng giới hạn 24 tháng của #60. Tra cứu
+công nợ chấp nhận tên trên đơn hoặc tên danh mục, có thể bỏ hậu tố điện
+thoại khi tìm. Nếu tên khớp nhiều mã khách, kết quả là `abstain`.
+
+Trên 1.000 câu public, bản ghép có 684 đáp án cụ thể, 5 `unanswerable`
+và 311 `abstain`. Hai đáp án thêm dùng kỳ Tết từ calendar của split.
+Giữ 687 kết quả cũ theo mã, gồm toàn bộ 53 câu nhóm 06–10 và 13 câu
+công nợ mới của #61. Public chưa có nhãn chấm độ đúng.
+
+| Chấm local proxy | Đối chứng đúng / sai / abstain | Bản ghép đúng / sai / abstain |
+| --- | ---: | ---: |
+| Train, 3.000 câu | 2.929 / 1 / 70 | 2.949 / 1 / 50 |
+| Holdout theo shop, 630 câu | 623 / 0 / 7 | 628 / 0 / 2 |
+
+Giữ các câu đúng cũ theo mã và có thêm 20 câu đúng trên train, gồm
+5 câu holdout. Một câu lệch nhãn xếp hạng đã có trong đối chứng.
+Hai lượt dùng cùng cấu hình, rulebook, calendar và mã câu.
+`uv sync --locked`, smoke và Ruff trên các file giải quyết xung đột
+đều qua. Unittest có 532 ca qua và 1 skip.
+
+## Kiểm chứng độc lập và rà soát bằng chứng nguồn PR #60 — 11/11/2026
+
+Kiểm chứng độc lập candidate PR #60 (commit `4c844b0` và bản ghép `49e1139`)
+bằng `scripts/verify_candidate.py` trên môi trường Python riêng của checkout,
+hoàn tất chạy lặp độc lập và chứng nhận toàn bộ 50 ca abstain.
+
+### 1. Kiểm tra nhanh và tính toàn vẹn artifact
+Lệnh kiểm tra nhanh hoàn tất sau 1,031 giây với trạng thái `artifact_integrity=passed`.
+Checksum mã nguồn thực chạy `target_source_sha256` đạt `1be9e3e9d870ed57633669fdc75aed1d9ec2f09f1af6ef0a34faee7c2a905273`.
+160 tệp mã nguồn và tệp tracked được bảo vệ giữ nguyên vẹn 100% SHA256 trước và sau chạy.
+
+| Chỉ tiêu local proxy | Toàn train (3.000 câu) | Validation (630 câu) |
+| --- | ---: | ---: |
+| Đúng / sai / abstain | 2.949 / 1 / 50 | 628 / 0 / 2 |
+| Tỷ lệ PA | 0,982667 | 0,996825 |
+
+### 2. Chạy lặp độc lập (Repeat replay)
+Lệnh `--repeat` chạy lại toàn bộ 3.000 câu train trong 1.703,392 giây (~28,4 phút),
+đạt `repeat_status=passed` và `repeat_verified=true`.
+Đối chiếu `verify-runs` xác nhận `identical_answers_by_id=true`: trùng khớp 100%
+từng đáp án theo ID giữa hai lượt chạy độc lập. Mã băm submission đạt
+`644a7dbae74c38f7baeed35880a0799d1119ea680ed00ff729139df4468353d6` trên cả hai lượt.
+Số câu gặp lỗi thực thi là 0.
+
+### 3. Rà soát chứng nhận 50 ca abstain và ca lệch nhãn
+Đã rà soát chi tiết nguồn dữ liệu gốc (CSV, XLSX, SQLite chỉ đọc, README và Rulebook)
+cho toàn bộ 51 ca cần xem xét:
+- **50 ca abstain**: 100% được chứng nhận thiếu dữ liệu (`verified_missing_data`),
+  không còn ca nào `unresolved`. Căn cứ Rulebook mục 7:
+  - 7 ca kỳ nằm hoàn toàn ngoài phạm vi hoạt động của cửa hàng (biz_121 tháng 2/2025;
+    biz_106 tháng 1/2025; không tính thành 0).
+  - 10 ca cửa hàng không có sổ kho và không ghi nhận số lượng tồn kho (biz_103, biz_112,
+    biz_118, biz_130).
+  - 5 ca không có dữ liệu nhập hàng hoặc file nhập không có đơn giá nhập (biz_103,
+    biz_112, biz_118, biz_121, biz_122).
+  - 1 ca không có giá vốn hay đơn giá nhập để tính lãi gộp (biz_122).
+  - 3 ca tồn kho không theo dõi số lô và không có cột hạn sử dụng (biz_106, biz_117, biz_130).
+  - 6 ca hỏi đánh giá định tính, mức độ tận tâm, lễ phép hay tay nghề nhân viên mà dữ
+    liệu không ghi nhận (biz_105, biz_106, biz_112, biz_123, biz_124, biz_130).
+  - 11 ca hỏi địa chỉ đường phố, giới tính khách hàng hoặc nhóm thân thiết mà hồ sơ
+    khách hàng không lưu (Rulebook cấm suy diễn từ tên).
+  - 7 ca hỏi phương thức thanh toán, kênh bán (điện thoại, Zalo OA), hoặc lý do cụ thể
+    của đơn huỷ/trả mà dữ liệu không lưu.
+- **1 ca xếp hạng tháng 5/2025 (`q_02eb42db6665`, biz_125)**:
+  Tính toán độc lập từ `ban_hang.csv` sau khi quy về đơn vị cơ bản (lon), loại đơn
+  huỷ/trả và phí phục vụ: Bia Sài Gòn Special lon đạt 303 lon (129 dòng đơn), Bia Tiger
+  lon đạt 300 lon (140 dòng đơn). Thuật toán trả lời Bia Sài Gòn Special lon là hoàn
+  toàn đúng luật; nhãn tham chiếu chọn Tiger do đếm số dòng đơn (140 > 129) hoặc chưa
+  quy đổi đơn vị. Giữ nguyên thuật toán candidate.
+
+Kết quả kiểm tra nền tảng trên bản ghép: smoke qua (21 đúng / 0 sai / 3 abstain, PA 0.875),
+unittest chạy 533 ca (532 qua, 1 skip). Bảng đối soát chi tiết từng câu lưu tại
+`source-audit.csv` trong thư mục audit `outputs/eval02/`.

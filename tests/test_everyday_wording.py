@@ -56,7 +56,8 @@ class EverydayWordingTests(unittest.TestCase):
     def test_agent_loads_catalogue_before_rewriting_store_subject(self):
         agent = BaselineAgent()
         self.addCleanup(agent.close)
-        context = SimpleNamespace(cache={}, split=SimpleNamespace(rulebook=rulebook()))
+        context = SimpleNamespace(
+            cache={}, split=SimpleNamespace(rulebook=rulebook(), calendar_path=None))
         question = Question("synthetic", "shop", "Hôm qua quán bán được bao nhiêu đơn?",
                             date(2026, 9, 18))
         with patch.object(agent, "_product_names", return_value=["Quần jean nam"]) as names:
