@@ -6,11 +6,12 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from datamate.contracts import Plan, Question
-from datamate.semantics.planner import _AMOUNT, _TOP_SELLING
+from datamate.semantics.planner import _AMOUNT
 from datamate.semantics.rules import Rules
 from datamate.semantics.text import fold, normalize_question
 
 _TET = r"(?:dip |mua )?tet(?: am lich)? (?:nam )?"
+_TOP_SELLING = r"(?:ban chay|ban duoc nhieu|ban duoc nhiu|ban nhieu|ban nhiu|chay) nhat"
 _CHANGE = rf"(?:thay doi|tang hay giam) {_AMOUNT} phan tram"
 
 

@@ -115,8 +115,9 @@ _INTENTS = (
      rf"|trung binh {_ONE} {_ORDER}(?P<mid>.*?) mang ve {_AMOUNT} {_REVENUE}", ()),
     ("top_products", None,
      r"(?:((?<![/\d])\d+) )?(?:mat hang|san pham|hang|mon)(?: nao)? "
-     r"(?:ban chay|ban duoc nhieu|ban duoc nhiu|ban nhieu|ban nhiu|chay) nhat",
-     ()),
+     r"(?:ban chay|ban duoc nhieu|ban duoc nhiu|ban nhieu|ban nhiu|chay) nhat"
+     r"|(?<![/\d])\b(\d+) best sellers?\b",
+     (r"\bla (?:nhung )?(?:mat hang|san pham|mon|hang) nao$",)),
     ("quantity", "unit_quantity",
      rf"\bban(?: ra)?(?: duoc)?(?: tong cong)? {_AMOUNT} (?P<unit>[a-z][a-z0-9]*)\b"
      rf"|\b(?:tong )?so (?P<unit2>[a-z0-9]+) (?:ban ra|ban duoc|ban)\b",
@@ -375,7 +376,7 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
             return None
         intent = kind
         if kind == "top_products":
-            top_k = int(match.group(1) or 1)
+            top_k = int(match.group(1) or match.group(2) or 1)
             if not rules.quantity_ranking or not 1 <= top_k <= 100:
                 return None
         middle = match.groupdict().get("mid") or ""
@@ -526,7 +527,7 @@ _MONTH = r"thang (\d{1,2})/(\d{4})"
 _BARE_MONTH = r"(?<![\d/])(\d{1,2})/(\d{4})(?![\d/])"
 _COUNT_WORD = {"hai": 2, "ba": 3, "bon": 4, "nam": 5, "sau": 6}
 _MONTH_WORDS = re.compile(
-    r"\b(?:ghi (?:(?:\d+|ba) so )?(?:lan luot )?theo thu tu (?:thoi gian|do)|"
+    r"\b(?:(?:ghi )?(?:(?:\d+|ba) so )?(?:lan luot )?theo thu tu (?:thoi gian|do)|"
     r"xet|trong|cac|va|vao|qua|roi|so|cua hang|lan luot|moi thang|tung thang|"
     r"tu thang cu den thang moi|thang nao|o thang nao|ket thuc o|lien nhau|lien tiep|"
     r"(?:\d+|hai|ba|bon|nam|sau) thang|thang)\b")
@@ -581,13 +582,16 @@ def _months(text: str, today: date, rules: Rules) -> Plan | None | bool:
         return False
     best = re.search(r"\bthang nao\b", reduced) and re.search(
         rf"\b(?:cao|lon|nhieu|{_REVENUE}) nhat\b|\bnhieu tien nhat\b", reduced)
-    series = re.search(r"\b(?:moi thang|tung thang|lan luot)\b", reduced)
+    chronological = "theo thu tu thoi gian" in reduced
+    series = chronological or re.search(r"\b(?:moi thang|tung thang|lan luot)\b", reduced)
     stated_numbers = re.search(r"\bghi (\d+|ba) so\b", reduced)
     if stated_numbers and (_COUNT_WORD.get(stated_numbers.group(1))
                            or int(stated_numbers.group(1))) != len(months):
         return False
     if bool(best) == bool(series):
         return False
+    if chronological and months != sorted(months):
+        return False  # the explicit list and the requested chronology disagree
     feature = "month_date" if best else "list_in_question_order"
     if not getattr(rules, feature):
         return False

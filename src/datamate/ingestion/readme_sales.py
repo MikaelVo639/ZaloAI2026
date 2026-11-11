@@ -76,6 +76,8 @@ _PREFIXES = (
     ("he so", "factor"),
     ("so luong khach tra lai", "returned_quantity"),
     ("hinh thuc thanh toan", "payment_method"),
+    # Train READMEs describe line price columns as "đơn giá" (e.g. "Giá bán: đơn giá").
+    ("don gia", "unit_price"),
 )
 # Meanings that mark a list which is not about sales (imports, stock, prices, delivery...).
 _OTHER_LISTS = (

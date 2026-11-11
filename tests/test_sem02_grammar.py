@@ -59,11 +59,7 @@ class MonthsGrammarTests(unittest.TestCase):
         self.assertEqual(result.shape, "series")
         self.assertEqual([start for start, _ in result.periods],
                          [date(2025, 11, 1), date(2025, 12, 1), date(2026, 1, 1)])
-        for wording, months in (("theo thứ tự thời gian", [1, 2]), ("lần lượt", [2, 1])):
-            with self.subTest(wording=wording):
-                result = plan(f"Doanh thu tháng 2/2026 và tháng 1/2026 {wording}")
-                self.assertEqual(result.shape, "series")
-                self.assertEqual([start.month for start, _ in result.periods], months)
+        self.assertIsNone(plan("Doanh thu tháng 2/2026 và tháng 1/2026 theo thứ tự thời gian"))
         self.assertIsNone(plan("Doanh thu 200000000 tháng liên tiếp kết thúc ở tháng 1/2026 "
                                "lần lượt là bao nhiêu"))
 

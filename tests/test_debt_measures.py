@@ -3,6 +3,7 @@ debt_collected and debt_flow. Rulebook rows and ledgers are synthetic, written f
 """
 import unittest
 from unittest.mock import patch
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
