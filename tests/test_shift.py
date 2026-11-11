@@ -79,6 +79,7 @@ class ShiftPlanTests(unittest.TestCase):
         for text, intent in (
             ("Tuần trước số đơn ca chiều chênh ca sáng bao nhiêu phần trăm?", "order_count"),
             ("Tháng 3/2026 doanh thu ca chiều hơn hay kém ca sáng bao nhiêu %?", "revenue"),
+            ("Tháng 3/2026 doanh thu ca chiều so ca sáng chênh bao nhiêu %?", "revenue"),
             ("Tháng 3/2026 ca chiều so với ca sáng thì số đơn chênh bao nhiêu %?", "order_count"),
             ("So với ca sáng, doanh thu ca chiều tháng 3/2026 chênh bao nhiêu %?", "revenue"),
         ):
@@ -91,6 +92,7 @@ class ShiftPlanTests(unittest.TestCase):
     def test_unsupported_shift_questions_abstain(self):
         for text in (
             "Tháng 3/2026 ca sáng so với ca chiều doanh thu chênh bao nhiêu %?",  # other base
+            "Tháng 3/2026 ca sáng so ca chiều doanh thu chênh bao nhiêu %?",
             "Tháng 3/2026 ca chiều chiếm bao nhiêu % doanh thu?",  # a share, not defined
             "Tháng 3/2026 doanh thu ca chiều chênh ca sáng bao nhiêu tiền?",  # not a percent
             "Mặt hàng nào bán chạy nhất ca chiều tháng 3/2026?",  # shift only for revenue/orders
@@ -121,7 +123,7 @@ class ShiftExecutionTests(unittest.TestCase):
 
     def test_change_against_the_morning(self):
         plan, candidate = self.run_plan(
-            "Tháng 3/2026 doanh thu ca chiều chênh ca sáng bao nhiêu phần trăm?")
+            "Tháng 3/2026 doanh thu ca chiều so ca sáng chênh bao nhiêu phần trăm?")
         self.assertEqual(candidate.answer, 140.0)  # (360 - 150) / 150
         self.assertIs(check_executed(candidate, plan), candidate)
         plan, candidate = self.run_plan(

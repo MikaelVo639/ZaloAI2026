@@ -59,7 +59,11 @@ class MonthsGrammarTests(unittest.TestCase):
         self.assertEqual(result.shape, "series")
         self.assertEqual([start for start, _ in result.periods],
                          [date(2025, 11, 1), date(2025, 12, 1), date(2026, 1, 1)])
-        self.assertIsNone(plan("Doanh thu tháng 2/2026 và tháng 1/2026 theo thứ tự thời gian"))
+        for wording, months in (("theo thứ tự thời gian", [1, 2]), ("lần lượt", [2, 1])):
+            with self.subTest(wording=wording):
+                result = plan(f"Doanh thu tháng 2/2026 và tháng 1/2026 {wording}")
+                self.assertEqual(result.shape, "series")
+                self.assertEqual([start.month for start, _ in result.periods], months)
         self.assertIsNone(plan("Doanh thu 200000000 tháng liên tiếp kết thúc ở tháng 1/2026 "
                                "lần lượt là bao nhiêu"))
 
@@ -87,6 +91,24 @@ class MonthsGrammarTests(unittest.TestCase):
                                      "khách đã trả |\n")
                 result = plan(text, book=book)
                 self.assertEqual((result.shape, len(result.periods)), ("best_period", 3))
+
+    def test_shared_year_and_requested_list_order(self):
+        for text, expected in (
+            ("Doanh thu th5, th3, th4/2026 lần lượt bao nhiêu?", [5, 3, 4]),
+            ("Cho xin doanh thu T5/2026, T3/2026 và T4/2026 nhé", [5, 3, 4]),
+            ("Doanh thu tháng 5, 3, 4 năm 2026 theo thứ tự thời gian", [3, 4, 5]),
+            ("Doanh thu 3 tháng liền nhau tính tới 5-2026, xếp từ tháng cũ tới tháng gần nhất",
+             [3, 4, 5]),
+        ):
+            with self.subTest(text=text):
+                result = plan(text)
+                self.assertEqual(result.shape, "series")
+                self.assertEqual([start.month for start, _ in result.periods], expected)
+                self.assertTrue(all(start.year == 2026 for start, _ in result.periods))
+        self.assertIsNone(plan("Doanh thu tháng 4, 4, 5/2026 lần lượt bao nhiêu?"))
+        self.assertIsNone(plan("Cho xin tổng doanh thu T3/2026, T4/2026 và T5/2026"))
+        self.assertIsNone(plan("Doanh thu nước cam tháng 3, 4, 5/2026 lần lượt bao nhiêu?",
+                               names=("Nước cam",)))
 
     def test_months_abstain_without_rule_or_when_unclear(self):
         text = "Doanh thu từng tháng của 3 tháng 11/2025, 12/2025, 1/2026 lần lượt là bao nhiêu?"
@@ -244,6 +266,8 @@ class ComputeTests(unittest.TestCase):
         series = self.answer(Plan("revenue", date(2026, 1, 1), date(2026, 3, 31), periods=periods,
                                   shape="series"), sales)
         self.assertEqual((series.type, series.answer), ("list", [100, 300, 200]))
+        reordered = self.answer(plan("Doanh thu tháng 3, 1 và 2/2026 lần lượt bao nhiêu?"), sales)
+        self.assertEqual((reordered.type, reordered.answer), ("list", [200, 100, 300]))
         best = self.answer(Plan("revenue", date(2026, 1, 1), date(2026, 3, 31), periods=periods,
                                 shape="best_period"), sales)
         self.assertEqual((best.type, best.answer), ("date", "2026-02"))

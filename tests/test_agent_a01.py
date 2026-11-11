@@ -1,10 +1,22 @@
 import csv
-import unittest
 from copy import deepcopy
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
+
+from test_contract_c01 import (
+    CODES_ALL_MISSING,
+    MARKETPLACE,
+    NO_CODES,
+    NO_CODES_EXPECTED,
+    SAME_NAME_TWO_CODES,
+    X,
+    contract_plans,
+    pay,
+)
+from test_ingestion_debt import _Shop
+from test_s01_grammar import rulebook
 
 from datamate.agent import compute
 from datamate.agent.baseline import BaselineAgent
@@ -14,12 +26,9 @@ from datamate.contracts import BusinessContext, Filter, Question, Split
 from datamate.demo import COLUMNS
 from datamate.ingestion.catalog import build_catalog
 from datamate.ingestion.debt import DebtSourceError
-from test_contract_c01 import (
-    CODES_ALL_MISSING, MARKETPLACE, NO_CODES, NO_CODES_EXPECTED, SAME_NAME_TWO_CODES, X,
-    contract_plans, pay,
-)
-from test_ingestion_debt import _Shop
-from test_s01_grammar import rulebook
+from datamate.ingestion.sales import Sale
+from datamate.semantics.planner import plan_question
+from datamate.semantics.rules import read_rules
 
 
 def failed_debt_source(cache, **kwargs):
@@ -72,6 +81,21 @@ class A01Tests(_Shop):
         partial = self.context(self.sales_catalog(coverage="Dữ liệu có đến hết 30/03/2026."))
         agent.worker.stop()
         self.assertEqual(agent.answer(question, partial).type, "abstain")
+
+    def test_revenue_trend_checks_each_pair_in_the_chain(self):
+        text = "Doanh thu T3/2026 cao hơn T2/2026 rồi T4/2026 lại cao hơn T3/2026, đúng vậy không?"
+        question = Question("route-only", "shop", text, date(2026, 4, 30))
+        plan = plan_question(question, read_rules(rulebook()))
+        first = Sale("A", date(2026, 2, 1), "valid", Decimal(10), "P", "Trà", Decimal(1))
+        second = Sale("B", date(2026, 3, 10), "valid", Decimal(15), "P", "Trà", Decimal(1))
+        third = Sale("C", date(2026, 4, 30), "valid", Decimal(20), "P", "Trà", Decimal(1))
+        for middle, expected in ((15, True), (8, False), (10, False)):
+            with self.subTest(middle=middle):
+                rows = [first, replace(second, amount=Decimal(middle)), third]
+                result = compute._answer_revenue_trend(rows, "", plan, {})
+                self.assertEqual((result.type, result.answer), ("boolean", expected))
+        missing = compute._answer_revenue_trend([first, third], "", plan, {})
+        self.assertEqual(missing.type, "abstain")
 
     def test_debt_table_uses_d01_for_both_backends_and_the_snapshot(self):
         catalog = self.catalog()

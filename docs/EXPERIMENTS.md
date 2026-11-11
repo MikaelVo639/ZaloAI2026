@@ -899,6 +899,80 @@ Checksum mã nguồn của bản tích hợp khớp snapshot đã đo.
 `uv sync --locked`, smoke và unittest đều qua. Unittest chạy 515 ca,
 514 qua và 1 skip. Ruff qua trên các file sửa của bước ghép.
 
+## Kỳ, so sánh và doanh thu theo tháng của Dương, nhóm 06–10 — 11/11/2026
+
+Đối chứng dùng `main@fe9bd86`, sau #56–58. Parser đọc các mốc tính tới
+hôm nay, khoảng gần nhất có tính hôm nay, kỳ đối chiếu đứng trước và
+cách viết “ca chiều so ca sáng”. Danh sách tháng có thể dùng chung năm.
+Dãy doanh thu giữ thứ tự câu hỏi, hoặc xếp theo thời gian khi câu hỏi yêu
+cầu. Câu hỏi tăng liên tiếp so doanh thu của từng cặp tháng kề nhau.
+
+| Nhóm được phân công | Có đáp án trước | Có đáp án sau | Tổng câu |
+| --- | ---: | ---: | ---: |
+| 06. Khoảng ngày và mốc hôm nay | 0 | 17 | 17 |
+| 07. So sánh hai kỳ và chiều phần trăm | 0 | 9 | 9 |
+| 08. So sánh ca | 0 | 1 | 1 |
+| 09. Danh sách tháng và tháng cao nhất | 1 | 21 | 21 |
+| 10. Doanh thu tăng liên tiếp | 0 | 5 | 5 |
+| **Tổng** | **1** | **53** | **53** |
+
+Trên đủ 1.000 câu public, số đáp án cụ thể tăng từ 614 lên 669, cùng
+5 câu `unanswerable`. Tổng có kết quả tăng từ 619 lên 674. Có thêm 52
+đáp án trong phần Dương và 3 đáp án ở các câu có cách hỏi tương tự.
+Đối chiếu theo mã giữ nguyên 619 kết quả cũ. Public chưa có nhãn để
+chấm độ đúng.
+
+| Chấm local proxy | Đối chứng đúng / sai / abstain | Bản sửa đúng / sai / abstain |
+| --- | ---: | ---: |
+| Train, 3.000 câu | 2.926 / 1 / 73 | 2.928 / 1 / 71 |
+| Holdout theo shop, 630 câu | 623 / 0 / 7 | 623 / 0 / 7 |
+
+Hai câu train trả thêm đều là dãy doanh thu theo thứ tự thời gian.
+Giữ toàn bộ câu đúng cũ, cùng một câu lệch nhãn đã có sau #47. Hai lượt
+dùng cùng cấu hình, rulebook, calendar và mã câu.
+
+`uv sync --locked`, smoke và Ruff trên các tệp Python sửa đều qua.
+Unittest chạy 520 ca, 519 qua và 1 skip. Regression dùng dữ liệu giả lập,
+kiểm thứ tự dãy, chiều so sánh, mẫu số bằng 0, kỳ chưa kết thúc, tháng
+thiếu dữ liệu và chuỗi tăng có một tháng giảm hoặc bằng tháng trước.
+
+## Sổ công nợ XLSX và dòng cộng trong CSV — 11/11/2026
+
+Đối chứng dùng `main@d07d2b1`, sau #59. Bộ đọc công nợ nhận sổ Excel
+gộp đầu đơn và dòng hàng khi cấu trúc cột và quy ước README xác nhận
+đầu đơn lặp trên mọi dòng. Mỗi mã đơn chỉ giữ một tổng phải thu. Các
+phiếu thu vẫn là các giao dịch riêng. Dòng cộng ngày hoặc tháng được
+bỏ qua khi có nhãn tổng và các trường ngày đặt, trạng thái, khách,
+kênh và phương thức thanh toán đều trống.
+
+Bộ tra cứu khách nhận tên trên hóa đơn và tên danh mục theo cùng mã
+khách. Kết quả chỉ dùng tên tra cứu khi khớp duy nhất một mã. Bộ xếp
+hạng vẫn dùng tên hiển thị đã đọc từ danh mục.
+
+Trong 13 câu public đã có kế hoạch nhưng bị chặn bởi nguồn công nợ,
+bản sửa trả đáp án cho 10/10 câu XLSX và 3/3 câu CSV. Tính lại độc lập
+từ sổ gốc cho cùng 13 kết quả. Sổ XLSX đối soát 62.839 đơn và 62.580
+khoản thu, gộp 39.365 dòng hàng lặp thông tin đơn. Sổ CSV bỏ qua 511
+dòng cộng, đối soát 25.191 đơn và 26.246 khoản thu. Cả hai sổ có 0 khoản
+thu không khớp mã đơn và 0 sai lệch số dư trong các đơn phải đối soát.
+
+Lượt đủ 1.000 câu public có 682 đáp án cụ thể, 5 `unanswerable` và
+313 `abstain`. Tổng có kết quả tăng từ 674 lên 687, giữ đủ 674 kết
+quả cũ theo mã câu. Public chưa có nhãn chấm độ đúng.
+
+| Chấm local proxy | Đối chứng đúng / sai / abstain | Bản sửa đúng / sai / abstain |
+| --- | ---: | ---: |
+| Train, 3.000 câu | 2.928 / 1 / 71 | 2.929 / 1 / 70 |
+| Holdout theo shop, 630 câu | 623 / 0 / 7 | 623 / 0 / 7 |
+
+Câu train có thêm đáp án hỏi nợ thêm và tiền trả của khách có tên trên
+hóa đơn khác tên danh mục. Giữ đủ các câu đúng cũ và không có câu sai
+mới. Hai lượt dùng cùng cấu hình, rulebook, calendar và mã câu.
+
+Regression dùng dữ liệu giả lập để kiểm tra đơn nhiều dòng, phiếu thu
+cùng số tiền và ngày, tệp thiếu phân đoạn, đầu đơn mâu thuẫn, dòng cộng,
+đơn thật thiếu trường và tên trùng nhiều mã. `uv sync --locked`, smoke và
+Ruff trên các file sửa đều qua. Unittest chạy 524 ca, 523 qua và 1 skip.
 
 ## Phục hồi 23 câu train có đáp án — 11/11/2026
 
@@ -940,3 +1014,27 @@ Smoke qua. Unittest chạy 520 ca, 519 qua và 1 skip. Diff check qua.
 50 câu còn abstain đều có nhãn unanswerable nhưng chưa được chứng nhận thiếu
 dữ liệu độc lập từng ca. Bản cuối chưa được chạy lặp lại để đo tính tái lập.
 Artifacts và bảng audit được giữ ngoài Git trong outputs/eval02/.
+
+## Đối chiếu PR #60 sau khi cập nhật main — 11/11/2026
+
+Đối chứng dùng `main@301db0f`, đã có #59 và bản sửa công nợ #61.
+Parser sắp tháng khi câu hỏi yêu cầu thứ tự thời gian, giữ thứ tự liệt
+kê cho cách hỏi “lần lượt” và áp dụng giới hạn 24 tháng của #60. Tra cứu
+công nợ chấp nhận tên trên đơn hoặc tên danh mục, có thể bỏ hậu tố điện
+thoại khi tìm. Nếu tên khớp nhiều mã khách, kết quả là `abstain`.
+
+Trên 1.000 câu public, bản ghép có 684 đáp án cụ thể, 5 `unanswerable`
+và 311 `abstain`. Hai đáp án thêm dùng kỳ Tết từ calendar của split.
+Giữ 687 kết quả cũ theo mã, gồm toàn bộ 53 câu nhóm 06–10 và 13 câu
+công nợ mới của #61. Public chưa có nhãn chấm độ đúng.
+
+| Chấm local proxy | Đối chứng đúng / sai / abstain | Bản ghép đúng / sai / abstain |
+| --- | ---: | ---: |
+| Train, 3.000 câu | 2.929 / 1 / 70 | 2.949 / 1 / 50 |
+| Holdout theo shop, 630 câu | 623 / 0 / 7 | 628 / 0 / 2 |
+
+Giữ các câu đúng cũ theo mã và có thêm 20 câu đúng trên train, gồm
+5 câu holdout. Một câu lệch nhãn xếp hạng đã có trong đối chứng.
+Hai lượt dùng cùng cấu hình, rulebook, calendar và mã câu.
+`uv sync --locked`, smoke và Ruff trên các file giải quyết xung đột
+đều qua. Unittest có 532 ca qua và 1 skip.

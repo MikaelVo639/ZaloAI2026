@@ -78,6 +78,22 @@ class ComparisonGrammarTests(unittest.TestCase):
         self.assertIsNotNone(self.plan(mtd))
         self.assertIsNone(self.plan(mtd, book=rulebook(same_days=False)))
 
+    def test_reference_order_and_comparison_wording(self):
+        expected = ((date(2026, 3, 1), date(2026, 3, 31)), (date(2025, 3, 1), date(2025, 3, 31)))
+        for text in (
+            "So với T3/2025 thì T3/2026 doanh thu tăng trưởng bao nhiêu %?",
+            "Doanh thu T3/2026 so T3/2025 cao hay thấp hơn bao nhiêu %?",
+            "Doanh thu T3/2026 đem so với tháng 3 năm ngoái thì thay đổi bao nhiêu %?",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.windows(text), expected)
+        self.assertEqual(
+            self.windows("Tháng này tới hôm nay dthu chênh bao nhiêu % so với cùng kỳ tháng trước, "
+                         "tăng hay giảm?", today="2026-06-30"),
+            ((date(2026, 6, 1), date(2026, 6, 30)), (date(2026, 5, 1), date(2026, 5, 30))),
+        )
+        self.assertIsNone(self.plan("Doanh thu T3/2026 so T3/2025 cao hay thấp hơn bao nhiêu tiền?"))
+
     def test_unsupported_comparisons_still_abstain(self):
         for text in ("doanh thu tháng 3/2026 chênh lệch bao nhiêu tiền so với tháng trước",
                      "doanh thu tháng 7/2026 so với tháng trước tăng bao nhiêu %",  # running month
@@ -173,10 +189,21 @@ class ComparisonAndFilterAgentTests(unittest.TestCase):
         self.assertTrue(result.evidence["code"]["call"].startswith("change_percent(revenue_total("))
         self.assertEqual(compute.change_percent(Decimal(2), Decimal(3)), -33.33)
 
+    def test_reference_first_keeps_the_sign_and_denominator(self):
+        sales = [sale("A", 2, "valid", 2500000), sale("B", 2, "valid", 2000000, month=4)]
+        for subject, reference, percent in ((5, 4, 25.0), (4, 5, -20.0)):
+            with self.subTest(subject=subject):
+                text = f"So với T{reference}/2026 thì T{subject}/2026 doanh thu cao hay thấp hơn bao nhiêu %?"
+                question = Question("x", "b", text, date(2026, 7, 15))
+                result = self.answer(plan_question(question, read_rules(rulebook())), sales)
+                self.assertEqual((result.type, result.answer), ("percent", percent))
+
     def test_zero_or_missing_comparison_period(self):
         plan = Plan("revenue", date(2026, 5, 1), date(2026, 5, 31), compare_start=date(2026, 4, 1),
                     compare_end=date(2026, 4, 30), comparison="change_percent")
         self.assertEqual(self.answer(plan, SALES[:3]).type, "abstain")  # no April sales
+        zero_base = SALES[:3] + [sale("Z", 2, "valid", 0, month=4)]
+        self.assertEqual(self.answer(plan, zero_base).type, "abstain")
         covered = "Khoảng dữ liệu: 2026-05-01 đến 2026-05-31"
         self.assertEqual(self.answer(plan, SALES[:3], covered).type, "unanswerable")
 

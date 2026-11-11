@@ -810,17 +810,15 @@ def debt_flow(ledger: DebtLedger, start: date, end: date,
 
 
 def _debt_customer(ledger: DebtLedger, name: str) -> tuple[str | None, int]:
-    """The one customer key whose name folds to ``name``; (None, matches) otherwise."""
+    """Resolve a display or order name to one customer key, retaining ambiguity."""
+    phone_suffix = re.compile(r"\s+-\s+0(?:[ .-]*\d){9}\s*$")
     keys = set()
     for order in ledger.orders:
-        if not order.customer_name:
-            continue
-        # Some exports append a telephone to the display name after a separator.
-        # Preserve the customer code and reject any ambiguous resulting lookup.
-        display = order.customer_name
-        bare = re.sub(r"\s+-\s+0(?:[ .-]*\d){9}\s*$", "", display)
-        if name in (fold(display), fold(bare)):
-            keys.add(_debt_key(order, ledger))
+        for label in (order.customer_name, order.source_customer_name):
+            # Some exports append a telephone after a separator in either field.
+            if label and name in (fold(label), fold(phone_suffix.sub("", label))):
+                keys.add(_debt_key(order, ledger))
+                break
     keys.discard(None)
     return (next(iter(keys)), 1) if len(keys) == 1 else (None, len(keys))
 

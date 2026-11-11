@@ -110,6 +110,22 @@ class PeriodTests(unittest.TestCase):
         self.assertEqual(self.window("doanh thu từ đầu tháng này đến hết hôm nay")[1:],
                          (date(2026, 3, 1), date(2026, 3, 4)))
 
+    def test_explicit_current_cutoffs_and_rolling_windows(self):
+        for text, start in (
+            ("Năm nay tính đến hôm nay có tổng cộng bao nhiêu đơn?", date(2026, 1, 1)),
+            ("Từ đầu năm nay đến bây giờ có bao nhiêu đơn?", date(2026, 1, 1)),
+            ("Doanh thu từ mùng 1 tháng này đến hết hôm nay", date(2026, 3, 1)),
+            ("Tuần này tính tới hôm nay doanh thu bao nhiêu?", date(2026, 3, 2)),
+            ("6 ngày qua kể cả hôm nay doanh thu bao nhiêu?", date(2026, 2, 27)),
+            ("Tính luôn hôm nay thì 6 ngày gần nhất có bao nhiêu đơn?", date(2026, 2, 27)),
+            ("Riêng ngày hôm nay doanh thu bao nhiêu?", date(2026, 3, 4)),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.window(text)[1:], (start, date(2026, 3, 4)))
+        self.assertIsNone(self.plan("Doanh thu 6 ngày qua, không tính hôm nay"))
+        self.assertIsNone(self.plan("Từ mùng 2 tháng này đến hết hôm nay, doanh thu?"))
+        self.assertIsNone(self.plan("Tuần này tính tới hôm nay còn bao nhiêu hàng?"))
+
     def test_month_or_quarter_without_year(self):
         today = "2026-03-04"
         self.assertEqual(self.window("doanh thu tháng 3", today)[1:], (date(2026, 3, 1), date(2026, 3, 4)))
