@@ -189,6 +189,47 @@ uv run --no-sync python scripts/robustness_eval.py --data-dir data/raw/train --o
 Chỉ đề xuất bật khi số câu đúng thêm lớn hơn rõ rệt số câu sai thêm, và liệt kê từng
 câu chuyển sang sai.
 
+## Câu không trả lời được (`agent/absence.py`, `semantics/attributes.py`)
+
+Chỉ một câu đang `abstain` mới có thể đổi thành `unanswerable`, và chỉ khi rulebook của
+split có dòng "shop không ghi loại thông tin câu hỏi cần thì không trả lời được". Ba
+đường:
+
+1. Câu đã có Plan (tồn kho, nhập hàng, giá vốn, hạn dùng) mà tính không được, và shop
+   **không có dấu vết nào** của loại thông tin đó: không dòng README, tên file, tên sheet
+   hay tiêu đề cột *có giá trị* nào chứa từ của khái niệm. Danh sách từ rộng có chủ ý.
+   Ngưỡng đặt hàng ("Tồn lớn nhất", "Định mức tồn tối thiểu") không tính là tồn kho.
+2. Kỳ hỏi nằm hẳn trước ngày bán đầu tiên, khi shop bán ít nhất 5/7 ngày đầu (bán hằng
+   ngày nên ngày đầu là ngày bắt đầu dữ liệu), theo dòng "kỳ nằm hoàn toàn ngoài khoảng
+   ngày có dữ liệu".
+3. Câu grammar không lập Plan nhưng hỏi một loại thông tin cố định (giới tính khách, địa
+   chỉ khách, phẩm chất nhân viên, lý do huỷ/trả, liều dùng) mà shop không có dấu vết.
+   Chạy trước model rewrite để model không biến câu thành câu doanh thu.
+
+Lỗi tính toán hay thiếu adapter không bao giờ được coi là bằng chứng không trả lời được.
+
+## Luật xếp hạng có tên (`semantics/rule_spec.py`, `agent/rule_rank.py`)
+
+Mỗi split, một lần: mỗi dòng rulebook có tên dạng "… nhất" được đọc thành một JSON cố định
+(`doi_tuong`, `chi_tieu`, `chon`, `don_hop_le`, `dieu_kien`, `cach_goi`, `nguon`) chỉ
+dùng giá trị trong danh sách cho phép. `ground` kiểm mọi giá trị có chỗ dựa trong chữ của
+dòng (số phải ghi trong dòng, "số ngày" phải có chữ "ngày", số lạ trong dòng làm tắt luật).
+Thiếu chỗ dựa, mơ hồ hay cần phép tính chưa có thì **tắt** luật, câu liên quan abstain.
+Mọi luật (bật/tắt, lý do) ghi trong `run.json` mục `rule_specs`;
+`scripts/rule_specs.py --split <split>` in cùng báo cáo.
+
+- Câu hỏi chỉ dùng luật khi grammar không lập được Plan, câu nêu đúng một `cach_goi` của
+  một luật đang bật và một kỳ; chữ còn lại chỉ được là từ hỏi/lịch sự.
+- Bộ tính chung (`rule_rank.py`) nhóm theo đối tượng, đo theo chỉ tiêu, lọc theo điều kiện,
+  xếp theo chọn; bằng nhau theo dòng "bằng nhau" của rulebook, không có dòng đó (hay xếp
+  ngày) mà hoà ở vị trí cắt thì abstain. Khung giờ chưa có format đáp án nên đang tắt.
+- Đường model (`agent/rule_spec_model.py`): chỉ cho dòng xếp hạng mà bộ đọc code để tắt;
+  hai prompt khác thứ tự, hai JSON phải giống hệt và qua `ground` mới bật. Chưa nối vào
+  agent; bật sau khi đo trên L4.
+- Nghiệm thu với rulebook train: "Nhân viên bán giỏi nhất" bật (nhân viên / doanh thu /
+  lớn nhất), "Hàng lời nhất" và "Lô gần hết hạn nhất" tắt, khớp bản viết tay. Bộ đọc và test
+  dùng câu chữ tự soạn; không đọc rulebook public để chỉnh bộ đọc.
+
 ## Phần Plan còn cần Semantics + Data thống nhất
 
 Contract C01 cho boolean tăng doanh thu liên tục, table công nợ và nguồn công nợ

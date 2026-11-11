@@ -8,6 +8,8 @@ from datamate.agent.worker import Worker, WorkerResult
 from datamate.contracts import BusinessContext, Candidate, Plan, Question
 from datamate.semantics.attributes import asked_attribute
 from datamate.semantics.lunar_periods import plan_tet
+from datamate.semantics.rule_rank_plan import plan_rule_rank
+from datamate.semantics.rule_spec import enabled_specs
 from datamate.semantics.planner import (
     lot_product_question,
     plan_question,
@@ -112,7 +114,16 @@ class BaselineAgent:
                     increases, source = context.cache["price_history"]
                     plan = plan_question(question, rules, names, vocabulary,
                                          price_increases=increases, price_source=source)
+        if plan is None:
+            plan = plan_rule_rank(question, rules, self._rule_specs(context.split.rulebook))
         return plan
+
+    def _rule_specs(self, rulebook: str) -> tuple:
+        """Enabled rule specs of the split, computed once per rulebook."""
+        cache = self.__dict__.setdefault("_spec_cache", {})
+        if rulebook not in cache:
+            cache[rulebook] = enabled_specs(rulebook)
+        return cache[rulebook]
 
     def _answer_plan(self, plan: Plan, context: BusinessContext, *,
                      as_of_date: date | None = None) -> Candidate:

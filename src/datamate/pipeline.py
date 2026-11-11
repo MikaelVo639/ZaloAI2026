@@ -16,6 +16,7 @@ from datamate import __version__
 from datamate.agent.baseline import AbstainAgent, BaselineAgent
 from datamate.agent.local_plan import LocalPlanAgent
 from datamate.agent.rewrite import RewriteAgent
+from datamate.semantics.rule_spec import report as rule_spec_report
 from datamate.contracts import Agent, BusinessContext, Candidate
 from datamate.evaluation.validation import finalize
 from datamate.ingestion import build_catalog
@@ -171,7 +172,8 @@ def predict(data_dir: Path, output_dir: Path, config: Config,
                 "rulebook_sha256": hashlib.sha256(split.rulebook.encode()).hexdigest(),
                 "questions_sha256": hashlib.sha256((split.root / "questions.jsonl").read_bytes()).hexdigest(),
                 "calendar_sha256": hashlib.sha256(split.calendar_path.read_bytes()).hexdigest(),
-                "models": agent.models if isinstance(agent, LocalPlanAgent) else []}
+                "models": agent.models if isinstance(agent, LocalPlanAgent) else [],
+                "rule_specs": json.loads(rule_spec_report(split.rulebook))}
     (output_dir / "run.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest
 

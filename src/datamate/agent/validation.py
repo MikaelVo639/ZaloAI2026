@@ -146,6 +146,9 @@ def check_executed(candidate: Candidate, plan: Plan | None = None) -> Candidate:
                 expected = "percent"
             elif plan.intent in {"top_products", "top_customers"}:
                 expected = "string" if plan.top_k == 1 else "list"
+            elif plan.intent == "rule_rank":
+                expected = ("date" if plan.rank_by.startswith("ngay:")
+                            else "string" if plan.top_k == 1 else "list")
             else:
                 expected = ANSWER_TYPES.get(plan.intent)
             if expected is None or candidate.type != expected:

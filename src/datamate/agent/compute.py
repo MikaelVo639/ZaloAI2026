@@ -15,6 +15,7 @@ from functools import lru_cache
 from typing import Any, Callable
 
 from datamate.agent.absence import INTENT_CONCEPT, missing_concept, recorded
+from datamate.agent.rule_rank import RankError, rank, sales_groups, supplier_groups
 from datamate.agent.business_measures import (
     delivery_count,
     earliest_expiry,
@@ -63,6 +64,7 @@ from datamate.ingestion.stock import (
 )
 from datamate.semantics.payment import FIELDS as PAYMENT_FIELDS
 from datamate.semantics.payment import label_terms
+from datamate.semantics.rule_spec import enabled_specs
 from datamate.semantics.rules import DEBT_TABLE_FEATURES, line_with, read_rules
 from datamate.semantics.text import fold
 
@@ -356,7 +358,8 @@ INDEPENDENT_INTENTS = LOT_INTENTS | {"stock", "stock_split", "delivery_count", "
 INTENTS = (frozenset({"revenue", "order_count", "top_products", "average_order",
                      "cancel_count", "cancel_rate", "best_day",
                      "top_customers", "count_where", "quantity", "top_staff", "stock", "stock_split",
-                     "purchase_total", "top_supplier", "avg_purchase_price", "daily_sale_price"})
+                     "purchase_total", "top_supplier", "avg_purchase_price", "daily_sale_price",
+                     "rule_rank"})
            | C01_INTENTS | DEBT_INTENTS | INDEPENDENT_INTENTS | SALES_MEASURE_INTENTS)
 # Plan filters this backend applies, and the intents each one may be combined with.
 FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock", "stock_split",
@@ -384,6 +387,12 @@ def unsupported(plan: Plan) -> str:
     """
     if plan.intent not in INTENTS:
         return f"Intent {plan.intent!r} not supported by baseline agent"
+    if plan.intent == "rule_rank":
+        if (plan.filters or plan.periods or plan.shape or plan.threshold or plan.comparison
+                or plan.compare_start or plan.compare_end or plan.unit or not plan.rank_by
+                or not 1 <= plan.top_k <= 20 or plan.start > plan.end):
+            return "Rule ranking takes one period, a size and its rule only"
+        return ""
     if plan.intent == "daily_sale_price":
         if (plan.start != plan.end or len(plan.filters) != 1 or plan.filters[0].field != "product"
                 or not plan.unit or plan.top_k != 1 or plan.periods or plan.shape or plan.threshold
@@ -729,6 +738,47 @@ def _debt_customer(ledger: DebtLedger, name: str) -> tuple[str | None, int]:
 
 def _stockout_rule(rulebook: str) -> str:
     return line_with(rulebook, "mat hang het hang cuoi ngay", "mua ve de ban", "ton kho bang 0")
+
+
+def _answer_rule_rank(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                      rulebook: str) -> Candidate:
+    """A ranking defined by an enabled rule spec of the current split (rule_spec.py)."""
+    specs = [spec for spec in enabled_specs(rulebook) if spec.nguon in plan.evidence]
+    evidence: dict[str, Any] = {"intent": plan.intent, "start": plan.start.isoformat(),
+                                "end": plan.end.isoformat(), "rules": plan.evidence}
+    if len(specs) != 1 or f"{specs[0].doi_tuong}:{specs[0].chi_tieu}" != plan.rank_by:
+        return Candidate(reason="Plan does not name exactly one enabled rule spec",
+                         evidence=evidence)
+    spec = specs[0]
+    evidence["spec"] = spec.to_json()
+    ties = read_rules(rulebook).ties_by_code
+    try:
+        if spec.doi_tuong == "nha_cung_cap":
+            book = load_purchases(catalog)
+            groups = supplier_groups(spec, book.receipts, plan.start, plan.end)
+            evidence["tables"] = [book.source]
+        else:
+            prepared = prepare_sales(cache, catalog, rulebook)
+            if not prepared["ok"]:
+                return Candidate(reason=prepared["reason"], evidence=evidence)
+            sales, source = cache["sales"]
+            if spec.chi_tieu == "so_luong_quy_doi":
+                sales = ranking_candidates(sales, cache.get("ranking_eligible"))
+            groups = sales_groups(spec, sales, plan.start, plan.end)
+            evidence["tables"] = source["tables"]
+        names, ranking = rank(spec, groups, plan.top_k, ties)
+    except (RankError, PurchaseSourceError) as exc:
+        return Candidate(reason=str(exc), evidence=evidence)
+    if spec.doi_tuong == "ngay":
+        kind, value = "date", names[0]
+    else:
+        kind, value = ("string", names[0]) if plan.top_k == 1 else ("list", names)
+    if plan.top_k > 1 and spec.doi_tuong == "ngay":
+        return Candidate(reason="A list of days has no answer format here", evidence=evidence)
+    evidence.update(ranking=ranking[:max(plan.top_k, 10)], result=value,
+                    code=_code(f"rank(spec, groups, {plan.top_k}, {ties})", sales_groups,
+                               supplier_groups, rank))
+    return Candidate(kind, value, 1.0, "", evidence)
 
 
 def attribute_recorded(cache: dict[str, Any], catalog: Catalog, attribute: str) -> bool:
@@ -1473,6 +1523,8 @@ def _answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return _answer_stock(cache, catalog, plan, rulebook)
     if plan.intent in ("purchase_total", "top_supplier"):
         return _answer_purchase(cache, catalog, plan)
+    if plan.intent == "rule_rank":
+        return _answer_rule_rank(cache, catalog, plan, rulebook)
     if plan.intent == "avg_purchase_price":
         return _answer_avg_purchase(cache, catalog, plan, rulebook)
     c01_rules = ()
