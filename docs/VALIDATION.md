@@ -3,6 +3,31 @@
 Các bước này dùng cho mọi checkout. Báo cáo một lượt chạy cụ thể được lưu trong
 thư mục output của lượt đó, theo `docs/EXPERIMENTS.md`.
 
+## Kiểm chứng nhanh một benchmark train đã hoàn tất
+
+Trong checkout đã cài môi trường riêng, chạy bằng Python của chính checkout đó:
+
+```sh
+python scripts/verify_candidate.py --data-dir data/raw/train --run-dir outputs/candidate --output-dir outputs/candidate-checks
+```
+
+Lệnh kiểm tra đường dẫn import, checksum mã nguồn/data/config/holdout/scorer/nhãn,
+đầy đủ ID/log, đáp án log khớp submission và chấm lại metrics toàn train/validation.
+Lỗi checksum, log hoặc điểm không khớp trả exit code 1.
+Chọn thư mục output mới cho mỗi lần kiểm tra.
+
+`verification.json` ghi kết quả và thời gian. `needs-review.csv` liệt kê từng câu
+còn sai hoặc abstain để kiểm tra nguồn. Kết quả integrity qua vẫn ghi
+`absence_audit_complete=false` và `repeat_verified=false`.
+
+Thêm `--repeat` để chạy lại inference độc lập với config/holdout của benchmark,
+sau đó dùng `verify-runs` so đầy đủ đáp án theo ID và log của hai lượt.
+Tiến độ predict nằm trong `<output-dir>/repeat/predict.stderr.txt`.
+Lỗi inference hoặc đáp án khác nhau làm lệnh thất bại và ghi lý do trong báo cáo.
+Trên máy đo ngày 11/11/2026, kiểm tra nhanh mất khoảng 1 giây, inference đủ 3.000 câu
+mất khoảng 28 phút. Rà soát thiếu dữ liệu cần kiểm tra từng nguồn trong CSV,
+ghi rõ thông tin cần cho câu hỏi và bằng chứng nguồn phát hành không cung cấp.
+
 ## Kiểm tra nền tảng
 
 ```sh
