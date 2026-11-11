@@ -87,9 +87,26 @@ class Rules:
         return next((line for name, line in self.rule_rows if name == feature), None)
 
 
+# Words that never change a rule's meaning ("không hề", "tất cả các", "chính là", "được tính")
+# and spellings of the same word ("hoá đơn" / "đơn", "khách hàng" / "khách"). Rows and the
+# phrases the reader looks for are compared after the same rewriting.
+_SAME_MEANING = ((r"\btat ca\b", " "), (r"\bhoa don\b", "don"), (r"\bkhach hang\b", "khach"),
+                 (r"\bhuy bo\b", "huy"), (r"\bbao gom\b", "gom"),
+                 (r"\b(?:cac|cua|he|chinh|duoc|la)\b", " "))
+
+
+def canonical(folded: str) -> str:
+    """A folded rule text without filler words and with one spelling per word."""
+    for pattern, replacement in _SAME_MEANING:
+        folded = re.sub(pattern, replacement, folded)
+    return " ".join(folded.split())
+
+
 def _find(rows: dict[str, str], *key_tokens: str) -> str | None:
-    """First rule key containing every token; rule wording may differ between splits."""
-    return next((key for key in rows if all(token in key for token in key_tokens)), None)
+    """The shortest rule key containing every phrase; splits may word or extend a key."""
+    tokens = [canonical(token) for token in key_tokens]
+    keys = [key for key in rows if all(token in key for token in tokens)]
+    return min(keys, key=len) if keys else None
 
 
 def read_rules(rulebook: str) -> Rules:
@@ -105,38 +122,43 @@ def read_rules(rulebook: str) -> Rules:
     for line in rulebook.splitlines():
         cells = [x.strip() for x in line.strip().strip("|").split("|")]
         if line.lstrip().startswith("|") and len(cells) >= 2:
-            key, value = fold(cells[0]), fold(cells[1])
+            key, value = canonical(fold(cells[0])), canonical(fold(cells[1]))
             if key in rows and rows[key] != value:
                 conflicts.add(key)
             rows[key] = value
             originals[key] = line.strip()
-    validity = rows.get("don tinh vao doanh thu", "")
-    amount = rows.get("doanh thu mot don", "")
-    month = rows.get("thang nay", "")
-    week = rows.get("tuan", "")
-    ranking = rows.get("ban chay", "")
+    core_keys = {name: _find(rows, name) for name in (
+        "don tinh vao doanh thu", "doanh thu mot don", "thang nay", "tuan", "ban chay")}
+    validity, amount, month, week, ranking = (rows.get(key, "") if key not in conflicts else ""
+                                              for key in core_keys.values())
+
+    def has(text: str, *phrases: str) -> bool:
+        return all(canonical(phrase) in text for phrase in phrases)
 
     features: dict[str, str] = {}
 
     def enable(feature: str, key: str | None, *value_tokens: str) -> bool:
-        if key not in rows or key in conflicts or not all(token in rows[key] for token in value_tokens):
+        if key is not None and key not in rows:
+            key = _find(rows, key)
+        if key not in rows or key in conflicts or not has(rows[key], *value_tokens):
             return False
         features[feature] = originals[key]
         return True
 
     def exact(feature: str, key: str | None, *wordings: str) -> bool:
-        if key in conflicts or rows.get(key) not in wordings:
+        if key is not None and key not in rows:
+            key = _find(rows, key)
+        if key in conflicts or rows.get(key) not in {canonical(wording) for wording in wordings}:
             return False
         features[feature] = originals[key]
         return True
 
-    lines = [(fold(line), line.strip()) for line in rulebook.splitlines()
+    lines = [(canonical(fold(line)), line.strip()) for line in rulebook.splitlines()
              if line.strip() and not line.lstrip().startswith("|")]
 
     def enable_text(feature: str, *tokens: str) -> bool:
         """For rules written as a sentence (answer-format section), not a table row."""
-        line = next((original for folded, original in lines
-                     if all(token in folded for token in tokens)), None)
+        line = next((original for folded, original in lines if has(folded, *tokens)), None)
         if line is None:
             return False
         features[feature] = line
@@ -153,16 +175,13 @@ def read_rules(rulebook: str) -> Rules:
     if shifts:
         features["shift"] = originals[_find(rows, "ca sang", "ca chieu")]
     return Rules(
-        revenue=all(token in validity for token in ("khong huy", "khong tra", "ca don"))
-        and all(token in amount for token in (
-            "thanh tien cac dong", "khong tru", "khong cong thue vat", "khong gom phi giao hang"
-        )),
-        month_to_date="ngay 1" in month and "hom nay" in month,
-        monday_week="thu hai" in week and "chu nhat" in week,
-        quantity_ranking="so luong quy ve don vi co ban" in ranking,
-        source_rows=tuple(originals[key] for key in (
-            "don tinh vao doanh thu", "doanh thu mot don", "thang nay", "tuan", "ban chay"
-        ) if key in originals),
+        revenue=has(validity, "khong huy", "khong tra", "ca don")
+        and has(amount, "thanh tien cac dong", "khong tru", "khong cong thue vat",
+                "khong gom phi giao hang"),
+        month_to_date=has(month, "ngay 1", "hom nay"),
+        monday_week=has(week, "thu hai", "chu nhat"),
+        quantity_ranking=has(ranking, "so luong quy ve don vi co ban"),
+        source_rows=tuple(originals[key] for key in core_keys.values() if key in originals),
         money_is_revenue=enable("money_is_revenue", money, "doanh thu",
                                 "khong phai tien khach da tra"),
         goods_money_is_revenue=enable("goods_money_is_revenue", _find(rows, "doanh thu mot don"),
@@ -189,7 +208,7 @@ def read_rules(rulebook: str) -> Rules:
                                   "hot nhat", "cung nghia voi ban chay nhat"),
         list_in_question_order=enable_text("list_in_question_order", "nhieu so",
                                            "list theo dung thu tu cau hoi neu"),
-        month_date=enable("month_date", "date" if "date" in rows else None,
+        month_date=enable("month_date", _find(rows, "date"),
                           "cau hoi theo thang", "yyyy mm"),
         ties_by_code=enable_text("ties_by_code", "bang nhau", "theo ma tang dan",
                                  "khong co ma thi theo ten"),
@@ -320,7 +339,7 @@ def _shifts(rows: dict[str, str], originals: dict[str, str], conflicts: set[str]
     questions stay unsupported for this split.
     """
     key = _find(rows, "ca sang", "ca chieu")
-    if key is None or key in conflicts or "theo gio tao don" not in rows[key]:
+    if key is None or key in conflicts or canonical("theo gio tao don") not in rows[key]:
         return (), ""
     cell = originals[key].strip().strip("|").split("|", 1)[1]
     plain = "".join(c for c in unicodedata.normalize("NFD", cell.lower().replace("đ", "d"))
@@ -337,5 +356,5 @@ def _shifts(rows: dict[str, str], originals: dict[str, str], conflicts: set[str]
     (a1, a2), (b1, b2) = windows["sang"], windows["chieu"]
     if not (a2 < b1 or b2 < a1):
         return (), ""
-    base = re.search(r"\bmoc la ca (sang|chieu)\b", rows[key])
+    base = re.search(r"\bmoc (?:la )?ca (sang|chieu)\b", rows[key])
     return (("sang", a1, a2), ("chieu", b1, b2)), base.group(1) if base else ""
