@@ -53,6 +53,8 @@ class RevenueIncreasingTests(unittest.TestCase):
                 "Từ tháng 2/2026 qua tháng 3/2026 rồi tháng 4/2026 doanh thu có tăng liên tục ko",
                 "Từ tháng 2/2026 đến tháng 4/2026 doanh thu tháng sau có luôn cao hơn tháng trước "
                 "không?",
+                "Từ T2/2026 tới T4/2026 dthu tháng sau đều cao hơn tháng trước hả?",
+                "Dthu T3/2026 cao hơn T2/2026, rồi T4/2026 lại cao hơn T3/2026, đúng vậy không?",
                 "Xu hướng doanh thu 3 tháng 2/2026, 3/2026, 4/2026: có phải tháng 3/2026 cao hơn "
                 "tháng 2/2026 và tháng 4/2026 cao hơn tháng 3/2026 nhỉ?",
                 "Doanh thu có phải tháng 3/2026 cao hơn tháng 2/2026 và tháng 4/2026 cao hơn "
@@ -86,6 +88,8 @@ class RevenueIncreasingTests(unittest.TestCase):
                 "doanh thu 2 tháng 2/2026 4/2026 có tăng liên tục không",           # missing March
                 "doanh thu có phải tháng 4/2026 cao hơn tháng 2/2026 không",        # nonadjacent
                 "doanh thu 2 tháng 2/2026 3/2026 không tăng liên tục hả",
+                "Từ T2/2026 tới T4/2026 dthu không phải tháng sau đều cao hơn tháng trước hả?",
+                "Dthu T3/2026 cao hơn T2/2026 và T3/2026 lại cao hơn T4/2026, đúng vậy không?",
                 "doanh thu 2 tháng 2/2026 3/2026 4/2026 có tăng liên tục không",   # count differs
                 "doanh thu tháng 4/2026 có tăng liên tục không",                   # one month
                 "doanh thu có tăng liên tục không",                                # no month
