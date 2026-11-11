@@ -147,13 +147,13 @@ _STORE_SUBJECT = re.compile(r"\bquan(?= (?:ban|co|duoc|bi|chot|len|thu|dat|da)\b
 _COMPARISON_CUE = r"(?:tang hay giam|tang giam|thay doi|tang truong|hon hay kem)"
 # Read with their marks: folded, "hỉ", "gồi" (= "rồi"), "zạ", "hả" would be "hi", "goi",
 # "za", "ha", and "goi" may be the unit "gói".
-_ENDING_WORDS = r"(?:thế|hè|rứa|nghe|nghen|za|hỉ|gồi|nhoa|zạ|dzạ|zị|hả)"
+_ENDING_WORDS = r"(?:thế|hè|rứa|nghe|nghen|za|hỉ|gồi|nhoa|zạ|dzạ|zị|hả|luôn)"
 _COLLOQUIAL_ENDING = re.compile(rf"\b({_ENDING_WORDS}(?: {_ENDING_WORDS})*)\W*$")
 # Asking to be told, at the start only: "cho em hỏi", "anh xem giúp em", "nhờ bạn tính
 # giúp", "hỏi nhanh xíu", "mình muốn biết", "alo". The rest is parsed as usual.
 _PRONOUN = r"(?:em|e|minh|toi|tui|anh|chi|ban)"
 _LEAD_IN = re.compile(
-    rf"^(?:alo|(?:cho|cko)(?: {_PRONOUN})? (?:hoi|xin|biet|bit|xem|coi)"
+    rf"^(?:alo|(?:{_PRONOUN} )?(?:cho|cko)(?: {_PRONOUN})? (?:hoi|xin|biet|bit|xem|coi)"
     rf"|(?:{_PRONOUN} )?(?:xem|coi|check|chec) (?:giup|jup|dup)(?: {_PRONOUN})?"
     rf"|nho(?: {_PRONOUN})? (?:xem|coi|check|tinh)(?: (?:giup|jup|dup))?(?: {_PRONOUN})?"
     rf"|hoi nhanh|(?:minh|em|toi|tui) (?:muon|mun) (?:biet|bit|hoi)|ne(?: {_PRONOUN})? hoi)"
@@ -161,11 +161,11 @@ _LEAD_IN = re.compile(
 # The shop: "quán", "tiệm" and chat "wán" as written. Unaccented, "quan" / "tiem" / "wan"
 # are the shop only in a shop position and when no catalogue name uses the word
 # ("quần", "tiêm", "bình quân" fold the same way).
-_SHOP_MARKED = re.compile(r"(?<!\w)(?:quán|tiệm|wán)(?!\w)")
+_SHOP_MARKED = re.compile(r"(?<!\w)(?:quán|tiệm|wán|sốp)(?!\w)")
 _SHOP_PLAIN = re.compile(
-    r"(?<!\bbinh )(?<!\bthuoc )\b(?:quan|tiem|wan)\b"
-    rf"(?= (?:ban|co|duoc|dat|bi|len|chot|thu|nhap|la|da|huy|minh|{_ASK_COUNT})\b|$)"
-    r"|(?:(?<=\bdoanh thu )|(?<=\bdthu )|(?<=\bca )|(?<=\bcua ))(?:quan|tiem|wan)\b")
+    r"(?<!\bbinh )(?<!\bthuoc )\b(?:quan|tiem|wan|sop)\b"
+    rf"(?= (?:ban|co|duoc|dat|bi|len|chot|thu|nhap|la|da|huy|minh|tong|{_ASK_COUNT})\b|$)"
+    r"|(?:(?<=\bdoanh thu )|(?<=\bdthu )|(?<=\bca )|(?<=\bcua ))(?:quan|tiem|wan|sop)\b")
 
 
 def _threshold_dong(match: re.Match[str]) -> str:
@@ -187,15 +187,12 @@ def _store_subject(text: str, raw: str, names: tuple[str, ...]) -> str:
     return _STORE_SUBJECT.sub("cua hang", text)
 
 
-def _shop_word_in_names(names: tuple[str, ...]) -> bool:
-    """A catalogue name with "quần", "tiêm"…: then no spelling of the word is the shop."""
-    return bool({word for name in names for word in fold(name).split()} & {"quan", "tiem", "wan"})
-
-
 def _shop_plain(text: str, raw: str, names: tuple[str, ...]) -> str:
-    if not names or _shop_word_in_names(names) or re.search(r"\b(?:quần|tiêm)\b", raw):
+    if not names:
         return text
-    text = _SHOP_PLAIN.sub("cua hang", text)
+    occupied = {word for name in names for word in fold(name).split()}
+    occupied.update(fold(word) for word in re.findall(r"\b(?:quần|tiêm)\b", raw))
+    text = _SHOP_PLAIN.sub(lambda match: match[0] if match[0] in occupied else "cua hang", text)
     return re.sub(r"\bcua hang (?:minh|nha minh|em|toi|ta)\b", "cua hang", text)
 
 
@@ -211,6 +208,8 @@ def _prior_year_reference(text: str, as_of_year: int | None) -> str:
 
 def _closing_wording(text: str, raw: str) -> str:
     text = _CLOSING.sub("", text)
+    if re.search(r"\b(?:doanh thu|dthu)\b", text):
+        text = re.sub(r"(?<=\bcua hang) luon$", "", text)
     if re.search(r"\b(?:rồi|roi) ta\W*$", raw):
         return re.sub(r"\broi ta$", "", text).rstrip()
     ending = _COLLOQUIAL_ENDING.search(raw)
@@ -219,23 +218,31 @@ def _closing_wording(text: str, raw: str) -> str:
     suffix = re.escape(fold(ending[1]))
     slot = r"(?:gi|j|nao|phan tram|don(?: hang)?|tien|roi|khong|ko|chua)"
     if re.search(r"\b(?:doanh thu|dthu|tien|don|phan tram)\b", text):
-        slot = rf"(?:{slot}|{_ASK_COUNT}|nh(?:at|ut))"
+        slot = rf"(?:{slot}|{_ASK_COUNT}|nh(?:at|ut)|doanh thu|dthu|cua hang|\d{{1,2}}/\d{{4}})"
     return re.sub(rf"\b({slot}) {suffix}$", r"\1", text)
 
 
 def _everyday_wording(text: str, original: str, value: str, names: tuple[str, ...],
                       as_of_year: int | None) -> str:
     raw = unicodedata.normalize("NFC", value).casefold()
-    amounts = _GROUPED_DONG.sub(lambda m: m[1].replace(".", " ") + " dong", raw)
+    amounts = re.sub(rf"\bkó(?= {_ASK_COUNT} (?:đơn|don)\b)", "có", raw)
+    amounts = _GROUPED_DONG.sub(lambda m: m[1].replace(".", " ") + " dong", amounts)
     amounts = _MILLIONS.sub(lambda m: f"{int(m[1]):,}".replace(",", " ") + " 000 000 dong",
                             amounts)
     amounts = _MONEY_THRESHOLD.sub(_threshold_dong, amounts)
-    if not _shop_word_in_names(names):
-        amounts = _SHOP_MARKED.sub("cửa hàng", amounts)
+    occupied = {word for name in names for word in fold(name).split()}
+    amounts = _SHOP_MARKED.sub(
+        lambda match: match[0] if fold(match[0]) in occupied else "cửa hàng", amounts)
     if amounts != raw:
         text = normalize_question(amounts)
     text = _store_subject(text, raw, names)
     text = _shop_plain(text, raw, names)
+    text = re.sub(r"\b(?:doanh thu|dthu) bq(?= (?:moi|mot|1) don\b)",
+                  "doanh thu binh quan", text)
+    text = re.sub(r"\b(binh quan|trung binh) chen(?= (?:moi|mot|1) don\b)", r"\1 tren", text)
+    text = re.sub(r"\b(moi|mot|1) o do\b", r"\1 order", text)
+    text = re.sub(rf"\b((?:doanh thu|dthu)(?: cua cua hang)?) ra(?= {_ASK_COUNT}\b)",
+                  r"\1", text)
     text = re.sub(r"\btiem(?= (?:duoc|bi|chot|da)\b)", "cua hang", text)
     text = re.sub(rf"\b(?:chot|len) duoc(?= {_ASK_COUNT} don\b)", "ban duoc", text)
     if re.search(rf"\b{_COMPARISON_CUE}\b", text) and not re.search(r"\bsố\b", raw):
@@ -244,7 +251,8 @@ def _everyday_wording(text: str, original: str, value: str, names: tuple[str, ..
     text = re.sub(rf"\btong (?={_ASK_COUNT}\b)", "", text)
     # "tính tất cả bao nhiêu / doanh thu", "thu về / mang về bao nhiêu doanh thu".
     text = re.sub(rf"\b(?:tinh )?tat ca (?=(?:{_ASK_COUNT}|doanh thu|dthu)\b)", "", text)
-    text = re.sub(rf"\b(?:thu|mang) ve (?=(?:{_ASK_COUNT}) (?:doanh thu|dthu)\b)", "", text)
+    text = re.sub(rf"\b(?:thu duoc|(?:thu|mang) ve) (?=(?:{_ASK_COUNT}) (?:doanh thu|dthu)\b)",
+                  "", text)
     text = re.sub(r"\btrog\b|^chong(?= (?:thang|quy|tuan|nam|ngay)\b)", "trong", text)
     text = re.sub(r"\btoi (?:chu|gio)\b(?=$| (?:ban|co|da|doanh thu|thu|tong)\b)",
                   "den hom nay", text)
@@ -264,10 +272,17 @@ def _everyday_wording(text: str, original: str, value: str, names: tuple[str, ..
     if text != original:
         # The existing entity normalizer still matches names. Keep their spelling and
         # occurrence counts when rewriting the surrounding question.
+        words = normalize_answer(value).split()
         for name in names:
             key = normalize_question(name)
             if key and f" {original} ".count(f" {key} ") != f" {text} ".count(f" {key} "):
-                return original
+                width = len(key.split())
+                occurrences = [" ".join(words[i:i + width]) for i in range(len(words) - width + 1)
+                               if fold(" ".join(words[i:i + width])) == key]
+                if (fold(name) != key or not occurrences
+                        or any(term == normalize_answer(name) or term == fold(term)
+                               for term in occurrences)):
+                    return original
     return text
 
 

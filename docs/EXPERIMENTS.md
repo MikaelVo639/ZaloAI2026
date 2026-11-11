@@ -751,3 +751,46 @@ câu để ghép đủ 10 ID. Sáu ca thiếu danh tính ở bảng là các ID 
 
 Đây là kiểm kê phạm vi dữ liệu. Báo cáo sử dụng các benchmark đã có,
 gồm full train và robustness của main cùng các lượt đích đã hoàn tất.
+
+## Các cách hỏi còn thiếu trong phần Hoàng, nhóm 01–05 — 11/11/2026
+
+Đối chứng dùng `main@a82648c`, sau #47. Normalizer nhận thêm lời dẫn
+“chị cho em hỏi”, các cách gọi cửa hàng “sốp”, “tiệm”, “wán”, “bq mỗi đơn”
+và “mỗi o đờ”. Tiểu từ sau số tiền, doanh thu hoặc kỳ được xử lý theo vị
+trí và cách viết gốc. Tên trong danh mục tiếp tục được bảo vệ, gồm các
+trường hợp đồng âm sau khi bỏ dấu như “rửa” với “rứa”, “quần” với “quán”.
+Phủ định “ko” được giữ khi nhận cách viết có dấu “kó”.
+
+Parser nhận “doanh thu mấy đồng” và “bán ra được mấy đơn”. Cụm “doanh thu
+bao nhiêu tiền” giữ phép tính doanh thu một lần. Các kỳ, bộ lọc nhóm và
+phương thức hoặc kênh trong câu hỏi vẫn đi vào Plan của phép tính.
+
+Một câu bình quân nhóm khách cần profile danh mục khách hàng của export
+gộp. Phần này dùng cùng ánh xạ `Mã KH mua / Khách hàng mua / Kiểu khách`
+và điều kiện xác minh sheet được README nêu như #56. Regression tạo sổ
+giả lập có nhiều dòng trên một đơn, đơn vãng lai và đơn hủy để xác nhận
+mẫu số bình quân là số mã đơn hợp lệ của đúng nhóm.
+
+| Nhóm được phân công | Đối chứng | Bản sửa | Tổng câu |
+| --- | ---: | ---: | ---: |
+| 01. Lời dẫn và xưng hô | 6 | 9 | 9 |
+| 02. Tiểu từ cuối câu | 2 | 4 | 4 |
+| 03. Giá trị trung bình một đơn | 15 | 20 | 20 |
+| 04. Cách gọi cửa hàng và cách hỏi tổng | 8 | 16 | 16 |
+| 05. Cách hỏi số đơn hủy | 4 | 5 | 5 |
+| **Tổng có đáp án** | **35** | **54** | **54** |
+
+Lượt đủ 1.000 mã public tăng từ 530 lên 551 câu có đáp án, cùng 5 câu
+`unanswerable`. Tổng có kết quả tăng từ 535 lên 556. Giữ nguyên các kết
+quả cũ theo từng mã. Các con số public đo độ phủ trên tập chưa có nhãn.
+
+Sau lượt đầy đủ, phạm vi bỏ từ “luon” không dấu được thu hẹp về vị trí
+kết thúc sau từ chỉ cửa hàng trong câu doanh thu. Hai câu public có từ
+này được chạy lại qua pipeline và khớp kết quả lượt đầy đủ. Câu train
+có từ này nằm ở giữa phép so sánh tăng liên tiếp và không thuộc phạm vi
+viết lại. Ca giả lập giữ “lươn” khi đó có thể là tên hàng.
+
+A/B đủ 3.000 câu train khớp mọi bản ghi, cùng 2.925 đúng, 1 sai và 74 abstain.
+Holdout theo shop gồm 630 câu cùng 622 đúng, 0 sai và 8 abstain. Bộ chấm là
+local proxy. `uv sync --locked`, smoke và unittest qua. Unittest chạy
+510 ca, 509 qua và 1 skip. Ruff qua trên các file Python sửa.

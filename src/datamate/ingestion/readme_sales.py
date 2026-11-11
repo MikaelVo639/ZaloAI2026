@@ -296,6 +296,9 @@ _BANHANG_COMBINED = (
     ({"Mã H.hóa", "Tên hàng hóa", "Nhóm hàng", "DVT"}, {
         "Tên hàng hóa": "tên hàng", "Nhóm hàng": "nhóm hàng", "DVT": "đơn vị cơ bản",
     }),
+    ({"Mã KH mua", "Khách hàng mua", "Kiểu khách"}, {
+        "Mã KH mua": "mã khách", "Khách hàng mua": "tên khách", "Kiểu khách": "nhóm khách",
+    }),
 )
 POS_PROFILES = (
     ("pos_export_kiotviet.v1", _KIOTVIET),
@@ -389,6 +392,9 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
             for required, meanings in lists:
                 if required <= header:
                     if "Nhóm hàng" in meanings and f"`{table.name}`" not in catalog.readme:
+                        continue
+                    if "Kiểu khách" in meanings and not re.search(
+                            rf"(?<!\w){re.escape(table.name)}(?!\w)", catalog.readme):
                         continue
                     columns = {c: m for c, m in meanings.items() if c in header}
                     if "thanh tien sau giam" in map(fold, columns.values()):

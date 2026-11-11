@@ -142,7 +142,7 @@ _INTENTS = (
     ("revenue", None, rf"(?:tong )?{_REVENUE}", ()),
     ("order_count", None,
      rf"(?:dem )?(?:tong )?so (?:luong )?{_ORDER}(?: ban)?"
-     rf"|(?:ban duoc |ban |co )?(?:tong cong )?{_AMOUNT} {_ORDER}",
+     rf"|(?:ban(?: ra)?(?: duoc)? |co )?(?:tong cong )?{_AMOUNT} {_ORDER}",
      ()),
 )
 
@@ -420,6 +420,8 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
         again = _period(leftover, today, rules)
         if again is not None and again[:2] == (start, end):
             leftover = again[2]
+    if intent == "revenue":
+        leftover = re.sub(rf"\b{_AMOUNT} dong\b", " ", leftover)
     if labelled and intent != "revenue":
         return None
     if group and intent != "revenue" and (
@@ -1153,7 +1155,7 @@ def _group(text: str, vocabulary: dict[str, Iterable[str]]) -> tuple | object | 
 _SHARE = re.compile(r"\bphan tram\b|\bt[iy] trong\b")
 _SHARE_WORDS = re.compile(
     rf"\b(?:trong )?tong (?:{_REVENUE})(?: cua cua hang| cua shop)?\b|\bt[iy] trong\b|"
-    rf"\b(?:chiem|dong gop|bang)\b|\bphan(?: cua)?\b|\b(?:la )?(?:{_AMOUNT} )?phan tram\b")
+    rf"\b(?:chiem|dong gop|mang ve|bang)\b|\bphan(?: cua)?\b|\b(?:la )?(?:{_AMOUNT} )?phan tram\b")
 
 
 def _share(text: str) -> tuple[str, bool]:
@@ -1699,7 +1701,7 @@ def _rule_synonyms(text: str, rules: Rules, used: list[str]) -> str:
     """Rewrite phrasings that the current rulebook defines as revenue."""
     replacements = (
         ("money_is_revenue", rules.money_is_revenue,
-         rf"\b(?:ban(?: ra)?|thu ve|thu)(?: duoc)?(?: tong cong)? {_AMOUNT} tien\b"),
+         rf"(?<!doanh )\b(?:ban(?: ra)?|thu ve|thu)(?: duoc)?(?: tong cong)? {_AMOUNT} tien\b"),
         ("goods_money_is_revenue", rules.goods_money_is_revenue, r"\btien (?:hang|ban(?: hang)?)\b"),
     )
     if rules.hot_is_best_seller and re.search(r"\bhot nhat\b", text):
