@@ -29,6 +29,7 @@ GRAMMAR_WORDS = frozenset("""
 ABBREVIATIONS = {
     "hnay": "hom nay", "hqua": "hom qua", "dc": "duoc", "sp": "san pham", "trc": "truoc",
     "revenue": "doanh thu", "total": "tong cong",
+    "nhieeu": "nhieu",
     # Chat spellings: "mik", "kua", "jum", "đh" (đơn hàng).
     "mik": "minh", "mk": "minh", "kua": "cua", "dh": "don hang",
     # "giùm", "dùm", "jum" = "giúp".
@@ -110,6 +111,7 @@ def normalize_question(value: object, *, product_names: Iterable[str] | None = N
     # Month and quarter abbreviations: "T3/2025", "th3/2025", "thg 3/2025", "Q2/2026".
     text = re.sub(r"\b(?:thg|th|t) ?(\d{1,2})/(\d{4})\b", r"thang \1/\2", text)
     text = re.sub(r"\bq ?([1-4])/(\d{4})\b", r"quy \1/\2", text)
+    text = re.sub(r"\b(?:thg|th)(?= nay\b)", "thang", text)
     text = re.sub(r"\bthg\b", "thang", text)
     # A bare "3/2026" (no day before it) is a month: "3/2026 tổng doanh thu". Not inside a
     # list such as "tháng 1, 2 và 3/2026", which the month grammar reads as a whole.

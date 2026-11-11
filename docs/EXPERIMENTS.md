@@ -752,6 +752,81 @@ câu để ghép đủ 10 ID. Sáu ca thiếu danh tính ở bảng là các ID 
 Đây là kiểm kê phạm vi dữ liệu. Báo cáo sử dụng các benchmark đã có,
 gồm full train và robustness của main cùng các lượt đích đã hoàn tất.
 
+## Độ phủ public của Data đợt 3, nhóm 14–17 và 20 — 11/11/2026
+
+Đối chứng dùng `a82648c` sau #47. Hai lượt chạy cùng split, rulebook, calendar
+và cấu hình baseline. Danh sách 74 câu lấy từ audit phân công, chỉ dùng để
+đếm độ phủ sau inference.
+
+| Nhóm | Đối chứng | Bản sửa | Phân công |
+| --- | ---: | ---: | ---: |
+| 14. Nhân viên và thợ | 0 | 9 | 9 |
+| 15. Tên hàng, size, hãng và đơn vị | 0 | 19 | 19 |
+| 16. Nhóm hàng, nhóm khách và tỷ trọng | 8 | 26 | 32 |
+| 17. Thanh toán và kênh | 0 | 7 | 8 |
+| 20. Ngày phải trả ghi trên sổ | 0 | 6 | 6 |
+| **Tổng** | **8** | **67** | **74** |
+
+Trên đủ 1.000 câu public, số câu có đáp án tăng từ **530 lên 593**. Cả hai
+lượt có 5 câu `unanswerable`, nên tổng số câu có kết quả tăng từ 535 lên 598.
+Đối chiếu theo từng mã giữ nguyên toàn bộ kết quả cũ và xác nhận submission
+đủ 1.000 mã, đúng định dạng. Public chưa có nhãn để chấm độ đúng.
+
+Bốn câu hỏi nhóm hàng thiếu cột phân nhóm trong nguồn. Hai câu hỏi theo
+giới tính thiếu giá trị giới tính trong dữ liệu khách. Một câu hỏi chia
+doanh thu theo kênh thiếu cột kênh bán. Bảy câu giữ `abstain`.
+
+Phép đếm hạn trả nối sổ hạn trả với đơn theo mã và tính các đơn bán chịu đã
+ghi nhận tính đến ngày quan sát. Câu hỏi theo tháng dùng ngày đến hạn ghi
+trên sổ. Câu hỏi sau hôm nay loại ngày hôm nay. Đây là thống kê sổ hạn trả,
+tách khỏi phép tính số dư chưa thanh toán. Tỷ trọng máy mới trên tiền bán
+máy dùng doanh thu máy mới và máy cũ làm mẫu số. Tỷ trọng nhóm khách và
+phương thức thanh toán dùng doanh thu toàn shop cùng kỳ.
+
+| Phạm vi chấm local proxy | Đúng / sai / abstain của đối chứng | Đúng / sai / abstain của bản sửa |
+| --- | ---: | ---: |
+| Train (3.000 câu) | 2.925 / 1 / 74 | 2.926 / 1 / 73 |
+| Holdout theo shop (630 câu, nằm trong train) | 622 / 0 / 8 | 623 / 0 / 7 |
+
+Giữ đủ các câu đúng cũ và không phát sinh câu sai mới. Một câu lệch nhãn đã
+có trong đối chứng sau #47. `uv sync --locked` và smoke qua. Unittest chạy
+513 ca, 512 qua và 1 skip.
+
+## Nhập hàng trong phần Mikael, nhóm 19, 21, 23 và 24 — 11/11/2026
+
+Đối chứng dùng `main@a82648c`, sau #47. Bộ tính đã có phép nhập trừ bán,
+tổng tiền nhập và xếp hạng nhà cung cấp theo tiền. Parser nhận thêm “nhập
+vô”, “tiền hàng nhập” và câu hỏi “nhập tiền hàng của NCC nào lớn nhất”,
+giữ kỳ, đơn vị và tên hàng đã đọc từ nguồn.
+
+| Nhóm được phân công | Đối chứng | Bản sửa | Tổng câu |
+| --- | ---: | ---: | ---: |
+| 19. Lý do hủy hoặc trả hàng | 0 | 0 | 2 |
+| 21. Đơn có nhiều đợt giao | 3 | 3 | 3 |
+| 23. Chênh lệch nhập trừ bán | 1 | 2 | 2 |
+| 24. Tiền nhập và nhà cung cấp | 0 | 2 | 2 |
+| **Tổng có đáp án** | **4** | **7** | **9** |
+
+Hai câu hỏi lý do hủy hoặc trả hàng giữ `abstain`. Rà header các bảng
+phát hành của hai shop cho thấy sổ đơn thiếu trường lý do. Các cột ghi
+chú tìm được nằm ở danh mục hàng, danh mục khách hoặc sổ nhập.
+
+Regression dùng shop giả lập để đối chiếu cùng phép tính trước và sau
+chuẩn hóa, gồm nhập trừ bán có quy đổi, đơn hủy/trả, tiền nhập theo phiếu
+và xếp hạng theo tiền. Bộ lọc nhà cung cấp chưa hỗ trợ, hai đơn vị khác
+nhau, xếp hạng theo số lần và yêu cầu so sánh vẫn được giữ ở đường
+`abstain`.
+
+Lượt public đủ 1.000 mã tăng từ 530 lên 533 câu có đáp án, cùng 5 câu
+`unanswerable`. Tổng có kết quả tăng từ 535 lên 538. Cả ba đáp án thêm
+nằm trong phân công Mikael, các kết quả cũ được giữ nguyên. Public chưa
+có nhãn để xác nhận độ đúng.
+
+A/B đủ 3.000 câu train cho cùng 2.925 đúng, 1 sai và 74 abstain, các bản ghi
+khớp nhau theo mã. Holdout 630 câu cùng 622 đúng, 0 sai và 8 abstain.
+Bộ chấm là local proxy. `uv sync --locked`, smoke và unittest qua. Unittest
+chạy 508 ca, 507 qua và 1 skip. Ruff qua trên các file Python sửa.
+
 ## Các cách hỏi còn thiếu trong phần Hoàng, nhóm 01–05 — 11/11/2026
 
 Đối chứng dùng `main@a82648c`, sau #47. Normalizer nhận thêm lời dẫn
@@ -794,3 +869,32 @@ A/B đủ 3.000 câu train khớp mọi bản ghi, cùng 2.925 đúng, 1 sai và
 Holdout theo shop gồm 630 câu cùng 622 đúng, 0 sai và 8 abstain. Bộ chấm là
 local proxy. `uv sync --locked`, smoke và unittest qua. Unittest chạy
 510 ca, 509 qua và 1 skip. Ruff qua trên các file Python sửa.
+
+## Ghép #56, #57 và #58 — 11/11/2026
+
+Đối chứng dùng `a82648c`, trước ba PR. Bản tích hợp có các sửa của Long,
+Mikael và Hoàng. Mẫu tỷ trọng giữ cả “mang về” và “trên tổng doanh thu”,
+có regression cho câu dùng đồng thời hai cách nói.
+
+| Public, đủ 1.000 mã | Đối chứng | Bản tích hợp |
+| --- | ---: | ---: |
+| Có đáp án cụ thể | 530 | 614 |
+| Unanswerable | 5 | 5 |
+| Tổng có kết quả | 535 | 619 |
+| Abstain | 465 | 381 |
+
+Có thêm 84 đáp án, giữ nguyên mọi kết quả cũ theo mã. Phần được phân công
+của Long đạt 67/74, Mikael 7/9 và Hoàng 54/54. Public chưa có nhãn để
+chấm độ đúng.
+
+| Chấm local proxy | Đối chứng đúng / sai / abstain | Bản tích hợp đúng / sai / abstain |
+| --- | ---: | ---: |
+| Train, 3.000 câu | 2.925 / 1 / 74 | 2.926 / 1 / 73 |
+| Holdout theo shop, 630 câu | 622 / 0 / 8 | 623 / 0 / 7 |
+
+Giữ đủ các câu đúng cũ và không phát sinh câu sai mới. Một câu lệch nhãn
+đã có sau #47. Hai lượt dùng cùng cấu hình, rulebook, calendar và mã câu.
+Checksum mã nguồn của bản tích hợp khớp snapshot đã đo.
+
+`uv sync --locked`, smoke và unittest đều qua. Unittest chạy 515 ca,
+514 qua và 1 skip. Ruff qua trên các file sửa của bước ghép.

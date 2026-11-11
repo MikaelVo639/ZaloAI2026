@@ -123,13 +123,24 @@ class PurchaseTests(unittest.TestCase):
             ("Tháng 6/2026 tổng giá trị các phiếu nhập hàng là bao nhiêu?", "purchase_total"),
             ("Tháng 6/2026 tiền nhập hàng từ nhà cung cấp nào cao nhất?", "top_supplier"),
             ("Tháng 6/2026 nhà cung cấp nào có tổng tiền nhập hàng lớn nhất?", "top_supplier"),
+            ("Tiền hàng nhập vô tháng này tổng là bao nhiêu?", "purchase_total"),
+            ("Th6/2026 shop mình nhập tiền hàng của NCC nào lớn nhứt vậy?", "top_supplier"),
         ):
             with self.subTest(text=text):
                 self.assertEqual(plan(text).intent, intent)
         self.assertIsNone(plan("Tổng tiền nhập hàng từ Cty An tháng 6/2026 là bao nhiêu?"))
+        for text in ("Tiền hàng nhập vô tháng này tổng là bao nhiêu, chỉ lấy Cty An?",
+                     "Tháng 6/2026 shop nhập tiền hàng của NCC nào lớn nhất theo số phiếu?",
+                     "Tháng 6/2026 shop nhập tiền hàng của NCC nào lớn nhất so với tháng trước?",
+                     "Tháng 6/2026 shop nhập hàng của NCC nào nhiều lần nhất?"):
+            with self.subTest(text=text):
+                self.assertIsNone(plan(text))
         catalog = self.catalog(BOOK_README, "so_nhap.csv", BOOK_ROWS)
         for text, expected in (("Tổng tiền nhập hàng tháng 6/2026 là bao nhiêu?", 25982000),
                                ("Tháng 6/2026 tiền nhập hàng từ nhà cung cấp nào cao nhất?",
+                                "Cty An"),
+                               ("Tiền hàng nhập vô tháng 6/2026 tổng là bao nhiêu?", 25982000),
+                               ("Th6/2026 shop mình nhập tiền hàng của NCC nào lớn nhứt?",
                                 "Cty An")):
             with self.subTest(text=text):
                 result = plan(text)
