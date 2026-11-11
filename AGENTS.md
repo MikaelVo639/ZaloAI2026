@@ -4,6 +4,9 @@
 - Run `uv sync --locked`, `uv run datamate smoke`, then `uv run python -m unittest discover -s tests -v`.
 - Keep inference free of network calls, downloads and reference-answer reads.
 - Never key answer logic on question/business ids. Business ids are routing metadata only.
+- Never copy public/private test text (questions, rulebook rows, README content) into code,
+  tests or docs, and never tune rules on public coverage. Build and measure on train only;
+  run `uv run python scripts/check_no_public_text.py` before a PR.
 - Read rulebook, business README and calendar from the split being answered.
 - Keep unknown/unsupported behavior as `abstain`; execution errors do not prove `unanswerable`.
 - Do not overwrite original competition data. Preserve source columns, units and identifiers.
