@@ -2,9 +2,10 @@
 debt_collected and debt_flow. Rulebook rows and ledgers are synthetic, written for tests.
 """
 import unittest
-from unittest.mock import patch
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
+from unittest.mock import patch
 
 from test_s01_grammar import rulebook
 
@@ -182,6 +183,21 @@ class DebtExecutionTests(unittest.TestCase):
             "Đến hết ngày 14/07/2026 số khách còn công nợ với cửa hàng là bao nhiêu?",
             readme="Sổ góp: mỗi đơn trả góp có dòng đầu ghi ngày mua.")
         self.assertEqual(candidate.type, "abstain")
+
+    def test_name_on_coded_order_resolves_without_merging_customers(self):
+        first, second, third, *other = LEDGER.orders
+        first = replace(first, source_customer_name="Nguyễn Hồng Lan")
+        ledger = replace(LEDGER, orders=(first, second, third, *other))
+        text = "Tháng 6/2026 khách Nguyễn Hồng Lan ghi nợ thêm bao nhiêu và trả nợ được bao nhiêu"
+        result, candidate = self.answer(text, ledger)
+        self.assertEqual(candidate.answer, [60000, 30000])
+        self.assertIs(check_executed(candidate, result), candidate)
+
+        third = replace(third, customer_name="Nguyễn Hồng Lan")
+        ledger = replace(LEDGER, orders=(first, second, third, *other))
+        _, candidate = self.answer(text, ledger)
+        self.assertEqual(candidate.type, "abstain")
+        self.assertEqual(candidate.evidence["customer"]["matching_keys"], 2)
 
 
 if __name__ == "__main__":

@@ -808,9 +808,10 @@ def debt_flow(ledger: DebtLedger, start: date, end: date,
 
 
 def _debt_customer(ledger: DebtLedger, name: str) -> tuple[str | None, int]:
-    """The one customer key whose name folds to ``name``; (None, matches) otherwise."""
+    """Resolve a display or order name to one customer key, retaining ambiguity."""
     keys = {_debt_key(order, ledger) for order in ledger.orders
-            if order.customer_name and fold(order.customer_name) == name}
+            if any(fold(label) == name for label in (order.customer_name, order.source_customer_name)
+                   if label)}
     keys.discard(None)
     return (next(iter(keys)), 1) if len(keys) == 1 else (None, len(keys))
 
