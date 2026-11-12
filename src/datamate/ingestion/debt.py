@@ -29,7 +29,8 @@ from datamate.ingestion.readme_sales import (
     parse_day,
     parse_sections,
 )
-from datamate.ingestion.source_names import filename_key
+from datamate.ingestion.sales import is_total_label
+from datamate.ingestion.source_names import filename_key, matches_source
 from datamate.ingestion.status import normalize_label, order_state
 from datamate.semantics.rules import rule_line, table_rows
 from datamate.semantics.text import fold
@@ -213,10 +214,9 @@ def _profile_sections(catalog: Catalog, documented: list[Section],
     text = fold(catalog.readme)
     if not ("pos" in text.split() or "phan mem ban hang" in text):
         return []
-    covered = {(filename_key(section.file), section.sheet) for section in documented}
     headers = [(table, _header_names(table)) for table in catalog.tables
-               if (filename_key(table.path.name), None) not in covered
-               and (filename_key(table.path.name), table.name) not in covered]
+               if not any(matches_source(section.file, table.path.name)
+                          and section.sheet in (None, table.name) for section in documented)]
     documented_fields = [_section_fields(section, references) for section in documented]
     mixed: list[Section] = []
     for version, signatures in _DEBT_PROFILES:
@@ -367,7 +367,7 @@ def _source_completeness(catalog: Catalog, sections: list[Section],
         key = filename_key(table.path.name)
         covered = False
         for section in sections:
-            if (filename_key(section.file) != key
+            if (not matches_source(section.file, table.path.name)
                     or section.sheet is not None and section.sheet != table.name):
                 continue
             try:
@@ -630,8 +630,10 @@ def _role_sections(catalog: Catalog, sections: list[Section], references: dict[s
     return roles, all_mappings
 
 
-def _rows(catalog: Catalog, entries: Iterable[tuple[Section, dict[str, str]]]
+def _rows(catalog: Catalog, entries: Iterable[tuple[Section, dict[str, str]]],
+          cells: dict[int, tuple] | None = None,
           ) -> Iterator[tuple[Section, str, int, dict[str, Any]]]:
+    """Mapped rows; ``cells`` (when given) receives every cell of each row, by ``id(row)``."""
     for section, fields in entries:
         try:
             tables = _matching_tables(catalog, section)
@@ -639,6 +641,9 @@ def _rows(catalog: Catalog, entries: Iterable[tuple[Section, dict[str, str]]]
                 for ordinal, raw in _records(table, section.columns):
                     row = {field: raw.get(column) for field, column in fields.items()}
                     if any(not _blank(value) for value in row.values()):
+                        if cells is not None:
+                            cells[id(row)] = tuple(sorted((str(k), repr(v))
+                                                          for k, v in raw.items()))
                         yield section, table.key, ordinal, row
         except ReadmeSalesError as exc:
             raise DebtSourceError("column_missing", str(exc), source=section.label) from exc
@@ -827,18 +832,30 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
         customers[key] = str(row["customer_name"]).strip()
 
     raw_orders: list[dict[str, Any]] = []
-    seen_orders: set[str] = set()
+    seen_orders: dict[str, tuple] = {}
+    order_cells: dict[int, tuple] = {}
+    duplicates_once = rule_line(table_rows(rulebook),
+                                "hai dong cua cung mot don giong nhau o moi o", "tinh mot lan")
     label_counts: Counter[str] = Counter()
-    for section, table_key, ordinal, row in _rows(catalog, roles["orders"]):
+    for section, table_key, ordinal, row in _rows(catalog, roles["orders"], order_cells):
         source = f"{table_key}#{ordinal}"
+        if (_blank(row.get("order_day")) and _blank(row.get("status"))
+                and (_blank(row.get("order_id")) or is_total_label(row.get("order_id")))):
+            order_cells.pop(id(row))
+            label_counts["summary_order_rows"] += 1  # total / note row, not an order
+            continue
         channel_recorded = "channel" in row
         _required(row, ("order_id", "order_day", "status", "order_total", "payment_method",
                         *(("channel",) if channel_recorded else ())),
                   role="orders", source=source)
         order_id = str(row["order_id"]).strip()
+        row_cells = order_cells.pop(id(row))
         if order_id in seen_orders:
+            if duplicates_once and seen_orders[order_id] == row_cells:
+                label_counts["duplicate_order_rows"] += 1  # export duplicate (rulebook)
+                continue
             raise DebtSourceError("key", "Order list repeats an order id", source=source)
-        seen_orders.add(order_id)
+        seen_orders[order_id] = row_cells
         state = order_state(row["status"])
         if state is None:
             raise DebtSourceError("label", "Unknown order status", source=source,

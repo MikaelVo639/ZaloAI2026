@@ -259,6 +259,33 @@ class FlatReadmeTests(_Shop):
         self.assertEqual(description["tables"][0]["documented_by"], "readme")
         self.assertEqual(description["tables"][0]["columns"][0]["field"], "order_id")
 
+    def test_monthly_file_family_reads_every_month(self):
+        # Synthetic: the README names one file per month with placeholders.
+        from datamate.ingestion.schema_description import describe_schema
+
+        family = "ban_hang_T<tháng>_<năm>.csv"
+        rows = self.rows()
+        catalog = self.shop(FLAT_README.replace("ban_hang.csv", family), {
+            "ban_hang_T1_2026.csv": rows[:6],
+            "ban_hang_T2_2026.csv": [FLAT_HEADER, ["HD9", "03/02/2026", "Xong", "Trà", "1",
+                                                   "ly", "15000", "1", ""]],
+            "ban_hang_tong_hop.csv": [FLAT_HEADER, rows[1]],  # not of the family
+        })
+        sales, evidence, _ = load_readme_sales(catalog, RULEBOOK)
+        valid = [s for s in sales if s.status == "valid"]
+        self.assertEqual(sum(s.amount for s in valid), Decimal(95000))  # HD1 80k + HD9 15k
+        self.assertEqual({s.order_id for s in valid}, {"HD1", "HD9"})
+        self.assertEqual(len(evidence["tables"]), 2)
+        documented = {t["table"]: t["documented_by"] for t in describe_schema(catalog)["tables"]}
+        self.assertEqual(documented["ban_hang_T2_2026.csv::ban_hang_T2_2026"], "readme")
+
+    def test_a_file_family_without_files_is_missing(self):
+        catalog = self.shop(FLAT_README.replace("ban_hang.csv", "ban_hang_T<tháng>_<năm>.csv"),
+                            {"ban_hang.csv": self.rows()})
+        with self.assertRaises(ReadmeSalesError) as caught:
+            load_readme_sales(catalog, RULEBOOK)
+        self.assertEqual(caught.exception.code, "SOURCE_MISSING")
+
     def test_equivalent_filenames_do_not_silently_union_sources(self):
         documented = "Bảng bán hàng.csv"
         extracted = documented.encode("utf-8").decode("cp437")
@@ -482,6 +509,38 @@ class JoinedReadmeTests(_Shop):
             load_readme_sales(self.shop(JOINED_README, self.files(orders=orders)), RULEBOOK)
         self.assertEqual(caught.exception.code, "DUPLICATE_PARENT_KEY")
 
+    def test_an_order_row_repeated_in_every_cell_is_an_export_duplicate(self):
+        orders = [["C1", "2026-01-05", "completed", "70000"],
+                  ["C1", "2026-01-05", "completed", "70000"],
+                  ["C2", "2026-01-05", "completed", "10000"],
+                  ["C3", "2026-01-06", "cancelled", "5000"]]
+        files = self.files(orders=orders)
+        sales, evidence, _ = load_readme_sales(self.shop(JOINED_README, files), RULEBOOK)
+        self.assertEqual(evidence["counts"]["order_duplicates_removed"], 1)
+        self.assertEqual(sum(s.amount for s in sales if s.order_id == "C1"), Decimal(70000))
+        # Without the rulebook row the repeat stays a conflict.
+        rules = RULEBOOK.replace("| Hai dòng của cùng một đơn giống nhau ở mọi ô | lỗi xuất "
+                                 "file, tính một lần |\n", "")
+        self.assertNotEqual(rules, RULEBOOK)
+        with self.assertRaises(ReadmeSalesError) as caught:
+            load_readme_sales(self.shop(JOINED_README, files, business="other"), rules)
+        self.assertEqual(caught.exception.code, "DUPLICATE_PARENT_KEY")
+
+    def test_total_rows_labelled_in_the_id_column_are_not_orders(self):
+        orders = [["C1", "2026-01-05", "completed", "70000"],
+                  ["C2", "2026-01-05", "completed", "10000"],
+                  ["Tổng 05/01", "", "", "80000"],
+                  ["C3", "2026-01-06", "cancelled", "5000"],
+                  ["Cộng", "", "", "85000"]]
+        lines = [["C1", "1", "SP1", "2", "40000", "2"], ["C1", "2", "FEE", "1", "30000", "1"],
+                 ["C2", "1", "SP1", "1", "10000", "1"], ["tong 05/01", "", "", "", "80000", ""],
+                 ["C3", "1", "SP1", "1", "5000", "1"]]
+        sales, evidence, _ = load_readme_sales(
+            self.shop(JOINED_README, self.files(orders=orders, lines=lines)), RULEBOOK)
+        self.assertEqual(evidence["counts"]["order_summary_rows_skipped"], 2)
+        self.assertEqual(evidence["counts"]["summary_rows_skipped"], 1)
+        self.assertEqual({s.order_id for s in sales}, {"C1", "C2", "C3"})
+
     def test_header_total_mismatch_is_reported(self):
         orders = [["C1", "2026-01-05", "completed", "99000"],
                   ["C2", "2026-01-05", "completed", "10000"],
@@ -519,6 +578,32 @@ class InvoiceListTests(_Shop):
                           ("B2", "returned", Decimal(10000), None)])
         self.assertEqual(evidence["summary_rows_skipped"], 1)
         self.assertEqual(eligible, frozenset())
+
+    def test_invoice_total_label_rows_are_skipped_but_dated_ones_are_not(self):
+        header = ["Mã bill", "Ngày GD", "Status", "Tien hang"]
+        rows = [header, ["B1", "01/01/2026", "Hoàn thành", "32,000"],
+                ["TỔNG 01/01", "", "", "32,000"]]
+        sales, evidence, _ = load_readme_sales(
+            self.shop(INVOICE_README, {"hoa_don.csv": rows}), RULEBOOK)
+        self.assertEqual([s.order_id for s in sales], ["B1"])
+        self.assertEqual(evidence["summary_rows_skipped"], 1)
+        dated = [header, ["TONG1", "01/01/2026", "Hoàn thành", "5,000"]]  # a real order id
+        sales, _, _ = load_readme_sales(
+            self.shop(INVOICE_README, {"hoa_don.csv": dated}, business="other"), RULEBOOK)
+        self.assertEqual([s.order_id for s in sales], ["TONG1"])
+
+    def test_identical_invoice_rows_count_once_and_different_ones_conflict(self):
+        header = ["Mã bill", "Ngày GD", "Status", "Tien hang"]
+        row = ["B1", "01/01/2026", "Hoàn thành", "32,000"]
+        sales, evidence, _ = load_readme_sales(
+            self.shop(INVOICE_README, {"hoa_don.csv": [header, row, row]}), RULEBOOK)
+        self.assertEqual([s.amount for s in sales], [Decimal(32000)])
+        self.assertEqual(evidence["duplicates_removed"], 1)
+        changed = ["B1", "01/01/2026", "Hoàn thành", "33,000"]
+        with self.assertRaises(ReadmeSalesError) as caught:
+            load_readme_sales(self.shop(INVOICE_README, {"hoa_don.csv": [header, row, changed]},
+                                        business="other"), RULEBOOK)
+        self.assertEqual(caught.exception.code, "DUPLICATE_PARENT_KEY")
 
 
 class AdapterSelectionTests(_Shop):
@@ -643,3 +728,18 @@ class AdapterSelectionTests(_Shop):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FlatAdapterTotalRowTests(_Shop):
+    def test_flat_lists_skip_total_rows_labelled_in_the_id_column(self):
+        from datamate.ingestion.sales import load_sales
+
+        rows = [["Mã đơn", "Ngày", "Trạng thái", "Tên hàng", "Thành tiền"],
+                ["D1", "2026-01-05", "completed", "Cà phê", "20000"],
+                ["D2", "2026-01-05", "completed", "Trà", "15000"],
+                ["Tổng ngày 05/01", "", "", "", "35000"],
+                ["D3", "2026-01-06", "cancelled", "Trà", "15000"]]
+        sales, evidence = load_sales(self.shop("# shop\n", {"ban.csv": rows}))
+        self.assertEqual([s.order_id for s in sales], ["D1", "D2", "D3"])
+        self.assertEqual(evidence["summary_rows_skipped"], 1)
+        self.assertEqual(evidence["duplicates_removed"], 0)

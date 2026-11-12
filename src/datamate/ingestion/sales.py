@@ -144,6 +144,14 @@ def parse_date(value: Any, sheet: str = "") -> date:
     raise ValueError(f"Unsupported date {value!r} in {sheet}")
 
 
+_TOTAL_LABEL = re.compile(r"(?:tong|cong|total|subtotal)\b")
+
+
+def is_total_label(value: Any) -> bool:
+    """A total written in the order id column ("Tổng 01/05", "Cộng", "Total")."""
+    return value not in (None, "") and bool(_TOTAL_LABEL.match(fold(str(value))))
+
+
 def column_mapping(columns: tuple[str, ...]) -> dict[str, str]:
     mapping = {}
     for key, aliases in ALIASES.items():
@@ -166,13 +174,18 @@ def load_sales(catalog: Catalog) -> tuple[list[Sale], dict[str, Any]]:
     sales = []
     seen = set()
     order_states: dict[str, tuple[date, str]] = {}
-    raw_count = 0
+    raw_count = summary_rows = 0
     for table, mapping in tables:
         carry: dict[str, Any] = {}
         for raw in iter_rows(table):
             raw_count += 1
             row = {key: raw.get(column) for key, column in mapping.items()}
             if not any(value not in (None, "") for value in row.values()):
+                continue
+            if is_total_label(row.get("order_id")) and all(
+                    row.get(key) in (None, "") for key in
+                    ("date", "status", "product_id", "product_name", "quantity_base")):
+                summary_rows += 1  # a total row, not an order
                 continue
             if row.get("order_id") not in (None, "") and row["order_id"] != carry.get("order_id"):
                 carry = {}
@@ -204,4 +217,5 @@ def load_sales(catalog: Catalog) -> tuple[list[Sale], dict[str, Any]]:
                 if row.get("quantity_base") not in (None, "") else None,
             ))
     return sales, {"tables": [t.key for t, _ in tables], "raw_rows": raw_count,
-                   "sales_rows": len(sales), "duplicates_removed": raw_count - len(sales)}
+                   "sales_rows": len(sales), "summary_rows_skipped": summary_rows,
+                   "duplicates_removed": raw_count - len(sales) - summary_rows}

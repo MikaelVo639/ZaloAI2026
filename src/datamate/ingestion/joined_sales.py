@@ -17,7 +17,13 @@ from datamate.ingestion.readme_sales import (
     parse_sections,
     sale_cost_column,
 )
-from datamate.ingestion.sales import Sale, parse_date, parse_minute, price_per_base_unit
+from datamate.ingestion.sales import (
+    Sale,
+    is_total_label,
+    parse_date,
+    parse_minute,
+    price_per_base_unit,
+)
 from datamate.semantics.text import fold
 
 _ADAPTER_VERSION = "joined_sales.v1"
@@ -459,13 +465,26 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
         diagnostics.append({"code": customer_error, "severity": "warning", "role": "customers"})
 
     orders: dict[str, dict[str, Any]] = {}
+    order_fingerprints: dict[str, Any] = {}
+    duplicate_order_rows = 0
     status_counts: Counter[str] = Counter()
     header_total_parse_failures = 0
+    summary_order_rows = 0
     for row_ordinal, raw in enumerate(iter_rows(orders_table), 1):
+        if is_total_label(raw.get(mapping.orders.fields["order_id"])) and all(
+                _missing(raw.get(mapping.orders.fields[key])) for key in ("date", "status")):
+            summary_order_rows += 1  # a total row written in the id column, not an order
+            continue
         order_id = _identifier(
             raw.get(mapping.orders.fields["order_id"]), field_name="order_id",
             source=mapping.orders.source, row_ordinal=row_ordinal,
         )
+        fingerprint = _row_fingerprint(raw, orders_table.columns)
+        if (order_id in orders and rule_capabilities.deduplicate_identical_detail_rows
+                and order_fingerprints[order_id] == fingerprint):
+            duplicate_order_rows += 1  # export duplicate: same in every cell (rulebook)
+            continue
+        order_fingerprints[order_id] = fingerprint
         if order_id in orders:
             _fail(
                 "DUPLICATE_PARENT_KEY", "Order parent key is duplicated",
@@ -769,6 +788,8 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
             "product_rows": len(products),
             "sales_rows": len(sales),
             "duplicates_removed": duplicate_detail_rows,
+            "order_duplicates_removed": duplicate_order_rows,
+            "order_summary_rows_skipped": summary_order_rows,
             "orders_without_details": len(set(orders) - detail_order_ids),
         },
         "join": {

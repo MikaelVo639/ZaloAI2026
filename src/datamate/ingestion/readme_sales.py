@@ -34,8 +34,14 @@ from typing import Any, Iterable, Iterator
 
 from datamate.contracts import Catalog, Table
 from datamate.ingestion.catalog import iter_rows
-from datamate.ingestion.sales import Sale, parse_date, parse_minute, price_per_base_unit
-from datamate.ingestion.source_names import filename_key
+from datamate.ingestion.sales import (
+    Sale,
+    is_total_label,
+    parse_date,
+    parse_minute,
+    price_per_base_unit,
+)
+from datamate.ingestion.source_names import filename_key, is_family, matches_source
 from datamate.ingestion.status import StatusError, status_policy
 from datamate.semantics.rules import rule_line
 from datamate.semantics.text import fold
@@ -302,9 +308,9 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
     text = fold(catalog.readme)
     if not ("pos" in text.split() or "phan mem ban hang" in text):
         return []
-    covered = {filename_key(s.file) for s in documented}
     headers = _table_headers(table for table in catalog.tables
-                             if filename_key(table.path.name) not in covered)
+                             if not any(matches_source(s.file, table.path.name)
+                                        for s in documented))
     for version, lists in POS_PROFILES:
         sections = []
         for table, header in headers:
@@ -388,6 +394,15 @@ def _name_key(value: Any) -> str:
 
 def _blank(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _summary_row(row: dict[str, Any], keys: Iterable[str]) -> bool:
+    """A total or note row of a list: nothing in ``keys`` besides the order id, and an order
+    id that is blank or a total label written in the id column ("Tổng 01/05", "Cộng")."""
+    if any(not _blank(row.get(key)) for key in keys if key != "order_id"):
+        return False
+    order = row.get("order_id")
+    return _blank(order) or is_total_label(order)
 
 
 # ---------------------------------------------------------------- reading values
@@ -527,9 +542,8 @@ def _customer_identity_absence(
 
 
 def _matching_tables(catalog: Catalog, section: Section) -> list[Table]:
-    wanted = filename_key(section.file)
-    files = {t.path for t in catalog.tables if filename_key(t.path.name) == wanted}
-    if len(files) > 1:
+    files = {t.path for t in catalog.tables if matches_source(section.file, t.path.name)}
+    if len(files) > 1 and not is_family(section.file):
         raise ReadmeSalesError("AMBIGUOUS_SOURCE", "Several files match one README source",
                                source=section.label)
     matches = [t for t in catalog.tables
@@ -648,7 +662,9 @@ _BASE_PRICE_MEANINGS = {
 
 def _role_rows(
     entry: _Role, headers: dict[tuple[Path, str], set[str]] | None = None,
+    with_file: bool = False,
 ) -> Iterator[tuple[str, int, dict[str, Any]]]:
+    """``(sheet, ordinal, row)``; ``with_file`` adds the source file name as ``_file``."""
     for section, table in entry.tables:
         fields = section.fields
         key = (table.path, table.name)
@@ -662,6 +678,8 @@ def _role_rows(
                 row["_unit_price_is_base"] = True
             # Rulebook §8 compares *every* cell, not only the mapped ones.
             row["_cells"] = tuple(sorted((str(k), repr(v)) for k, v in raw.items()))
+            if with_file:
+                row["_file"] = table.path.name
             yield table.name, ordinal, row
 
 
@@ -725,8 +743,16 @@ def _orders_index(roles: dict[str, _Role], rules: _Rules
         if _blank(row.get("order_id")):
             counts["blank_key_rows"] += 1
             continue
+        if _summary_row(row, ("order_id", "date", "status")):
+            counts["order_summary_rows_skipped"] += 1
+            continue
         key = str(row["order_id"]).strip()
         if key in orders:
+            # An order row repeated identically in every cell is an export duplicate when
+            # the rulebook says so; any other repeat is a conflict.
+            if rules.duplicate_rows_once and orders[key]["_cells"] == row["_cells"]:
+                counts["order_duplicates_removed"] += 1
+                continue
             raise ReadmeSalesError("DUPLICATE_PARENT_KEY", "Order list repeats an order id",
                                    role="orders")
         orders[key] = {**row, "_sheet": sheet}
@@ -888,10 +914,14 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
     group: dict[str, Any] = {}
     first_values: dict[str, dict[str, Any]] = defaultdict(dict)
     order_keys = [k for k in ("order_id", "date", "status") if k in line_fields]
+    # Rows as records get "<sheet>#<row>"; a list kept in several files (one per month)
+    # repeats sheet names, so its records are qualified by file.
+    several_files = len({table.path for _, table in roles["lines"].tables}) > 1
     count_keys = [k for k in ("quantity", "quantity_base") if k in line_fields]
-    for sheet, ordinal, row in _role_rows(roles["lines"], headers):
+    for sheet, ordinal, row in _role_rows(roles["lines"], headers, with_file=True):
+        source_file = row.pop("_file")
         counts["line_rows_raw"] += 1
-        if all(_blank(row.get(k)) for k in order_keys + count_keys):
+        if _summary_row(row, order_keys + count_keys):
             # Subtotal, daily total or note rows ("Cộng", "Tổng ngày 01/03", "Ghi chú: ...")
             # carry no order and no quantity: they are not sales lines.
             counts["summary_rows_skipped"] += 1
@@ -922,7 +952,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
                 continue
             seen.add(fingerprint)
         else:
-            key = f"{sheet}#{ordinal}"
+            key = f"{source_file}::{sheet}#{ordinal}" if several_files else f"{sheet}#{ordinal}"
             counts["rows_as_records"] += 1
         lines.append({**row, "_order": key, "_sheet": sheet})
     seen.clear()
@@ -1189,18 +1219,21 @@ def _from_orders(roles: dict[str, _Role], rules: _Rules
     """Shops that only keep an invoice list: one Sale per order, no product."""
     sales: list[Sale] = []
     status_counts: Counter[str] = Counter()
-    seen: set[str] = set()
-    skipped = 0
+    seen: dict[str, tuple] = {}
+    skipped = duplicates = 0
     for sheet, _ordinal, row in _role_rows(roles["orders"]):
-        if all(_blank(row.get(k)) for k in ("order_id", "date", "status")):
+        if _summary_row(row, ("order_id", "date", "status")):
             skipped += 1  # total / note rows of the invoice list
             continue
         if _blank(row.get("order_id")):
             raise ReadmeSalesError("MISSING_KEY", "Invoice without order id")
         key = str(row["order_id"]).strip()
         if key in seen:
+            if rules.duplicate_rows_once and seen[key] == row["_cells"]:
+                duplicates += 1  # export duplicate (rulebook): counted once
+                continue
             raise ReadmeSalesError("DUPLICATE_PARENT_KEY", "Invoice list repeats an order id")
-        seen.add(key)
+        seen[key] = row["_cells"]
         try:
             status = rules.status.resolve(row.get("status"))
         except StatusError as exc:
@@ -1220,6 +1253,7 @@ def _from_orders(roles: dict[str, _Role], rules: _Rules
         "sales_rows": len(sales),
         "status_counts": dict(sorted(status_counts.items())),
         "summary_rows_skipped": skipped,
+        "duplicates_removed": duplicates,
         "order_ids": "from_file",
         "grain": "one row per order; amount is the order's goods total (README)",
         "rules": list(rules.evidence),

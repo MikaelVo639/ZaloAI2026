@@ -379,6 +379,27 @@ class JoinedSalesTests(unittest.TestCase):
         self.assertEqual(len(sales), 1)
         self.assertEqual(evidence["counts"]["duplicates_removed"], 1)
 
+    def test_total_rows_in_the_order_id_column_are_skipped(self):
+        self._write_sources(orders=[["O001", "2026-01-01", "completed", "25", "cash"],
+                                    ["Tổng 01/01", "", "", "25", ""]])
+        sales, evidence = self._load()
+        self.assertEqual(len(sales), 1)
+        self.assertEqual(evidence["counts"]["order_summary_rows_skipped"], 1)
+
+    def test_identical_order_rows_count_once_only_under_the_split_rule(self):
+        row = ["O001", "2026-01-01", "completed", "25", "cash"]
+        self._write_sources(orders=[row, row])
+        allowed = replace(self.rules, deduplicate_identical_detail_rows=True)
+        sales, evidence = self._load(rules=allowed)
+        self.assertEqual(len(sales), 1)
+        self.assertEqual(evidence["counts"]["order_duplicates_removed"], 1)
+        for path in self.business.glob("*.csv"):
+            path.unlink()
+        self._write_sources(orders=[row, ["O001", "2026-01-01", "completed", "26", "cash"]])
+        with self.assertRaises(JoinedSalesError) as caught:
+            self._load(rules=allowed)
+        self.assertEqual(caught.exception.code, "DUPLICATE_PARENT_KEY")
+
 
 class XlsxOrderDetailProductTests(unittest.TestCase):
     ORDER_HEADER = ["Mã hóa đơn", "Thời gian", "Tổng tiền hàng", "Trạng thái"]

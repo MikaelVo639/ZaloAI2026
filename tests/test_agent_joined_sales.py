@@ -197,7 +197,8 @@ class JoinedSalesAgentTests(unittest.TestCase):
             "duplicate": {
                 "orders": [
                     ["cash", "0", "20", "completed", "O1", "", "20", "2026-01-01"],
-                    ["cash", "0", "20", "completed", "O1", "", "20", "2026-01-01"],
+                    # Differs in one cell: a conflict, not an export duplicate.
+                    ["cash", "0", "21", "completed", "O1", "", "21", "2026-01-01"],
                 ],
                 "details": [["20", "1", "2", "P1", "2", "O1", "0", "10", "ly"]],
                 "expected": "DUPLICATE_PARENT_KEY",

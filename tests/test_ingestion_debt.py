@@ -156,6 +156,35 @@ class DebtLedgerTests(_Shop):
             load_debt_ledger(self.catalog(orders=missing_key), RULEBOOK)
         self.assertEqual(caught.exception.code, "key")
 
+    def test_identical_order_rows_count_once_under_the_split_rule(self):
+        orders = [["Mã", "Ngày", "Trạng thái", "Tổng thu", "Thanh toán", "Kênh",
+                   "Mã khách", "Tên khách", "Còn nợ"],
+                  ["D1", "01/01/2026", "Xong", "100000.5", "Ghi nợ", "Store",
+                   "K1", "Tên trên đơn", "25000.5"],
+                  ["D2", "02/01/2026", "Trả hàng", "50000", "chuyển khoản", "phone",
+                   "K2", "Bình", "50000"]]
+        doubled = [*orders, orders[1]]
+        with self.assertRaises(DebtSourceError) as caught:
+            load_debt_ledger(self.catalog(orders=doubled), RULEBOOK)
+        self.assertEqual(caught.exception.code, "key")  # no rule: still a conflict
+        rules = RULEBOOK + ("| Hai dòng của cùng một đơn giống nhau ở mọi ô | lỗi xuất file, "
+                            "tính một lần |\n")
+        once = load_debt_ledger(self.catalog(orders=orders), rules)
+        twice = load_debt_ledger(self.catalog(orders=doubled), rules)
+        self.assertEqual(twice.orders, once.orders)
+        changed = [*orders, [*orders[1][:3], "100001", *orders[1][4:]]]
+        with self.assertRaises(DebtSourceError):
+            load_debt_ledger(self.catalog(orders=changed), rules)
+
+    def test_total_rows_in_the_order_list_are_not_orders(self):
+        orders = [["Mã", "Ngày", "Trạng thái", "Tổng thu", "Thanh toán", "Kênh",
+                   "Mã khách", "Tên khách", "Còn nợ"],
+                  ["D1", "01/01/2026", "Xong", "100000.5", "Ghi nợ", "Store",
+                   "K1", "Tên trên đơn", "25000.5"],
+                  ["Cộng ngày 01/01", "", "", "100000.5", "", "", "", "", "25000.5"]]
+        ledger = load_debt_ledger(self.catalog(orders=orders), RULEBOOK)
+        self.assertEqual([o.order_id for o in ledger.orders], ["D1"])
+
     def test_unknown_labels_bad_amount_and_bad_coverage_are_rejected(self):
         orders = [
             ["Mã", "Ngày", "Trạng thái", "Tổng thu", "Thanh toán", "Kênh",
