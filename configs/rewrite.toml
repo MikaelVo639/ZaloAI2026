@@ -13,3 +13,5 @@ model_load_timeout = 600
 model_timeout = 20
 max_input_tokens = 4096
 max_new_tokens = 128
+# Retry a safe restatement once when the deterministic grammar cannot plan it.
+rewrite_retries = 1

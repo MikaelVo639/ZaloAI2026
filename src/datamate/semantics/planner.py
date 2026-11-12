@@ -169,6 +169,16 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     return None
 
 
+
+def unread_words(question: Question, rules: Rules, names: Iterable[str] = (),
+                 vocabulary: dict[str, Iterable[str]] | None = None) -> str | None:
+    """Words left after the ordinary grammar identifies both the measure and period."""
+    leftover: list[str] = []
+    _plan_question(question, normalize_question(question.question), rules, tuple(names),
+                   vocabulary, None, "", unread=leftover)
+    return leftover[0] if leftover else None
+
+
 def _repair_grammar_tokens(text: str, names: tuple[str, ...]) -> str:
     corrections = (
         (r"vaf(?= thang \d)", "va"),
@@ -191,7 +201,7 @@ def _repair_grammar_tokens(text: str, names: tuple[str, ...]) -> str:
 def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str, ...],
                    vocabulary: dict[str, Iterable[str]] | None,
                    price_increases: dict[tuple[str, Decimal], date] | None,
-                   price_source: str) -> Plan | None:
+                   price_source: str, *, unread: list[str] | None = None) -> Plan | None:
     today = question.as_of_date
     out_of_stock = re.fullmatch(
         rf"(?:den |vao )?cuoi ngay {_DATE} (?:shop |cua hang )?co {_AMOUNT} "
@@ -411,7 +421,10 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
     if size and intent != "quantity":
         return None
     # Do not silently ignore product names, payment methods, groups, shifts, etc.
-    if _FILLERS.sub(" ", leftover).strip():
+    remaining = " ".join(_FILLERS.sub(" ", leftover).split())
+    if remaining:
+        if unread is not None:
+            unread.append(remaining)
         return None
     compare_start = compare_end = None
     if reference:

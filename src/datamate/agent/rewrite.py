@@ -24,6 +24,7 @@ from typing import Any
 from datamate.agent.local_plan import LocalPlanAgent
 from datamate.agent.rule_spec_model import model_specs
 from datamate.contracts import BusinessContext, Candidate, Plan, Question
+from datamate.semantics.planner import unread_words
 from datamate.semantics.rule_spec import enabled_specs
 from datamate.semantics.text import fold, normalize_question
 
@@ -267,6 +268,20 @@ def build_rewrite_messages(question: str, examples: list[tuple[str, str]],
             {"role": "user", "content": f"{shots}\nCâu hỏi: {question}\nViết lại:"}]
 
 
+def _retry_messages(messages: list[dict[str, str]], rewrite: str,
+                    remaining: str | None) -> list[dict[str, str]]:
+    if remaining:
+        words = " ".join(remaining.split()[:12])
+        feedback = f"Bộ đọc chưa hiểu các từ: «{words}»."
+    else:
+        feedback = "Bộ đọc chưa lập được phép tính và kỳ thời gian từ câu viết lại."
+    return [*messages, {"role": "assistant", "content": rewrite},
+            {"role": "user", "content": (
+                f"{feedback} Hãy viết lại câu hỏi gốc đúng một dòng theo cách viết "
+                f"trong các ví dụ, giữ nguyên nghĩa. Nếu chưa chắc, trả {UNSURE}.")}]
+
+
+
 SPEC_MAX_NEW_TOKENS = 320  # one rule spec JSON
 
 
@@ -285,13 +300,16 @@ class RewriteAgent(LocalPlanAgent):
     """Grammar first; on failure, plan model restatements with the same grammar."""
 
     def __init__(self, model_path: str, *, votes: int = 2, examples: int = 6,
-                 **kwargs: Any) -> None:
+                 rewrite_retries: int = 1, **kwargs: Any) -> None:
         super().__init__(model_path, **kwargs)
         if type(votes) is not int or not 1 <= votes <= 2:
             raise ValueError("votes must be 1 or 2")
         if type(examples) is not int or not 1 <= examples <= len(EXAMPLES):
             raise ValueError("examples must be between 1 and the number of examples")
+        if type(rewrite_retries) is not int or rewrite_retries not in (0, 1):
+            raise ValueError("rewrite_retries must be 0 or 1")
         self.votes, self.examples = votes, examples
+        self.rewrite_retries = rewrite_retries
         self.rule_spec_audit: list[dict[str, Any]] = []
 
     def _rule_specs(self, rulebook: str) -> tuple:
@@ -326,9 +344,9 @@ class RewriteAgent(LocalPlanAgent):
         unavailable = self._ensure_model()
         if unavailable is not None:
             return unavailable
-        names = list(self._product_names(context))
-        for labels in self._vocabulary(context).values():
-            names.extend(labels)
+        product_names = self._product_names(context)
+        vocabulary = self._vocabulary(context)
+        names = [*product_names, *(label for labels in vocabulary.values() for label in labels)]
         asked = spell_months(question.question)  # what the model reads and is checked on
         chosen = select_examples(asked, self.examples)
         rule_names = [spec.nguon.strip().strip("|").split("|")[0].strip()
@@ -341,33 +359,41 @@ class RewriteAgent(LocalPlanAgent):
                                     "planner_confidence": REWRITE_CONFIDENCE,
                                     "rewrites": []}
         plans: list[Plan] = []
-        for messages in prompts:
-            attempt: dict[str, Any] = {"prompt_sha256": hashlib.sha256(
-                json.dumps(messages, ensure_ascii=False).encode()).hexdigest()}
-            evidence["rewrites"].append(attempt)
-            generated = self.planner_worker.run(
-                self.generate, self.model_timeout, messages=messages,
-                max_input_tokens=self.max_input_tokens, max_new_tokens=self.max_new_tokens)
-            attempt["execution"] = generated.execution()
-            if not generated.ok:
-                if generated.timed_out or not self.planner_worker.alive:
-                    self._model_error = Candidate(reason="Rewrite model stopped after worker failure",
-                                                  evidence=dict(evidence))
-                return Candidate(reason=f"Rewrite failed: {generated.error}", evidence=evidence)
-            attempt["model_output"] = generated.value
-            rewrite = parse_rewrite(generated.value.get("text", ""))
-            attempt["rewrite"] = rewrite
-            if rewrite is None:
-                return Candidate(reason="Rewrite model was unsure", evidence=evidence)
-            rejected = check_rewrite(asked, rewrite, names)
-            if rejected:
-                attempt["rejected"] = rejected
-                return Candidate(reason=rejected, evidence=evidence)
-            restated = Question(question.id, question.business_id, rewrite, question.as_of_date)
-            plan = self._plan(restated, context)
-            if plan is None:
-                return Candidate(reason="Grammar cannot plan the rewrite", evidence=evidence)
-            plans.append(plan)
+        for vote, messages in enumerate(prompts, 1):
+            for retry in range(self.rewrite_retries + 1):
+                attempt: dict[str, Any] = {"prompt_sha256": hashlib.sha256(
+                    json.dumps(messages, ensure_ascii=False).encode()).hexdigest()}
+                if retry:
+                    attempt.update(vote=vote, retry=retry)
+                evidence["rewrites"].append(attempt)
+                generated = self.planner_worker.run(
+                    self.generate, self.model_timeout, messages=messages,
+                    max_input_tokens=self.max_input_tokens, max_new_tokens=self.max_new_tokens)
+                attempt["execution"] = generated.execution()
+                if not generated.ok:
+                    if generated.timed_out or not self.planner_worker.alive:
+                        self._model_error = Candidate(reason="Rewrite model stopped after worker failure",
+                                                      evidence=dict(evidence))
+                    return Candidate(reason=f"Rewrite failed: {generated.error}", evidence=evidence)
+                attempt["model_output"] = generated.value
+                rewrite = parse_rewrite(generated.value.get("text", ""))
+                attempt["rewrite"] = rewrite
+                if rewrite is None:
+                    return Candidate(reason="Rewrite model was unsure", evidence=evidence)
+                rejected = check_rewrite(asked, rewrite, names)
+                if rejected:
+                    attempt["rejected"] = rejected
+                    return Candidate(reason=rejected, evidence=evidence)
+                restated = Question(question.id, question.business_id, rewrite, question.as_of_date)
+                plan = self._plan(restated, context)
+                if plan is not None:
+                    plans.append(plan)
+                    break
+                if retry == self.rewrite_retries:
+                    return Candidate(reason="Grammar cannot plan the rewrite", evidence=evidence)
+                remaining = unread_words(restated, context.cache["rules"], product_names, vocabulary)
+                attempt.update(vote=vote, retry=retry, unread_words=remaining)
+                messages = _retry_messages(messages, rewrite, remaining)
         if any(plan != plans[0] for plan in plans[1:]):
             return Candidate(reason="Rewrites lead to different plans", evidence=evidence)
         candidate = self._answer_plan(plans[0], context, as_of_date=question.as_of_date)

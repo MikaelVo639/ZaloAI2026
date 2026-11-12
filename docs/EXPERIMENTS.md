@@ -1200,3 +1200,17 @@ Tập có 480 câu từ 29 doanh nghiệp, phủ 36 intent. Baseline trên tập
 
 Train gốc đủ 3.000 câu đạt 2.984 đúng, 1 sai và 15 `abstain`, với 0 đáp án
 thay đổi theo ID. Tập biến thể đã sẵn sàng để đo model thật trên L4.
+
+## Hỏi lại khi bộ lập kế hoạch bỏ qua câu viết lại
+
+Mỗi lượt viết lại có thể hỏi lại một lần khi câu đã qua kiểm tra an toàn
+và bộ lập kế hoạch trả về rỗng. Lượt mới nhận lại prompt ban đầu, câu viết
+lại đã qua kiểm tra và phản hồi của bộ lập kế hoạch. Khi xác định được phép
+tính và kỳ, phản hồi nêu phần chữ còn dư. Các lỗi khác nhận phản hồi chung.
+Câu thứ hai qua cùng kiểm tra số, tên và nghĩa. Hai lượt độc lập vẫn phải
+lập cùng một kế hoạch. Log `evidence.rewrites` ghi từng lần gọi.
+
+`rewrite_retries = 0` khôi phục hành vi một lần gọi trên mỗi lượt. Với giả
+định mỗi lần hỏi lại mất thêm khoảng một giây, 369 câu cần hỏi lại một
+hoặc cả hai lượt sẽ tốn thêm khoảng 6–12 phút trên bộ 1.000 câu. Ước lượng
+này cần được kiểm tra trên L4 bằng log thời gian từng lần gọi.

@@ -35,6 +35,7 @@ class Config:
     model_timeout: float = 30.0
     max_input_tokens: int = 8192
     max_new_tokens: int = 1024
+    rewrite_retries: int = 1
 
     def __post_init__(self) -> None:
         if self.backend not in ("baseline", "abstain", "local_plan", "rewrite"):
@@ -52,6 +53,8 @@ class Config:
         for name in ("max_input_tokens", "max_new_tokens"):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        if type(self.rewrite_retries) is not int or self.rewrite_retries not in (0, 1):
+            raise ValueError("rewrite_retries must be 0 or 1")
         if self.max_input_tokens + self.max_new_tokens > 32768:
             raise ValueError("Model context exceeds prototype limit")
 
@@ -76,6 +79,8 @@ def predict(data_dir: Path, output_dir: Path, config: Config,
                     "ingestion_timeout": config.ingestion_timeout}
         if config.backend in ("local_plan", "rewrite"):
             model_agent = LocalPlanAgent if config.backend == "local_plan" else RewriteAgent
+            if config.backend == "rewrite":
+                timeouts["rewrite_retries"] = config.rewrite_retries
             agent = model_agent(config.model_path, model_load_timeout=config.model_load_timeout,
                                 model_timeout=config.model_timeout,
                                 max_input_tokens=config.max_input_tokens,

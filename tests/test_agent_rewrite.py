@@ -23,10 +23,13 @@ from datamate.demo import create_demo
 from datamate.ingestion import build_catalog
 from datamate.io import load_split
 from datamate.pipeline import Config
+from datamate.semantics.planner import plan_question, unread_words
+from datamate.semantics.rules import read_rules
 
 # Invented catalogue entries used by EXAMPLES.
 NAMES = ("Bánh quy bơ", "Kẹo gừng hộp 10 gói")
 STANDARD = "Doanh thu tháng này là bao nhiêu?"
+UNPLANNED = "Doanh thu tháng này là bao nhiêu khúc ngó?"
 
 
 def fake_load(cache, model_path):
@@ -54,6 +57,31 @@ def unsure_generate(cache, messages, max_input_tokens, max_new_tokens):
 
 def number_changing_generate(cache, messages, max_input_tokens, max_new_tokens):
     return {"text": "Doanh thu tháng 7/2026 là bao nhiêu?"}
+
+
+
+def retry_generate(cache, messages, max_input_tokens, max_new_tokens):
+    if len(messages) == 2:
+        return {"text": UNPLANNED}
+    assert messages[-2] == {"role": "assistant", "content": UNPLANNED}
+    assert "khuc ngo" in messages[-1]["content"] and UNSURE in messages[-1]["content"]
+    return {"text": STANDARD}
+
+
+def unplanned_generate(cache, messages, max_input_tokens, max_new_tokens):
+    return {"text": UNPLANNED}
+
+
+def unsafe_retry_generate(cache, messages, max_input_tokens, max_new_tokens):
+    return {"text": UNPLANNED if len(messages) == 2 else "Doanh thu tháng 6/2026 là bao nhiêu?"}
+
+
+def disagreement_after_retry_generate(cache, messages, max_input_tokens, max_new_tokens):
+    if len(messages) == 2:
+        return {"text": UNPLANNED}
+    question = _shots(messages)[-1].removeprefix("Câu hỏi: ")
+    forward = _shots(messages)[0] == f"Câu hỏi: {select_examples(question)[0][0]}"
+    return {"text": STANDARD if forward else "Doanh thu hôm nay là bao nhiêu?"}
 
 
 def failing_load(cache, model_path):
@@ -208,9 +236,61 @@ class RewriteAgentTests(unittest.TestCase):
         self.assertEqual((first.type, second.type), ("abstain", "abstain"))
         self.assertIn("Local model unavailable", second.reason)
 
+    def test_unread_words_does_not_change_planning(self):
+        rules = read_rules(self.split.rulebook)
+        for wording, expected in ((UNPLANNED, "khuc ngo"), (STANDARD, None),
+                                  ("Tháng này mảnh đốm vừa kể?", None)):
+            with self.subTest(wording=wording):
+                question = Question("diag", self.question.business_id, wording,
+                                    self.question.as_of_date)
+                before = plan_question(question, rules)
+                self.assertEqual(unread_words(question, rules), expected)
+                self.assertEqual(plan_question(question, rules), before)
+
+    def test_each_vote_retries_and_both_plans_must_agree(self):
+        candidate = self.agent(retry_generate).answer(self.question, self.context)
+        self.assertEqual(candidate.type, "number", candidate.reason)
+        attempts = candidate.evidence["rewrites"]
+        self.assertEqual([(a["vote"], a["retry"]) for a in attempts],
+                         [(1, 0), (1, 1), (2, 0), (2, 1)])
+        self.assertEqual([a["rewrite"] for a in attempts], [UNPLANNED, STANDARD] * 2)
+        disagreement = self.agent(disagreement_after_retry_generate).answer(
+            self.question, self.context)
+        self.assertEqual(disagreement.type, "abstain")
+        self.assertEqual(disagreement.reason, "Rewrites lead to different plans")
+        self.assertEqual(len(disagreement.evidence["rewrites"]), 4)
+
+    def test_second_failure_and_unsafe_retry_abstain(self):
+        for generate, reason in ((unplanned_generate, "Grammar cannot plan the rewrite"),
+                                 (unsafe_retry_generate, "Rewrite changed the numbers of the question")):
+            with self.subTest(generate=generate.__name__):
+                candidate = self.agent(generate).answer(self.question, self.context)
+                self.assertEqual((candidate.type, candidate.reason), ("abstain", reason))
+                self.assertEqual(len(candidate.evidence["rewrites"]), 2)
+        unsafe_first = self.agent(number_changing_generate).answer(self.question, self.context)
+        self.assertEqual(len(unsafe_first.evidence["rewrites"]), 1)
+
+    def test_disabled_retry_preserves_the_original_failure_and_single_attempt(self):
+        candidate = self.agent(retry_generate, rewrite_retries=0).answer(self.question, self.context)
+        self.assertEqual((candidate.type, candidate.reason),
+                         ("abstain", "Grammar cannot plan the rewrite"))
+        attempts = candidate.evidence["rewrites"]
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["rewrite"], UNPLANNED)
+        self.assertNotIn("retry", attempts[0])
+        normal = self.agent(standard_generate, rewrite_retries=0).answer(self.question, self.context)
+        expected = self.agent(standard_generate).answer(self.question, self.context)
+        self.assertEqual((normal.type, normal.answer, normal.reason),
+                         (expected.type, expected.answer, expected.reason))
+        self.assertEqual([a["prompt_sha256"] for a in normal.evidence["rewrites"]],
+                         [a["prompt_sha256"] for a in expected.evidence["rewrites"]])
+
     def test_config_accepts_the_rewrite_backend(self):
         config = Config.load(Path(__file__).resolve().parents[1] / "configs" / "rewrite.toml")
-        self.assertEqual((config.backend, config.min_confidence), ("rewrite", 0.5))
+        self.assertEqual((config.backend, config.min_confidence, config.rewrite_retries),
+                         ("rewrite", 0.5, 1))
+        with self.assertRaisesRegex(ValueError, "rewrite_retries"):
+            Config(rewrite_retries=2)
 
 
 if __name__ == "__main__":
