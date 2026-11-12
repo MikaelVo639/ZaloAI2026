@@ -246,6 +246,15 @@ class ModelSpecTests(unittest.TestCase):
                 "kieu_dap_an": "string", "nguon": "ignored"}
         return json.dumps({**data, **values}, ensure_ascii=False)
 
+    def test_names_come_from_the_row_not_from_the_model(self):
+        # The real model wrote the name with accents and an empty ``ten``; an invented name
+        # must never become a trigger either.
+        for ten, names in (("", ["khách mua đều nhất"]), ("x", ["khach vip"])):
+            results, audit = self.run_model([self.answer(ten=ten, cach_goi=names)] * 2)
+            self.assertEqual(audit[0]["decision"], "on")
+            self.assertEqual(results[0].spec.ten, "khach_mua_deu_nhat")
+            self.assertEqual(results[0].spec.cach_goi, ("khach mua deu nhat",))
+
     def test_deterministic_reader_leaves_the_row_off(self):
         rows = normalize_rulebook(rulebook(extra=self.ROW))
         self.assertIsNone(rows[0].spec)

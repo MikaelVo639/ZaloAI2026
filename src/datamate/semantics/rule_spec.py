@@ -149,6 +149,12 @@ def _names(name: str, definition: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(_text(item) for item in names if _text(item)))
 
 
+def row_names(name: str, definition: str) -> tuple[str, tuple[str, ...]]:
+    """``ten`` and ``cach_goi`` of a row, always taken from the row text by code (folded the
+    way questions are matched), never from a model's output."""
+    return re.sub(r"\s+", "_", _text(name)), _names(name, definition)
+
+
 def is_ranking_row(name: str) -> bool:
     """A named ranking: the row name ends with "nhất" (khách sộp nhất, giờ cao điểm nhất)
     or names a peak ("cao điểm"). Other rows are definitions this reader leaves alone."""
@@ -250,8 +256,9 @@ def parse_row(name: str, definition: str, line: str) -> SpecResult | None:
         reasons.append(f"words not understood: {left}")
     if reasons:
         return SpecResult(line, None, tuple(reasons))
+    ten, names = row_names(name, definition)
     spec = RuleSpec(
-        ten=re.sub(r"\s+", "_", key), cach_goi=_names(name, definition),
+        ten=ten, cach_goi=names,
         doi_tuong=subject, chi_tieu=measures[0], chon=picks.pop(), don_hop_le=validity,
         dieu_kien=conditions, kieu_dap_an="string", nguon=line)
     problems = ground(spec)

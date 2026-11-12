@@ -191,10 +191,10 @@ if __name__ == "__main__":
 # A synthetic ranking row the deterministic reader leaves off ("đơn nhiều nhất" matches no
 # measure pattern) and a fake model fills; rewrites may then target its name.
 RULE_ROW = "| Món đắt hàng nhất | món có đơn nhiều nhất |"
-RULE_SPEC = {"ten": "mon_dat_hang_nhat", "cach_goi": ["mon dat hang nhat"],
-             "doi_tuong": "mat_hang", "chi_tieu": "so_don", "chon": "lon_nhat",
-             "don_hop_le": "luat_chung", "dieu_kien": {}, "mau_so": "",
-             "kieu_dap_an": "string", "nguon": "ignored"}
+# Shape of the real Qwen output on L4 (probe 4b): empty ``ten``, name copied with accents.
+RULE_SPEC = {"ten": "", "cach_goi": ["món đắt hàng nhất"], "don_hop_le": "luat_chung",
+             "mau_so": "", "kieu_dap_an": "string", "nguon": "", "doi_tuong": "mat_hang",
+             "chi_tieu": "so_don", "chon": "lon_nhat", "dieu_kien": {}}
 RULE_REWRITE = "Món đắt hàng nhất tháng 8/2026 là món gì?"
 
 

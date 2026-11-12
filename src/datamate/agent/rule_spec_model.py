@@ -22,6 +22,7 @@ from datamate.semantics.rule_spec import (
     SpecResult,
     ground,
     normalize_rulebook,
+    row_names,
     spec_from_json,
 )
 
@@ -70,6 +71,9 @@ def build_spec_messages(name: str, definition: str, variant: int) -> list[dict[s
 
 
 def parse_spec_output(text: str, line: str) -> RuleSpec | None:
+    """The model fills the meaning fields only. ``ten``, ``cach_goi`` and ``nguon`` come from
+    the row by code: the real model copies the name with its accents (the examples show it
+    so), and names it invents must never become question triggers."""
     match = re.search(r"\{.*\}", text, flags=re.DOTALL)
     if not match or "KHONG_RO" in text:
         return None
@@ -79,7 +83,11 @@ def parse_spec_output(text: str, line: str) -> RuleSpec | None:
         return None
     if not isinstance(data, dict):
         return None
-    data["nguon"] = line
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    if len(cells) < 2 or not set(data) >= {"ten", "cach_goi", "nguon"}:
+        return None
+    data["ten"], names = row_names(cells[0], cells[1])
+    data["cach_goi"], data["nguon"] = list(names), line
     return spec_from_json(data, line)
 
 
