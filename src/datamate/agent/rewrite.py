@@ -189,6 +189,16 @@ wording shown by the examples, so that a fixed parser can read it.
 If no example has the same kind of question, or you are unsure, output exactly {UNSURE}.
 Output one line: the restated question only."""
 
+# Experimental: abstain only when the meaning cannot be kept. The grammar, the safety checks
+# and the agreement of both votes still decide whether a restatement is answered.
+LENIENT_PROMPT = SYSTEM_PROMPT.replace(
+    f"If no example has the same kind of question, or you are unsure, output exactly {UNSURE}.",
+    "Restate every question about the shop's own data in the closest example wording, even "
+    "when no example has exactly the same kind of question.\n"
+    f"Output exactly {UNSURE} only when that is impossible without adding, dropping or "
+    "changing a condition, filter, period or requested output.")
+assert LENIENT_PROMPT != SYSTEM_PROMPT
+
 # normalize_question writes "500.000" as "500 000".
 _NUMBER_SEPARATOR = re.compile(r"(?<=\d)[ .,](?=\d{3}(?!\d))")
 _THOUSANDS = re.compile(r"\b(\d+)\s*(?:k|nghin|ngan)\b")
@@ -309,11 +319,12 @@ def select_examples(question: str, k: int = 6) -> list[tuple[str, str]]:
 
 
 def build_rewrite_messages(question: str, examples: list[tuple[str, str]],
-                           rule_names: Iterable[str] = ()) -> list[dict[str, str]]:
+                           rule_names: Iterable[str] = (), *,
+                           lenient: bool = False) -> list[dict[str, str]]:
     """Prompt; ``rule_names`` are the split's enabled named rankings, offered as standard
     wordings ("<tên luật> tháng 2/2026 là ai?") for questions with the same meaning."""
     shots = "\n".join(f"Câu hỏi: {raw}\nViết lại: {standard}" for raw, standard in examples)
-    system = SYSTEM_PROMPT
+    system = LENIENT_PROMPT if lenient else SYSTEM_PROMPT
     names = [name for name in rule_names if name]
     if names:
         system += ("\nThis shop's rulebook also names these rankings; when the question asks "
@@ -336,6 +347,15 @@ def _retry_messages(messages: list[dict[str, str]], rewrite: str,
                 f"trong các ví dụ, giữ nguyên nghĩa. Nếu chưa chắc, trả {UNSURE}.")}]
 
 
+def _rejected_messages(messages: list[dict[str, str]], rewrite: str,
+                       rejected: str) -> list[dict[str, str]]:
+    return [*messages, {"role": "assistant", "content": rewrite},
+            {"role": "user", "content": (
+                f"Câu viết lại bị từ chối ({rejected}). Hãy viết lại câu hỏi gốc đúng một "
+                "dòng, giữ nguyên mọi số, ngày, kỳ, tên và mọi điều kiện của câu gốc. "
+                f"Nếu chưa chắc, trả {UNSURE}.")}]
+
+
 
 SPEC_MAX_NEW_TOKENS = 320  # one rule spec JSON
 
@@ -355,8 +375,12 @@ class RewriteAgent(LocalPlanAgent):
     """Grammar first; on failure, plan model restatements with the same grammar."""
 
     def __init__(self, model_path: str, *, votes: int = 2, examples: int = 6,
-                 rewrite_retries: int = 1, **kwargs: Any) -> None:
+                 rewrite_retries: int = 1, lenient: bool = False,
+                 retry_rejected: bool = False, **kwargs: Any) -> None:
         super().__init__(model_path, **kwargs)
+        if type(lenient) is not bool or type(retry_rejected) is not bool:
+            raise ValueError("lenient and retry_rejected must be true or false")
+        self.lenient, self.retry_rejected = lenient, retry_rejected
         if type(votes) is not int or not 1 <= votes <= 2:
             raise ValueError("votes must be 1 or 2")
         if type(examples) is not int or not 1 <= examples <= len(EXAMPLES):
@@ -407,8 +431,8 @@ class RewriteAgent(LocalPlanAgent):
         rule_names = [spec.nguon.strip().strip("|").split("|")[0].strip()
                       for spec in self._rule_specs(context.split.rulebook)]
         # Independent restatements: the same examples, most similar first, then last.
-        prompts = [build_rewrite_messages(asked, chosen, rule_names),
-                   build_rewrite_messages(asked, chosen[::-1], rule_names)
+        prompts = [build_rewrite_messages(asked, chosen, rule_names, lenient=self.lenient),
+                   build_rewrite_messages(asked, chosen[::-1], rule_names, lenient=self.lenient)
                    ][:self.votes]
         evidence: dict[str, Any] = {"model": self._model_info,
                                     "planner_confidence": REWRITE_CONFIDENCE,
@@ -438,7 +462,11 @@ class RewriteAgent(LocalPlanAgent):
                 rejected = check_rewrite(asked, rewrite, names)
                 if rejected:
                     attempt["rejected"] = rejected
-                    return Candidate(reason=rejected, evidence=evidence)
+                    if not self.retry_rejected or retry == self.rewrite_retries:
+                        return Candidate(reason=rejected, evidence=evidence)
+                    attempt.update(vote=vote, retry=retry)
+                    messages = _rejected_messages(messages, rewrite, rejected)
+                    continue
                 restated = Question(question.id, question.business_id, rewrite, question.as_of_date)
                 plan = self._plan(restated, context)
                 if plan is not None:

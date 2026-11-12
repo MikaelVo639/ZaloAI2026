@@ -85,6 +85,21 @@ def disagreement_after_retry_generate(cache, messages, max_input_tokens, max_new
     return {"text": STANDARD if forward else "Doanh thu hôm nay là bao nhiêu?"}
 
 
+
+def strict_prompt_generate(cache, messages, max_input_tokens, max_new_tokens):
+    # Stands in for a model that gives up under the strict instruction only.
+    if "If no example has the same kind" in messages[0]["content"]:
+        return {"text": UNSURE}
+    return {"text": STANDARD}
+
+
+def rejected_then_standard_generate(cache, messages, max_input_tokens, max_new_tokens):
+    if len(messages) == 2:
+        return {"text": "Doanh thu tháng 7/2026 là bao nhiêu?"}
+    assert "bị từ chối" in messages[-1]["content"], messages[-1]
+    return {"text": STANDARD}
+
+
 def failing_load(cache, model_path):
     raise RuntimeError("no GPU in this test")
 
@@ -301,6 +316,50 @@ class RewriteAgentTests(unittest.TestCase):
                          (expected.type, expected.answer, expected.reason))
         self.assertEqual([a["prompt_sha256"] for a in normal.evidence["rewrites"]],
                          [a["prompt_sha256"] for a in expected.evidence["rewrites"]])
+
+    def test_lenient_prompt_only_changes_the_unsure_instruction(self):
+        strict = self.agent(strict_prompt_generate).answer(self.question, self.context)
+        self.assertEqual(strict.reason, "Rewrite model was unsure")
+        lenient = self.agent(strict_prompt_generate, lenient=True).answer(self.question, self.context)
+        expected = self.agent(standard_generate).answer(self.question, self.context)
+        self.assertEqual((lenient.type, lenient.answer), (expected.type, expected.answer))
+        self.assertNotEqual([a["prompt_sha256"] for a in lenient.evidence["rewrites"]],
+                            [a["prompt_sha256"] for a in expected.evidence["rewrites"]])
+        unsure = self.agent(unsure_generate, lenient=True).answer(self.question, self.context)
+        self.assertEqual(unsure.reason, "Rewrite model was unsure")
+        examples = select_examples("dthu thang nay")
+        strict_messages = build_rewrite_messages("dthu thang nay", examples)
+        lenient_messages = build_rewrite_messages("dthu thang nay", examples, lenient=True)
+        self.assertEqual(strict_messages[1], lenient_messages[1])
+        self.assertIn(UNSURE, lenient_messages[0]["content"])
+
+    def test_rejected_rewrites_retry_only_when_enabled(self):
+        off = self.agent(rejected_then_standard_generate).answer(self.question, self.context)
+        self.assertEqual(off.reason, "Rewrite changed the numbers of the question")
+        self.assertEqual(len(off.evidence["rewrites"]), 1)
+        on = self.agent(rejected_then_standard_generate, retry_rejected=True).answer(
+            self.question, self.context)
+        self.assertEqual(on.type, "number", on.reason)
+        attempts = on.evidence["rewrites"]
+        self.assertEqual([(a["vote"], a["retry"]) for a in attempts],
+                         [(1, 0), (1, 1), (2, 0), (2, 1)])
+        self.assertIn("rejected", attempts[0])
+        twice = self.agent(number_changing_generate, retry_rejected=True).answer(
+            self.question, self.context)
+        self.assertEqual(twice.reason, "Rewrite changed the numbers of the question")
+        self.assertEqual(len(twice.evidence["rewrites"]), 2)
+        no_retry = self.agent(rejected_then_standard_generate, retry_rejected=True,
+                              rewrite_retries=0).answer(self.question, self.context)
+        self.assertEqual(len(no_retry.evidence["rewrites"]), 1)
+
+    def test_variant_options_are_validated_and_off_by_default(self):
+        config = Config.load(Path(__file__).resolve().parents[1] / "configs" / "rewrite.toml")
+        self.assertEqual((config.rewrite_lenient, config.rewrite_retry_rejected), (False, False))
+        for name in ("rewrite_lenient", "rewrite_retry_rejected"):
+            with self.assertRaisesRegex(ValueError, name):
+                Config(**{name: 1})
+        with self.assertRaisesRegex(ValueError, "lenient"):
+            RewriteAgent("unused", lenient="yes")
 
     def test_config_accepts_the_rewrite_backend(self):
         config = Config.load(Path(__file__).resolve().parents[1] / "configs" / "rewrite.toml")
