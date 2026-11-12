@@ -17,6 +17,7 @@ import hashlib
 import json
 import math
 import re
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable
 from typing import Any
@@ -201,53 +202,118 @@ assert LENIENT_PROMPT != SYSTEM_PROMPT
 
 # normalize_question writes "500.000" as "500 000".
 _NUMBER_SEPARATOR = re.compile(r"(?<=\d)[ .,](?=\d{3}(?!\d))")
-_THOUSANDS = re.compile(r"\b(\d+)\s*(?:k|nghin|ngan)\b")
-_MILLIONS = re.compile(r"\b(\d+)\s*(?:tr|trieu|cu)\b")
+# Amounts: "500k", "1k5", "1tr5", "1,5 triệu", "2 triệu rưỡi", "3 trăm nghìn", "2 tỷ".
+_SCALES = {"k": 1000, "nghin": 1000, "ngan": 1000, "tr": 1_000_000, "trieu": 1_000_000,
+           "cu": 1_000_000, "ty": 1_000_000_000}
+_GLUED_AMOUNT = re.compile(r"\b(\d+)(k|tr)(\d{1,3})\b")
+_HUNDRED_THOUSANDS = re.compile(r"\b(\d+) tram (?:nghin|ngan|k)\b")
+_AMOUNT = re.compile(r"\b(\d+)(?: (\d{1,2}))? ?(k|nghin|ngan|tr|trieu|cu|ty)\b( ruoi\b)?")
+_ROMAN_QUARTER = re.compile(r"\bquy (iv|iii|ii|i)\b")
+_ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4}
+
+
+def _amount(m: re.Match[str]) -> str:
+    scale = _SCALES[m[3]]
+    whole = int(m[1]) * scale
+    if m[2]:  # "1,5 triệu" folds to "1 5 trieu"
+        whole += int(m[2]) * scale // 10 ** len(m[2])
+    if m[4]:  # "rưỡi" = and a half
+        whole += scale // 2
+    return str(whole)
+
+
+def _glued(m: re.Match[str]) -> str:
+    scale = _SCALES[m[2]]
+    return str(int(m[1]) * scale + int(m[3]) * scale // 10 ** len(m[3]))
+
 
 # Words whose presence changes the meaning. Present in the question => present in the
 # restatement. "both" groups must also not appear in a restatement whose question lacks them.
-_GUARDS: tuple[tuple[str, str, bool], ...] = (
-    ("negation", r"\b(?:khong|ko|chua|chang)\b", True),
-    ("cancel", r"\bhuy\b", True),
-    ("return", r"\btra (?:hang|lai)\b|\bhoan\b", True),
-    ("percent", r"%|\bphan tram\b", True),
+# The last item is removed before the check: phrases that share the folded word but not the
+# meaning ("số ngày" is not "so với", "còn lại" is not "lãi", "ít nhất 3 đơn" is a threshold).
+_GUARDS: tuple[tuple[str, str, bool, str], ...] = (
+    ("negation", r"\b(?:khong|ko|chua|chang)\b", True, ""),
+    ("cancel", r"\bhuy\b", True, ""),
+    ("return", r"\btra (?:hang|lai)\b|\bhoan\b", True,
+     r"\bhoan (?:thanh|tat|toan|chinh)\b"),
+    ("percent", r"%|\bphan tram\b", True, ""),
     # "tháng 4/2025" -> "quý 4/2025" keeps every number but asks another period.
-    ("quarter", r"\bquy\b|\bq ?[1-4]\b", True),
-    ("compare", r"\bso (?:voi|vs)\b|\bso\b(?= (?:thang|tuan|nam|quy|ngay|tet|ky|cung))", False),
-    ("average", r"\b(?:trung binh|binh quan|tb)\b", False),
-    ("extreme", r"\bnhat\b|\btop\b", False),
-    ("payment", r"\b(?:tien mat|chuyen khoan|cod|quet the)\b", False),
-    ("staff", r"\b(?:nhan vien|nv)\b", False),
-    ("customer", r"\b(?:khach|kh)\b", False),
-    ("supplier", r"\b(?:nha cung cap|ncc)\b", False),
-    ("purchase", r"\bnhap\b", False),
-    ("stock", r"\bton\b|\bkho\b", False),
-    ("debt", r"\bno\b", False),
-    ("group", r"\bnhom\b", False),
-    ("profit", r"\b(?:loi|lai)\b", False),
+    ("quarter", r"\bquy\b|\bq ?[1-4]\b", True,
+     r"\bquy (?:doi|ra|cach|dinh|tac|uoc|trinh|khach)\b"),
+    ("compare", r"\bso (?:voi|vs)\b|\bso\b(?= (?:thang|tuan|nam|quy|ngay|tet|ky|cung))", False, ""),
+    ("average", r"\b(?:trung binh|binh quan|tb)\b", False, ""),
+    ("extreme", r"\bnhat\b|\btop\b", False,
+     r"\b(?:it nhat|toi thieu)(?= \d)|\bduy nhat\b|\bcap nhat\b"
+     r"|\b(?:\d+|hai|ba|bon|nam|sau|bay|tam|chin|muoi) (?:ngay|tuan|thang|nam|don|lan)"
+     r" (?:gan|gan day) nhat\b"),
+    ("payment", r"\b(?:tien mat|chuyen khoan|cod|quet the)\b", False, ""),
+    ("staff", r"\b(?:nhan vien|nv)\b", False, ""),
+    ("customer", r"\b(?:khach|kh)\b", False, ""),
+    ("supplier", r"\b(?:nha cung cap|ncc)\b", False, ""),
+    ("purchase", r"\bnhap\b", False, ""),
+    ("stock", r"\bton\b|\bkho\b", False, ""),
+    ("debt", r"\bno\b", False, ""),
+    ("group", r"\bnhom\b", False, ""),
+    ("profit", r"\b(?:loi|lai)\b", False,
+     r"\b(?:con|tra|hoan|doi|ban|mua|nhap|xem|tinh|kiem|quay|ghi|giu|de|gui|lam|cap) lai\b"
+     r"|\blai (?:lan|nua|tu dau)\b|\btra loi\b|\b(?:hang|bi|san pham|mon) loi\b"),
 )
+# Accented words that fold onto a guard word with another meaning ("số" -> "so", "nó" ->
+# "no", "lại" -> "lai", "khô" -> "kho"). Read with accents only; an unaccented question
+# keeps the cautious folded reading.
+_HOMOGRAPHS = re.compile(r"(?<!\w)(?:số|nó|lỗi|tốn|khó|khô|quỹ)(?!\w)")
 
 
 def _plain(text: str) -> str:
     return re.sub(r"\s+", " ", normalize_question(text)).strip()
 
 
+def _guard_text(text: str, names: Iterable[str]) -> str:
+    """Folded text for the meaning guards, without catalogue names (checked on their own)
+    and without accented homographs of guard words."""
+    plain = f" {_plain(_HOMOGRAPHS.sub(' ', unicodedata.normalize('NFC', text).lower()))} "
+    for key in sorted({_plain(name) for name in names}, key=len, reverse=True):
+        if len(key) >= 4:
+            plain = plain.replace(f" {key} ", "  ")
+    return plain
+
+
 def numbers(text: str) -> Counter[int]:
-    """Every number of the question, with thousand separators and k / triệu expanded."""
+    """Every number of the question, with thousand separators, amounts and quarters expanded."""
     plain = _NUMBER_SEPARATOR.sub("", _plain(text))
-    plain = _THOUSANDS.sub(lambda m: str(int(m[1]) * 1000), plain)
-    plain = _MILLIONS.sub(lambda m: str(int(m[1]) * 1_000_000), plain)
+    plain = _ROMAN_QUARTER.sub(lambda m: f"quy {_ROMAN[m[1]]}", plain)
+    plain = _GLUED_AMOUNT.sub(_glued, plain)
+    plain = _HUNDRED_THOUSANDS.sub(lambda m: str(int(m[1]) * 100_000), plain)
+    plain = _AMOUNT.sub(_amount, plain)
     return Counter(int(value) for value in re.findall(r"\d+", plain))
 
 
+# Small counts the model may write as a digit or as a word ("3 tháng" / "ba tháng"). Read
+# with accents, so "sau" (after), "tạm", "muối" are never counts; "năm" (year) and "tư"
+# only before a counted noun or as a month/quarter.
+_COUNTED = (r"(?= (?:ngày|tháng|tuần|quý|đơn|khách|mặt|sản|món|lần|nhân|nhà|lô|hộp|gói|chai"
+            r"|ly|người|loại|ca|kỳ|đợt|phiếu|hoá|hóa)\b)")
+_NUMBER_WORDS = {
+    1: r"một|mot", 2: r"hai", 3: r"ba", 4: r"bốn|bon|(?<=quý )tư|(?<=tháng )tư",
+    5: r"năm" + _COUNTED, 6: r"sáu", 7: r"bảy|bẩy|bay", 8: r"tám", 9: r"chín|chin",
+    10: r"mười",
+}
+
+
+def _number_words(text: str, value: int) -> int:
+    lowered = unicodedata.normalize("NFC", text).lower()
+    return len(re.findall(rf"(?<!\w)(?:{_NUMBER_WORDS[value]})(?!\w)", lowered))
+
+
 def _same_numbers(question: str, rewrite: str) -> bool:
-    """Same numbers; a digit 1 may stand for the word "một" on the other side."""
+    """Same numbers; a digit 1-10 may stand for its word on the other side ("một", "ba")."""
     asked, restated = numbers(question), numbers(rewrite)
-    ones_asked, ones_restated = asked.pop(1, 0), restated.pop(1, 0)
-    word_asked = len(re.findall(r"\bmot\b", _plain(question)))
-    word_restated = len(re.findall(r"\bmot\b", _plain(rewrite)))
-    return (asked == restated and ones_asked <= ones_restated + word_restated
-            and ones_restated <= ones_asked + word_asked)
+    for value in _NUMBER_WORDS:
+        digits_asked, digits_restated = asked.pop(value, 0), restated.pop(value, 0)
+        if not (digits_asked <= digits_restated + _number_words(rewrite, value)
+                and digits_restated <= digits_asked + _number_words(question, value)):
+            return False
+    return asked == restated
 
 
 def _words(text: str) -> str:
@@ -264,13 +330,28 @@ _BARE_MONTH_YEAR = re.compile(
 _MONTH_ALONE = re.compile(r"\b[Tt]h(?:g)?\s?(\d{1,2})\b(?![\d/.-])")
 
 
+# "tháng giêng", "tháng mười một", "quý IV", "quý tư": the model and the checks see digits.
+# Not "tháng năm" ("tháng, năm") nor unaccented "thang tu" ("tháng từ ...").
+_MONTH_WORDS = {"gieng": 1, "hai": 2, "ba": 3, "tu": 4, "bon": 4, "sau": 6, "bay": 7,
+                "tam": 8, "chin": 9, "muoi": 10, "muoi mot": 11, "muoi hai": 12, "chap": 12}
+_MONTH_WORD = re.compile(
+    r"(?<!\w)([Tt]háng) (giêng|hai|ba|tư|bốn|sáu|bảy|bẩy|tám|chín|mười một|mười hai|mười"
+    r"|chạp)(?!\w)(?! (?:tháng|ngày|tuần|lần)\b)")
+_QUARTER_WORDS = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "một": 1, "hai": 2, "ba": 3, "bốn": 4,
+                  "tư": 4}
+_QUARTER_WORD = re.compile(r"(?<!\w)([Qq]uý) (IV|III|II|I|iv|iii|ii|i|một|hai|ba|bốn|tư)(?!\w)")
+
+
 def spell_months(question: str) -> str:
-    """The question with every month written "tháng M/YYYY" (or "tháng M")."""
+    """The question with every month written "tháng M/YYYY" (or "tháng M") and every
+    quarter "quý N"."""
     def month(m: re.Match[str], year: str = "") -> str:
         number = int(m.group(1))
         return f"tháng {number}{year}" if 1 <= number <= 12 else m.group()
 
-    text = _MONTH_YEAR.sub(lambda m: month(m, f"/{m.group(2)}"), question)
+    text = _MONTH_WORD.sub(lambda m: f"{m[1]} {_MONTH_WORDS[fold(m[2])]}", question)
+    text = _QUARTER_WORD.sub(lambda m: f"{m[1]} {_QUARTER_WORDS[m[2].lower()]}", text)
+    text = _MONTH_YEAR.sub(lambda m: month(m, f"/{m.group(2)}"), text)
     text = _MONTH_SHORT_YEAR.sub(lambda m: month(m, f"/20{m.group(2)}"), text)
     text = _BARE_MONTH_YEAR.sub(lambda m: month(m, f"/{m.group(2)}"), text)
     return _MONTH_ALONE.sub(month, text)
@@ -282,15 +363,18 @@ def check_rewrite(question: str, rewrite: str, names: Iterable[str] = ()) -> str
         return "Rewrite is empty, too long or not one line"
     if not _same_numbers(question, rewrite):
         return "Rewrite changed the numbers of the question"
+    names = list(names)
     asked, restated = _words(question), _words(rewrite)
     for name in names:
         key = _words(name)
         if len(key.strip()) >= 4 and (key in asked) != (key in restated):
             return f"Rewrite added or dropped the name {name!r}"
-    plain_question, plain_rewrite = _plain(question), _plain(rewrite)
-    for concept, pattern, both in _GUARDS:
-        before = re.search(pattern, plain_question) is not None
-        after = re.search(pattern, plain_rewrite) is not None
+    plain_question, plain_rewrite = _guard_text(question, names), _guard_text(rewrite, names)
+    for concept, pattern, both, ignore in _GUARDS:
+        before_text = re.sub(ignore, " ", plain_question) if ignore else plain_question
+        after_text = re.sub(ignore, " ", plain_rewrite) if ignore else plain_rewrite
+        before = re.search(pattern, before_text) is not None
+        after = re.search(pattern, after_text) is not None
         if (before and not after) or (both and after and not before):
             return f"Rewrite changed the '{concept}' meaning"
     return None
@@ -364,7 +448,12 @@ def parse_rewrite(text: str) -> str | None:
     lines = [line.strip() for line in str(text).splitlines() if line.strip()]
     if not lines:
         return None
-    line = re.sub(r"^(?:viết lại|viet lai)\s*:\s*", "", lines[0], flags=re.IGNORECASE)
+    # A model that echoes "Câu hỏi: …" before "Viết lại: …" restates on the later line.
+    labelled = [line for line in lines if re.match(r"(?:viết lại|viet lai)\s*:", line, re.I)]
+    line = labelled[0] if labelled else lines[0]
+    if re.match(r"(?:câu hỏi|cau hoi)\s*:", line, re.IGNORECASE):
+        return None
+    line = re.sub(r"^(?:viết lại|viet lai)\s*:\s*", "", line, flags=re.IGNORECASE)
     line = line.strip().strip("`\"'“”").strip()
     if not line or UNSURE in line:
         return None
@@ -381,8 +470,8 @@ class RewriteAgent(LocalPlanAgent):
         if type(lenient) is not bool or type(retry_rejected) is not bool:
             raise ValueError("lenient and retry_rejected must be true or false")
         self.lenient, self.retry_rejected = lenient, retry_rejected
-        if type(votes) is not int or not 1 <= votes <= 2:
-            raise ValueError("votes must be 1 or 2")
+        if type(votes) is not int or not 1 <= votes <= 3:
+            raise ValueError("votes must be 1, 2 or 3 (two of three must agree)")
         if type(examples) is not int or not 1 <= examples <= len(EXAMPLES):
             raise ValueError("examples must be between 1 and the number of examples")
         if type(rewrite_retries) is not int or rewrite_retries not in (0, 1):
@@ -413,6 +502,50 @@ class RewriteAgent(LocalPlanAgent):
         cache[rulebook] = tuple(r.spec for r in results if r.spec is not None)
         return cache[rulebook]
 
+    def _vote(self, vote: int, messages: list[dict[str, str]], question: Question,
+              context: BusinessContext, asked: str, names: list[str], product_names,
+              vocabulary, evidence: dict[str, Any]) -> Plan | str | Candidate:
+        """One restatement (with its retry): a Plan, the reason it failed, or a Candidate
+        when the model itself failed."""
+        for retry in range(self.rewrite_retries + 1):
+            attempt: dict[str, Any] = {"prompt_sha256": hashlib.sha256(
+                json.dumps(messages, ensure_ascii=False).encode()).hexdigest()}
+            if retry or vote > 2:
+                attempt.update(vote=vote, retry=retry)
+            evidence["rewrites"].append(attempt)
+            generated = self.planner_worker.run(
+                self.generate, self.model_timeout, messages=messages,
+                max_input_tokens=self.max_input_tokens, max_new_tokens=self.max_new_tokens)
+            attempt["execution"] = generated.execution()
+            if not generated.ok:
+                if generated.timed_out or not self.planner_worker.alive:
+                    self._model_error = Candidate(reason="Rewrite model stopped after worker failure",
+                                                  evidence=dict(evidence))
+                return Candidate(reason=f"Rewrite failed: {generated.error}", evidence=evidence)
+            attempt["model_output"] = generated.value
+            rewrite = parse_rewrite(generated.value.get("text", ""))
+            attempt["rewrite"] = rewrite
+            if rewrite is None:
+                return "Rewrite model was unsure"
+            rejected = check_rewrite(asked, rewrite, names)
+            if rejected:
+                attempt["rejected"] = rejected
+                if not self.retry_rejected or retry == self.rewrite_retries:
+                    return rejected
+                attempt.update(vote=vote, retry=retry)
+                messages = _rejected_messages(messages, rewrite, rejected)
+                continue
+            restated = Question(question.id, question.business_id, rewrite, question.as_of_date)
+            plan = self._plan(restated, context)
+            if plan is not None:
+                return plan
+            if retry == self.rewrite_retries:
+                return "Grammar cannot plan the rewrite"
+            remaining = unread_words(restated, context.cache["rules"], product_names, vocabulary)
+            attempt.update(vote=vote, retry=retry, unread_words=remaining)
+            messages = _retry_messages(messages, rewrite, remaining)
+        return "Grammar cannot plan the rewrite"
+
     def answer(self, question: Question, context: BusinessContext) -> Candidate:
         plan = self._plan(question, context)
         if plan is not None:
@@ -430,54 +563,40 @@ class RewriteAgent(LocalPlanAgent):
         chosen = select_examples(asked, self.examples)
         rule_names = [spec.nguon.strip().strip("|").split("|")[0].strip()
                       for spec in self._rule_specs(context.split.rulebook)]
-        # Independent restatements: the same examples, most similar first, then last.
-        prompts = [build_rewrite_messages(asked, chosen, rule_names, lenient=self.lenient),
-                   build_rewrite_messages(asked, chosen[::-1], rule_names, lenient=self.lenient)
-                   ][:self.votes]
+        # Independent restatements: the same examples, most similar first, then last; a
+        # third vote (votes=3) interleaves them and is asked only when the first two differ.
+        orders = [chosen, chosen[::-1], chosen[1::2] + chosen[::2]][:self.votes]
+        prompts = [build_rewrite_messages(asked, order, rule_names, lenient=self.lenient)
+                   for order in orders]
         evidence: dict[str, Any] = {"model": self._model_info,
                                     "planner_confidence": REWRITE_CONFIDENCE,
                                     "rewrites": []}
         plans: list[Plan] = []
+        failures: list[str] = []
         for vote, messages in enumerate(prompts, 1):
-            for retry in range(self.rewrite_retries + 1):
-                attempt: dict[str, Any] = {"prompt_sha256": hashlib.sha256(
-                    json.dumps(messages, ensure_ascii=False).encode()).hexdigest()}
-                if retry:
-                    attempt.update(vote=vote, retry=retry)
-                evidence["rewrites"].append(attempt)
-                generated = self.planner_worker.run(
-                    self.generate, self.model_timeout, messages=messages,
-                    max_input_tokens=self.max_input_tokens, max_new_tokens=self.max_new_tokens)
-                attempt["execution"] = generated.execution()
-                if not generated.ok:
-                    if generated.timed_out or not self.planner_worker.alive:
-                        self._model_error = Candidate(reason="Rewrite model stopped after worker failure",
-                                                      evidence=dict(evidence))
-                    return Candidate(reason=f"Rewrite failed: {generated.error}", evidence=evidence)
-                attempt["model_output"] = generated.value
-                rewrite = parse_rewrite(generated.value.get("text", ""))
-                attempt["rewrite"] = rewrite
-                if rewrite is None:
-                    return Candidate(reason="Rewrite model was unsure", evidence=evidence)
-                rejected = check_rewrite(asked, rewrite, names)
-                if rejected:
-                    attempt["rejected"] = rejected
-                    if not self.retry_rejected or retry == self.rewrite_retries:
-                        return Candidate(reason=rejected, evidence=evidence)
-                    attempt.update(vote=vote, retry=retry)
-                    messages = _rejected_messages(messages, rewrite, rejected)
-                    continue
-                restated = Question(question.id, question.business_id, rewrite, question.as_of_date)
-                plan = self._plan(restated, context)
-                if plan is not None:
-                    plans.append(plan)
-                    break
-                if retry == self.rewrite_retries:
-                    return Candidate(reason="Grammar cannot plan the rewrite", evidence=evidence)
-                remaining = unread_words(restated, context.cache["rules"], product_names, vocabulary)
-                attempt.update(vote=vote, retry=retry, unread_words=remaining)
-                messages = _retry_messages(messages, rewrite, remaining)
-        if any(plan != plans[0] for plan in plans[1:]):
+            outcome = self._vote(vote, messages, question, context, asked, names,
+                                 product_names, vocabulary, evidence)
+            if isinstance(outcome, Candidate):
+                return outcome  # the model itself failed
+            if isinstance(outcome, str):
+                failures.append(outcome)
+                if self.votes < 3:
+                    return Candidate(reason=outcome, evidence=evidence)
+            else:
+                plans.append(outcome)
+            if self.votes == 3 and vote == 2:
+                if len(plans) == 2 and plans[0] == plans[1]:
+                    break  # agreed: no third vote
+                if not plans:
+                    return Candidate(reason=failures[0], evidence=evidence)
+        if self.votes == 3:
+            agreed = [plan for plan in plans if plans.count(plan) >= 2]
+            if not agreed:
+                reason = failures[0] if failures and len(plans) < 2 else (
+                    "Rewrites lead to different plans")
+                return Candidate(reason=reason, evidence=evidence)
+            plans = [agreed[0]]
+        elif any(plan != plans[0] for plan in plans[1:]):
             return Candidate(reason="Rewrites lead to different plans", evidence=evidence)
         candidate = self._answer_plan(plans[0], context, as_of_date=question.as_of_date)
         candidate.evidence = {**evidence, **candidate.evidence}

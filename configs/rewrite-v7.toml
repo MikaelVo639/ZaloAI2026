@@ -1,0 +1,24 @@
+# Experimental rewrite, version 7: configs/rewrite.toml plus the options that let the model
+# answer more often. The grammar still plans every restatement, the safety checks still
+# reject any changed number, name or meaning word, and two restatements must agree.
+# Compare with configs/rewrite.toml on the TRAIN model benchmark before promoting.
+backend = "rewrite"
+# Fixed diagnostic score for rewrite answers, NOT a calibrated probability.
+min_confidence = 0.5
+max_seconds = 20000
+model_path = "models/qwen2.5-coder-7b-instruct"
+question_timeout = 30
+ingestion_timeout = 300
+model_load_timeout = 600
+model_timeout = 30
+# Every example is in the prompt (about 5k tokens), so the input budget is larger.
+max_input_tokens = 8192
+max_new_tokens = 128
+rewrite_retries = 1
+rewrite_examples = 78
+# Answer KHONG_RO only when a condition would be lost, not when no example is alike.
+rewrite_lenient = true
+# Spend the retry on a restatement the safety checks rejected, too.
+rewrite_retry_rejected = true
+# Two of three restatements must lead to the same plan (third asked only when needed).
+rewrite_votes = 3

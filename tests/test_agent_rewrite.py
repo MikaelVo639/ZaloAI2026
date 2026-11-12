@@ -100,6 +100,32 @@ def rejected_then_standard_generate(cache, messages, max_input_tokens, max_new_t
     return {"text": STANDARD}
 
 
+
+def _order(messages):
+    """0 forward, 1 reversed, 2 interleaved examples (default six examples)."""
+    question = _shots(messages)[-1].removeprefix("Câu hỏi: ")
+    chosen = [f"Câu hỏi: {raw}" for raw, _ in select_examples(question)]
+    first = _shots(messages)[0]
+    return {chosen[0]: 0, chosen[-1]: 1, chosen[1]: 2}[first]
+
+
+def third_vote_breaks_tie_generate(cache, messages, max_input_tokens, max_new_tokens):
+    return {"text": "Doanh thu hôm nay là bao nhiêu?" if _order(messages) == 1 else STANDARD}
+
+
+def first_vote_unsure_generate(cache, messages, max_input_tokens, max_new_tokens):
+    return {"text": UNSURE if _order(messages) == 0 else STANDARD}
+
+
+def three_way_generate(cache, messages, max_input_tokens, max_new_tokens):
+    return {"text": [STANDARD, "Doanh thu hôm nay là bao nhiêu?",
+                     "Doanh thu tuần này là bao nhiêu?"][_order(messages)]}
+
+
+def echo_generate(cache, messages, max_input_tokens, max_new_tokens):
+    return {"text": f"Câu hỏi: quán mình tháng này thu về nhiêu tiền\nViết lại: {STANDARD}"}
+
+
 def failing_load(cache, model_path):
     raise RuntimeError("no GPU in this test")
 
@@ -136,6 +162,52 @@ class RewriteCheckTests(unittest.TestCase):
         self.assertIsNone(check_rewrite("dthu thang nay so vs thang truoc",
                                         "Doanh thu tháng này so với tháng trước"))
 
+    def test_amounts_quarters_and_count_words_keep_their_numbers(self):
+        for question, rewrite in (
+                ("đơn trên 1tr5 tháng 2/2026", "Đơn trên 1.500.000 đồng tháng 2/2026"),
+                ("đơn từ 1,5 triệu tháng 2/2026", "Đơn từ 1.500.000 đồng tháng 2/2026"),
+                ("đơn từ 2 triệu rưỡi", "Đơn từ 2.500.000 đồng"),
+                ("đơn từ 3 trăm nghìn", "Đơn từ 300.000 đồng"),
+                ("đơn từ 1k5", "Đơn từ 1.500 đồng"),
+                ("dthu quý IV/2025", "Doanh thu quý 4/2025"),
+                ("ba tháng gần nhất dthu bao nhiêu", "Doanh thu 3 tháng gần nhất"),
+                ("top 3 khách", "ba khách mua nhiều nhất"),
+                ("năm đơn lớn nhất", "5 đơn lớn nhất")):
+            with self.subTest(question=question):
+                self.assertIsNone(check_rewrite(question, rewrite))
+        for question, rewrite in (
+                ("đơn trên 1tr5", "Đơn trên 1.000.000 đồng"),
+                ("dthu năm nay", "Doanh thu 5 tháng"),           # "năm" (year) is not 5
+                ("tháng sau dthu", "Doanh thu 6 tháng"),          # "sau" (after) is not 6
+                ("ba tháng gần nhất", "4 tháng gần nhất")):
+            with self.subTest(question=question):
+                self.assertIn("numbers", check_rewrite(question, rewrite))
+
+    def test_guards_ignore_words_that_only_look_alike(self):
+        for question, rewrite in (
+                ("số ngày bán được từ 5tr", "Có bao nhiêu ngày doanh thu từ 5.000.000 đồng?"),
+                ("nó bán được bao nhiêu", "Doanh thu là bao nhiêu?"),
+                ("hàng còn lại bao nhiêu gói", "Tồn kho còn bao nhiêu gói?"),
+                ("khách mua ít nhất 4 đơn", "Khách mua từ 4 đơn trở lên"),
+                ("doanh thu 7 ngày gần nhất", "Doanh thu 7 ngày qua"),
+                ("quy đổi ra gói bán được bao nhiêu", "Bán được bao nhiêu gói?"),
+                ("đơn hoàn thành tháng này", "Đơn tháng này")):
+            with self.subTest(question=question):
+                self.assertIsNone(check_rewrite(question, rewrite))
+        # Guard words inside a catalogue name are the name's, checked on their own.
+        self.assertIsNone(check_rewrite("Nước không đường bán bao nhiêu",
+                                        "Doanh thu Nước không đường", ["Nước không đường"]))
+        for question, rewrite, concept in (
+                ("so tháng này với tháng trước", "Doanh thu tháng này", "compare"),
+                ("lãi tháng này", "Doanh thu tháng này", "profit"),
+                ("món nào lời nhất", "Món nào bán chạy nhất", "profit"),
+                ("khách nợ bao nhiêu", "Khách mua bao nhiêu", "debt"),
+                ("hàng trả lại tháng này", "Hàng tháng này", "return"),
+                ("món bán nhiều nhất", "Món bán được", "extreme"),
+                ("không cần đơn bác sĩ", "Thuốc cần đơn bác sĩ", "negation")):
+            with self.subTest(question=question):
+                self.assertIn(concept, check_rewrite(question, rewrite) or "")
+
     def test_output_must_be_one_short_line(self):
         self.assertIsNotNone(check_rewrite("dthu thang nay", "Doanh thu\ntháng này"))
         self.assertIsNotNone(check_rewrite("dthu thang nay", "x" * 301))
@@ -155,6 +227,13 @@ class SpellMonthsTests(unittest.TestCase):
                              ("giữa th1/2026, th2/2026", "giữa tháng 1/2026, tháng 2/2026")):
             with self.subTest(raw=raw):
                 self.assertEqual(spell_months(raw), spelled)
+
+    def test_month_and_quarter_words(self):
+        self.assertEqual(spell_months("dthu tháng giêng năm nay"), "dthu tháng 1 năm nay")
+        self.assertEqual(spell_months("Tháng mười một/2025 bán bao nhiêu"),
+                         "tháng 11/2025 bán bao nhiêu")
+        self.assertEqual(spell_months("quý IV/2025 và quý tư"), "quý 4/2025 và quý 4")
+        self.assertEqual(spell_months("tháng ba ngày đầu"), "tháng ba ngày đầu")
 
     def test_dates_quarters_and_impossible_months_stay(self):
         for text in ("đến hết ngày 05/04/2026", "từ 01/02/2026 tới 10/02/2026", "quý 4/2025",
@@ -176,6 +255,10 @@ class RewritePromptTests(unittest.TestCase):
                          "Doanh thu tháng này là bao nhiêu?")
         self.assertIsNone(parse_rewrite(UNSURE))
         self.assertIsNone(parse_rewrite("  \n "))
+
+    def test_parse_reads_the_restated_line_after_an_echo(self):
+        self.assertEqual(parse_rewrite(f"Câu hỏi: dthu\nViết lại: {STANDARD}"), STANDARD)
+        self.assertIsNone(parse_rewrite("Câu hỏi: dthu thang nay"))
 
     def test_examples_are_chosen_by_similarity_and_deterministic(self):
         chosen = select_examples("thang 2/2026 bi huy may don", 3)
@@ -351,6 +434,26 @@ class RewriteAgentTests(unittest.TestCase):
         no_retry = self.agent(rejected_then_standard_generate, retry_rejected=True,
                               rewrite_retries=0).answer(self.question, self.context)
         self.assertEqual(len(no_retry.evidence["rewrites"]), 1)
+
+    def test_two_of_three_votes(self):
+        tie = self.agent(third_vote_breaks_tie_generate, votes=3).answer(self.question, self.context)
+        self.assertEqual(tie.type, "number", tie.reason)
+        self.assertEqual(len(tie.evidence["rewrites"]), 3)
+        self.assertEqual(self.agent(third_vote_breaks_tie_generate).answer(
+            self.question, self.context).reason, "Rewrites lead to different plans")
+        rescued = self.agent(first_vote_unsure_generate, votes=3).answer(self.question, self.context)
+        self.assertEqual(rescued.type, "number", rescued.reason)
+        agreed = self.agent(standard_generate, votes=3).answer(self.question, self.context)
+        self.assertEqual(len(agreed.evidence["rewrites"]), 2)  # no third vote when agreed
+        split = self.agent(three_way_generate, votes=3).answer(self.question, self.context)
+        self.assertEqual(split.reason, "Rewrites lead to different plans")
+        unsure = self.agent(unsure_generate, votes=3).answer(self.question, self.context)
+        self.assertEqual((unsure.reason, len(unsure.evidence["rewrites"])),
+                         ("Rewrite model was unsure", 2))
+        echoed = self.agent(echo_generate).answer(self.question, self.context)
+        self.assertEqual(echoed.type, "number", echoed.reason)
+        with self.assertRaisesRegex(ValueError, "rewrite_votes"):
+            Config(rewrite_votes=4)
 
     def test_variant_options_are_validated_and_off_by_default(self):
         config = Config.load(Path(__file__).resolve().parents[1] / "configs" / "rewrite.toml")

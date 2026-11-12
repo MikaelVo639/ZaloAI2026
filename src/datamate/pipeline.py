@@ -40,6 +40,9 @@ class Config:
     # Experimental rewrite variants, off by default (see agent/rewrite.py).
     rewrite_lenient: bool = False
     rewrite_retry_rejected: bool = False
+    # 2: both restatements must lead to the same plan; 3: two of three must (the third is
+    # asked only when the first two differ or fail).
+    rewrite_votes: int = 2
 
     def __post_init__(self) -> None:
         if self.backend not in ("baseline", "abstain", "local_plan", "rewrite"):
@@ -61,6 +64,8 @@ class Config:
             raise ValueError("rewrite_retries must be 0 or 1")
         if type(self.rewrite_examples) is not int or not 1 <= self.rewrite_examples <= len(EXAMPLES):
             raise ValueError("rewrite_examples must be between 1 and the number of examples")
+        if type(self.rewrite_votes) is not int or self.rewrite_votes not in (1, 2, 3):
+            raise ValueError("rewrite_votes must be 1, 2 or 3")
         for name in ("rewrite_lenient", "rewrite_retry_rejected"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be true or false")
@@ -92,7 +97,8 @@ def predict(data_dir: Path, output_dir: Path, config: Config,
                 timeouts.update(rewrite_retries=config.rewrite_retries,
                                 examples=config.rewrite_examples,
                                 lenient=config.rewrite_lenient,
-                                retry_rejected=config.rewrite_retry_rejected)
+                                retry_rejected=config.rewrite_retry_rejected,
+                                votes=config.rewrite_votes)
             agent = model_agent(config.model_path, model_load_timeout=config.model_load_timeout,
                                 model_timeout=config.model_timeout,
                                 max_input_tokens=config.max_input_tokens,
