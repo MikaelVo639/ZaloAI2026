@@ -39,7 +39,7 @@ class NormalizeTests(unittest.TestCase):
 
     def test_chat_spellings_and_calls(self):
         self.assertEqual(normalize_question("em ơi check jum dthu kua shop mik"),
-                         "check giup dthu cua cua hang")
+                         "check giup doanh thu cua cua hang")
         for word in ("giùm", "dùm", "jum", "giúp"):
             with self.subTest(word=word):
                 self.assertEqual(normalize_question(f"xem {word} doanh thu"),
@@ -114,7 +114,7 @@ class EverydayWordingTests(unittest.TestCase):
 
     def test_chat_spellings_in_context_only(self):
         self.assertEqual(normalize_question("dthu ngày nào cao nhứt trog thg 6 năm 2026"),
-                         "dthu ngay nao cao nhat trong thang 6/2026")
+                         "doanh thu ngay nao cao nhat trong thang 6/2026")
         self.assertEqual(normalize_question("7 ngày gần nhứt bán bao nhiu dza"),
                          "7 ngay gan nhat ban bao nhiu")
         self.assertEqual(normalize_question("tháng 3 có tăng ko"), "thang 3 co tang khong")
@@ -127,8 +127,19 @@ class EverydayWordingTests(unittest.TestCase):
                          normalize_question("doanh thu trung bình một đơn tháng 3"))
         self.assertEqual(normalize_question("số khách còn nợ quán"),
                          normalize_question("số khách còn nợ cửa hàng"))
-        # A bare "quán" may be "quần" (a product): left alone.
-        self.assertIn("quan ban", normalize_question("tháng này quán bán được bao nhiêu"))
+        # With accents "quán" is the shop; "quần" (a product) and unaccented "quan" are left.
+        self.assertEqual(normalize_question("tháng này quán bán được bao nhiêu"),
+                         normalize_question("tháng này cửa hàng bán được bao nhiêu"))
+        self.assertIn("quan ban", normalize_question("tháng này quần bán được bao nhiêu"))
+        self.assertIn("quan ban", normalize_question("thang nay quan ban duoc bao nhieu"))
+        for wording in ("doanh thu bên mình thuốc kê đơn tháng 3",
+                        "doanh thu quán mình thuốc kê đơn tháng 3",
+                        "doanh thu cửa hàng thuốc kê đơn tháng 3"):
+            self.assertEqual(normalize_question(wording),
+                             normalize_question("doanh thu thuốc kê đơn tháng 3"))
+        self.assertIn("tong doanh thu", normalize_question("chiếm bao nhiêu % doanh thu cả quán"))
+        # Never "doanh thu được" (read as money collected from debtors).
+        self.assertNotIn("doanh thu duoc", normalize_question("doanh thu của quán được bao nhiêu"))
 
     def test_binh_quan_is_trung_binh_only_for_orders(self):
         self.assertEqual(normalize_question("giá trị bình quân một đơn"),

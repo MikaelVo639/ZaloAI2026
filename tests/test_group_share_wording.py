@@ -27,7 +27,7 @@ def plan(text, book=None):
 class TelexGroupWordingTests(unittest.TestCase):
     def test_telex_keys_on_grammar_words(self):
         self.assertEqual(normalize_question("nhoms gỏi chieems bn % toongr dthu"),
-                         "nhom goi chiem bn phan tram tong dthu")
+                         "nhom goi chiem bn phan tram tong doanh thu")
         # A name that only contains the word is untouched.
         self.assertEqual(normalize_question("Thước thủy nhôm"), "thuoc thuy nhom")
 

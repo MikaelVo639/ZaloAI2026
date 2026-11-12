@@ -35,6 +35,8 @@ ABBREVIATIONS = {
     # Chat spellings of grammar words: "trog", "dza". ("nhứt", "ko" only in context below:
     # "Nhựt" is a person's name.)
     "trog": "trong", "dza": "vay",
+    # Every grammar pattern that reads "dthu" also reads "doanh thu".
+    "dthu": "doanh thu",
 }
 _TONE_KEYS = "sfrxj"
 
@@ -99,6 +101,17 @@ def normalize_question(value: object) -> str:
                  r"(?:đơn|don|đh|dh|bill|order)(?: (?:hàng|hang))?(?: (?:khác|khac) nhau)?)(?!\w))?",
                  lambda m: f" từ {m.group(1)} {m.group(2) or ''} trở lên ", raw, flags=re.I)
     # fold() also drops "-": "15-3-2026" / "3-2026" are the same dates as "15/3/2026" / "3/2026".
+    # The shop as the subject or owner, read with accents ("quán" is never "quần", "quận"):
+    # "quán bán được…", "doanh thu quán mình…", "doanh thu cả quán". Unaccented "quan"
+    # stays: it may be a product ("quần").
+    raw = re.sub(r"(?<!\w)(?:[Cc]ả )?(?:[Qq]uán|[Tt]iệm)(?= (?:bán|có|nhập|thu|đạt|nhận|chốt)\b)",
+                 "cửa hàng", raw)
+    raw = re.sub(r"(?<!\w)(?:doanh thu|dthu) (?:của )?cả (?:quán|tiệm|shop|cửa hàng)(?!\w)",
+                 "tổng doanh thu", raw)
+    raw = re.sub(r"(?<!\w)((?:[Dd]oanh thu|dthu) )(?:của )?(?:quán|tiệm|shop|bên)"
+                 r"(?: (?:mình|nhà mình|em|tôi|ta))?(?!\w)"
+                 # "doanh thu (của quán) được" must not become "thu được" (debt collected).
+                 r"(?! (?:được|đươc|đc|dc|duoc|thu)(?!\w))", r"\1", raw)
     raw = re.sub(r"(?<![\d/-])(\d{1,2})-(\d{1,2})-(\d{4})(?![\d/-])", r"\1/\2/\3", raw)
     raw = re.sub(r"(?<![\d/-])(\d{1,2})-(\d{4})(?![\d/-])", r"\1/\2", raw)
     tokens = [_untranspose(_untelex(token)) for token in fold(raw).split()]
@@ -144,6 +157,10 @@ def normalize_question(value: object) -> str:
     # (money collected from debtors).
     text = re.sub(r"\b(doanh thu|dthu) (?:cua )?cua hang (?=trung binh|binh quan)", r"\1 ",
                   text)
+    # Before what is sold the shop adds nothing either: "doanh thu cửa hàng thuốc kê đơn".
+    text = re.sub(r"\b(doanh thu) (?:cua )?cua hang (?=thuoc|hang|nhom|mat hang|san pham|mon"
+                  r"|khach|nhan vien|ca|cac don|don|thang|quy|nam|tuan|ngay|hom|tet|tu|trong"
+                  r"|la\b|chiem|bang)", r"\1 ", text)
     # "bình quân một đơn" = "trung bình một đơn" (order value only: "giá nhập bình quân" is
     # the quantity-weighted purchase price, its own grammar).
     text = re.sub(r"\bbinh quan(?= (?:tren )?(?:mot|moi|1) (?:don|bill|order|hoa don)\b)"
