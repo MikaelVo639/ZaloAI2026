@@ -13,6 +13,8 @@ businesses it changed; ``<name>.answers.jsonl`` beside it holds their train refe
   the label written in the order id column ("Tổng dd/mm"), no date, status or quantity.
 - ``no_column_docs``: the README keeps its file list and conventions but no
   ``## Cột trong …`` section: the columns are known only by their headers.
+- ``status_labels``: in every documented list with a status column, the returned state is
+  written "Khách trả" and the delivering state "Đang ship" (labels written for the variant).
 
 Never point this at a public or private split.
 """
@@ -39,7 +41,9 @@ from datamate.ingestion.readme_sales import (
 )
 from datamate.ingestion.source_names import filename_key
 
-VARIANTS = ("monthly_files", "duplicate_orders", "summary_rows", "no_column_docs")
+VARIANTS = ("monthly_files", "duplicate_orders", "summary_rows", "no_column_docs",
+            "status_labels")
+STATUS_LABELS = {"tra hang": "Khách trả", "dang giao": "Đang ship"}
 DUPLICATE_EVERY = 25
 FAMILY_NOTE = "Các file `{template}` là dữ liệu chia theo tháng, mỗi tháng một file, cùng cột."
 
@@ -237,8 +241,45 @@ def no_column_docs(source: Path, destination: Path) -> bool:
     return True
 
 
+def status_labels(source: Path, destination: Path) -> bool:
+    """Write ``destination`` as ``source`` with other labels for two states; False when no
+    documented single-table list has a returned or delivering order."""
+    from datamate.ingestion.status import order_state
+
+    readme = (source / "README.md").read_text(encoding="utf-8-sig")
+    catalog = build_catalog(source.parent, source.name)
+    rewritten: dict[Path, tuple[Any, list[str], list[dict[str, Any]]]] = {}
+    for section in parse_sections(readme):
+        column = section.fields.get("status")
+        tables = [t for t in catalog.tables
+                  if filename_key(t.path.name) == filename_key(section.file)]
+        if column is None or len(tables) != 1 or tables[0].path in rewritten:
+            continue
+        header: list[str] = []
+        rows: list[dict[str, Any]] = []
+        changed = False
+        for _, row in _records(tables[0], section.columns):
+            header += [name for name in row if name not in header]
+            label = STATUS_LABELS.get(order_state(row.get(column)) or "")
+            if label:
+                row = {**row, column: label}
+                changed = True
+            rows.append(row)
+        if changed:
+            rewritten[tables[0].path] = (tables[0], header, rows)
+    if not rewritten:
+        return False
+    _link_tree(source, destination)
+    for path, (table, header, rows) in rewritten.items():
+        (destination / path.name).unlink()
+        _write(destination / path.name, table.name, header, rows,
+               table.encoding or "utf-8", table.delimiter or ",")
+    return True
+
+
 _BUILDERS = {"monthly_files": monthly_files, "duplicate_orders": duplicate_orders,
-             "summary_rows": summary_rows, "no_column_docs": no_column_docs}
+             "summary_rows": summary_rows, "no_column_docs": no_column_docs,
+             "status_labels": status_labels}
 
 
 def build_variant(train: Path, output: Path, name: str) -> dict[str, Any]:

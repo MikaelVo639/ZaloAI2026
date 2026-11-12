@@ -7,7 +7,7 @@ from pathlib import Path
 
 from datamate.agent import sales_source
 from datamate.ingestion.catalog import build_catalog
-from datamate.ingestion.status import StatusError, order_state, status_policy
+from datamate.ingestion.status import StatusError, by_elimination, order_state, status_policy
 
 RULEBOOK = """# Synthetic split rules
 | Luật | Mặc định |
@@ -129,6 +129,35 @@ class XlsxMappingSelectionTests(_Shop):
     def test_xlsx_export_without_readme_evidence_is_left_to_other_adapters(self):
         catalog = self.shop("undocumented export", self.files())
         self.assertIsNone(sales_source._xlsx_mapping(catalog))
+
+
+class EliminationTests(unittest.TestCase):
+    """One unknown label of a status column is the one state its other labels leave."""
+
+    def setUp(self):
+        self.policy = status_policy(RULEBOOK)
+
+    def test_the_fourth_state_by_elimination(self):
+        labels = ["Xong", "Đã hủy đơn", "Khách trả", "Đang vận chuyển"]
+        policy = by_elimination(self.policy, labels)
+        self.assertEqual(policy.resolve("Khách trả"), "returned")
+        self.assertEqual(policy.resolve("Xong"), "valid")
+        with self.assertRaises(StatusError):
+            self.policy.resolve("Khách trả")  # never without the whole column
+
+    def test_no_guess_when_the_column_does_not_settle_it(self):
+        for labels in (["Xong", "Khách trả", "Đang vận chuyển"],          # two states left
+                       ["Xong", "Đã hủy", "Khách trả", "Lưu tạm", "Đang giao"],  # two unknown
+                       ["Xong", "Đã hủy", "Khách thanh toán", "Đang giao"]):  # no shared word
+            with self.subTest(labels=labels):
+                policy = by_elimination(self.policy, labels)
+                for label in labels:
+                    if order_state(label) is None:
+                        with self.assertRaises(StatusError):
+                            policy.resolve(label)
+
+    def test_dang_ship_is_delivering(self):
+        self.assertEqual(order_state("Đang ship"), "dang giao")
 
 
 if __name__ == "__main__":

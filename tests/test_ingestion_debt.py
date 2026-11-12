@@ -185,6 +185,20 @@ class DebtLedgerTests(_Shop):
         ledger = load_debt_ledger(self.catalog(orders=orders), RULEBOOK)
         self.assertEqual([o.order_id for o in ledger.orders], ["D1"])
 
+    def test_one_unknown_status_label_by_elimination(self):
+        orders = [["Mã", "Ngày", "Trạng thái", "Tổng thu", "Thanh toán", "Kênh",
+                   "Mã khách", "Tên khách", "Còn nợ"],
+                  ["D1", "01/01/2026", "Xong", "100000.5", "Ghi nợ", "Store",
+                   "K1", "Tên trên đơn", "25000.5"],
+                  ["D2", "02/01/2026", "Khách trả", "50000", "chuyển khoản", "phone",
+                   "K2", "Bình", "50000"],
+                  ["D3", "03/01/2026", "Hủy", "90000", "cash", "zalo_oa", "K3", "Cường", ""],
+                  ["D4", "04/01/2026", "Đang ship", "70000", "COD", "Shopee",
+                   "", "Khách lẻ", ""]]
+        ledger = load_debt_ledger(self.catalog(orders=orders), RULEBOOK)
+        self.assertEqual(len(ledger.orders), 4)
+        self.assertEqual({o.order_id: o.state for o in ledger.orders}["D2"], "tra hang")
+
     def test_unknown_labels_bad_amount_and_bad_coverage_are_rejected(self):
         orders = [
             ["Mã", "Ngày", "Trạng thái", "Tổng thu", "Thanh toán", "Kênh",

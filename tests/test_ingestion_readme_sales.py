@@ -325,6 +325,18 @@ class FlatReadmeTests(_Shop):
             load_readme_sales(catalog, RULEBOOK)
         self.assertEqual(caught.exception.code, "UNKNOWN_STATUS")
 
+    def test_one_unknown_status_label_by_elimination(self):
+        rows = [FLAT_HEADER,
+                ["HD1", "05/01/2026", "Xong", "Trà", "1", "ly", "20000", "1", ""],
+                ["HD2", "05/01/2026", "Đã hủy", "Trà", "1", "ly", "20000", "1", ""],
+                ["HD3", "06/01/2026", "Khách trả", "Trà", "1", "ly", "20000", "1", ""],
+                ["HD4", "06/01/2026", "Đang ship", "Trà", "1", "ly", "20000", "1", ""]]
+        sales, evidence, _ = load_readme_sales(self.shop(FLAT_README, {"ban_hang.csv": rows}),
+                                               RULEBOOK)
+        self.assertEqual({s.order_id: s.status for s in sales},
+                         {"HD1": "valid", "HD2": "cancelled", "HD3": "returned", "HD4": "valid"})
+        self.assertEqual(evidence["status_by_elimination"], {"khach tra": "tra hang"})
+
     def test_missing_status_rule_raises(self):
         catalog = self.shop(FLAT_README, {"ban_hang.csv": self.rows()})
         with self.assertRaises(ReadmeSalesError) as caught:

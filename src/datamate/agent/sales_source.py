@@ -37,7 +37,7 @@ from datamate.ingestion.readme_sales import (
     parse_sections,
 )
 from datamate.ingestion.sales import Sale, load_sales
-from datamate.ingestion.status import StatusError, status_policy
+from datamate.ingestion.status import StatusError, by_elimination, status_policy
 from datamate.semantics.rules import rule_line, table_rows
 
 _JOIN_COLUMNS = {
@@ -195,6 +195,31 @@ def _xlsx_mapping(catalog: Catalog) -> MappingSpec | None:
         raise
 
 
+def _file_labels(rules: RuleCapabilities, rulebook: str, catalog: Catalog,
+                 mapping: MappingSpec) -> RuleCapabilities:
+    """The CSV joined capabilities plus the order list's own labels the split's four states
+    read (synonyms, or one label by elimination); labels nothing reads still raise later."""
+    try:
+        policy = status_policy(rulebook)
+    except StatusError:
+        return rules
+    tables = [t for t in catalog.tables
+              if mapping.orders.source in (t.path.name, f"{t.path.name}::{t.name}")]
+    if len(tables) != 1:
+        return rules
+    table = tables[0]
+    column = mapping.orders.fields["status"]
+    labels = {str(row[column]) for row in iter_rows(table) if row.get(column) not in (None, "")}
+    policy = by_elimination(policy, labels)
+    extra = {}
+    for label in labels:
+        try:
+            extra[label] = policy.resolve(label)
+        except StatusError:
+            continue
+    return replace(rules, status_mapping={**extra, **rules.status_mapping})
+
+
 def _xlsx_rules(rulebook: str, catalog: Catalog, mapping: MappingSpec) -> RuleCapabilities:
     """Joined capabilities with the status labels of this export read through the split's
     four order states; an unknown label raises instead of being guessed."""
@@ -207,6 +232,7 @@ def _xlsx_rules(rulebook: str, catalog: Catalog, mapping: MappingSpec) -> RuleCa
                  if f"{t.path.name}::{t.name}" == mapping.orders.source)
     column = mapping.orders.fields["status"]
     labels = {str(row[column]) for row in iter_rows(table) if row.get(column) not in (None, "")}
+    policy = by_elimination(policy, labels)
     mapping_by_label = {}
     for label in sorted(labels):
         try:
@@ -264,7 +290,8 @@ def load_business_sales(
     """
     mapping = _joined_mapping(catalog)
     if mapping is not None:
-        return _joined_result(catalog, mapping, _joined_rules(rulebook))
+        return _joined_result(catalog, mapping, _file_labels(_joined_rules(rulebook), rulebook,
+                                                             catalog, mapping))
     mapping = _xlsx_mapping(catalog)
     if mapping is not None:
         sales, source, eligible = _joined_result(

@@ -6,7 +6,10 @@ their own labels ("Xong", "khách hủy", "Đổi trả", "Đang vận chuyển"
 a state only when
 
 1. it *is* the state name, possibly with the usual particles ("đã", "đơn", "hàng"); or
-2. it is listed in the reviewed synonym table below.
+2. it is listed in the reviewed synonym table below; or
+3. by elimination over one status column (``by_elimination``): the column's other labels
+   name exactly three states, this is its only unknown label, and it shares the core word
+   of the fourth state ("Khách trả" when "trả hàng" is the state left).
 
 Anything else raises: an unknown label is never guessed, so the business abstains. The
 mapping to revenue status also needs the rulebook rows that say which states count:
@@ -38,7 +41,7 @@ SYNONYMS: dict[str, frozenset[str]] = {
     }),
     "dang giao": frozenset({
         "dang giao dich", "cho giao", "dang xu ly", "dang gui", "dang van chuyen",
-        "shipping",
+        "shipping", "dang ship",
     }),
 }
 
@@ -82,14 +85,51 @@ class StatusPolicy:
 
     revenue_status: dict[str, str]
     evidence: tuple[str, ...]
+    eliminated: tuple[tuple[str, str], ...] = ()  # (normalised label, state) by elimination
 
     def resolve(self, label: object) -> str:
-        state = order_state(label)
+        state = order_state(label) or dict(self.eliminated).get(normalize_label(label))
         if state is None:
             raise StatusError(f"Unknown status {label!r}")
         if state not in self.revenue_status:
             raise StatusError(f"Status {label!r} ({state}) has no rule in this split")
         return self.revenue_status[state]
+
+
+# The word of each state a shop's own label keeps ("Khách trả", "Đã hủy", "Đang ship").
+_CORE_WORDS = {"hoan thanh": {"hoan", "thanh", "xong"}, "huy": {"huy"}, "tra hang": {"tra"},
+               "dang giao": {"giao", "ship", "chuyen"}}
+
+
+def eliminated_labels(labels: object) -> dict[str, str]:
+    """``{normalised label: state}`` for the one label of a status column read by
+    elimination (see ``by_elimination``), or ``{}``."""
+    return dict(by_elimination(StatusPolicy({}, ()), labels).eliminated)
+
+
+def by_elimination(policy: StatusPolicy, labels: object) -> StatusPolicy:
+    """``policy`` that also reads the one unknown label of a status column by elimination.
+
+    ``labels`` are the distinct labels of one column. The rulebook says every order has
+    exactly one of the four states, so when the known labels name exactly three states and
+    one label is unknown, that label is the fourth state, provided it shares the state's
+    core word. Otherwise ``policy`` is returned unchanged (unknown labels still raise).
+    """
+    known: set[str] = set()
+    unknown: set[str] = set()
+    for label in labels:
+        text = normalize_label(label)
+        if not text:
+            continue
+        state = order_state(text)
+        (known.add(state) if state else unknown.add(text))
+    missing = [state for state in STATES if state not in known]
+    if len(unknown) != 1 or len(missing) != 1:
+        return policy
+    label, state = unknown.pop(), missing[0]
+    if not set(label.split()) & _CORE_WORDS[state]:
+        return policy
+    return StatusPolicy(policy.revenue_status, policy.evidence, ((label, state),))
 
 
 def status_policy(rulebook: str) -> StatusPolicy:

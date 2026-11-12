@@ -47,7 +47,7 @@ from datamate.ingestion.header_schema import (
     sales_list_name,
 )
 from datamate.ingestion.source_names import filename_key, is_family, matches_source
-from datamate.ingestion.status import StatusError, status_policy
+from datamate.ingestion.status import StatusError, by_elimination, status_policy
 from datamate.semantics.rules import rule_line
 from datamate.semantics.text import fold
 
@@ -1025,6 +1025,9 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
     status_counts: Counter[str] = Counter()
     order_state: dict[str, dict[str, Any]] = {}
     orphan_lines = 0
+    labels = ({line.get("status") for line in lines} if "status" in line_fields
+              else {row.get("status") for row in orders.values()})
+    policy = by_elimination(rules.status, labels)
     for line in lines:
         key = line["_order"]
         parent = orders.get(key) if orders else None
@@ -1039,7 +1042,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
             raise ReadmeSalesError("MISSING_VALUE", "Order date or status is missing",
                                    order_source="lines" if parent is None else "orders")
         try:
-            status = rules.status.resolve(raw_status)
+            status = policy.resolve(raw_status)
         except StatusError as exc:
             raise ReadmeSalesError("UNKNOWN_STATUS", str(exc)) from exc
         sheet = line["_sheet"] if "date" in line_fields else (parent or {}).get("_sheet", "")
@@ -1181,6 +1184,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         "order_ids": "from_file" if has_order_ids else "one_record_per_row",
         "rules": list(rules.evidence),
         "readme_conventions": list(conventions.evidence),
+        "status_by_elimination": dict(policy.eliminated),
     }
     if headers is not None:
         evidence["tables_without_customer_identity"] = _customer_identity_absence(
@@ -1290,7 +1294,10 @@ def _from_orders(roles: dict[str, _Role], rules: _Rules
     status_counts: Counter[str] = Counter()
     seen: dict[str, tuple] = {}
     skipped = duplicates = 0
-    for sheet, _ordinal, row in _role_rows(roles["orders"]):
+    rows = list(_role_rows(roles["orders"]))
+    policy = by_elimination(rules.status, {row.get("status") for _, _, row in rows
+                                           if not _summary_row(row, ("order_id", "date", "status"))})
+    for sheet, _ordinal, row in rows:
         if _summary_row(row, ("order_id", "date", "status")):
             skipped += 1  # total / note rows of the invoice list
             continue
@@ -1304,7 +1311,7 @@ def _from_orders(roles: dict[str, _Role], rules: _Rules
             raise ReadmeSalesError("DUPLICATE_PARENT_KEY", "Invoice list repeats an order id")
         seen[key] = row["_cells"]
         try:
-            status = rules.status.resolve(row.get("status"))
+            status = policy.resolve(row.get("status"))
         except StatusError as exc:
             raise ReadmeSalesError("UNKNOWN_STATUS", str(exc)) from exc
         try:
@@ -1323,6 +1330,7 @@ def _from_orders(roles: dict[str, _Role], rules: _Rules
         "status_counts": dict(sorted(status_counts.items())),
         "summary_rows_skipped": skipped,
         "duplicates_removed": duplicates,
+        "status_by_elimination": dict(policy.eliminated),
         "order_ids": "from_file",
         "grain": "one row per order; amount is the order's goods total (README)",
         "rules": list(rules.evidence),

@@ -31,7 +31,7 @@ from datamate.ingestion.readme_sales import (
 )
 from datamate.ingestion.sales import is_total_label
 from datamate.ingestion.source_names import filename_key, matches_source
-from datamate.ingestion.status import normalize_label, order_state
+from datamate.ingestion.status import eliminated_labels, normalize_label, order_state
 from datamate.semantics.rules import rule_line, table_rows
 from datamate.semantics.text import fold
 
@@ -837,7 +837,9 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
     duplicates_once = rule_line(table_rows(rulebook),
                                 "hai dong cua cung mot don giong nhau o moi o", "tinh mot lan")
     label_counts: Counter[str] = Counter()
-    for section, table_key, ordinal, row in _rows(catalog, roles["orders"], order_cells):
+    order_rows = list(_rows(catalog, roles["orders"], order_cells))
+    eliminated = eliminated_labels({row.get("status") for *_, row in order_rows})
+    for section, table_key, ordinal, row in order_rows:
         source = f"{table_key}#{ordinal}"
         if (_blank(row.get("order_day")) and _blank(row.get("status"))
                 and (_blank(row.get("order_id")) or is_total_label(row.get("order_id")))):
@@ -856,7 +858,7 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
                 continue
             raise DebtSourceError("key", "Order list repeats an order id", source=source)
         seen_orders[order_id] = row_cells
-        state = order_state(row["status"])
+        state = order_state(row["status"]) or eliminated.get(normalize_label(row["status"]))
         if state is None:
             raise DebtSourceError("label", "Unknown order status", source=source,
                                   label=str(row["status"]).strip())
