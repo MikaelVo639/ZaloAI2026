@@ -99,6 +99,27 @@ EXAMPLES: tuple[tuple[str, str], ...] = (
      "Doanh thu có tăng liên tục qua 3 tháng 11/2025, 12/2025, 1/2026 không?"),
     ("dthu th12/2025 voi th1/2026 moi thang bao nhieu",
      "Doanh thu tháng 12/2025 và tháng 1/2026 lần lượt là bao nhiêu?"),
+    # Groups, customer groups, shifts, thresholds, best period (invented group names).
+    ("dthu nhom Do an vat th2/2026 dc bn",
+     "Doanh thu nhóm Đồ ăn vặt tháng 2/2026 là bao nhiêu?"),
+    ("th2/2026 nhóm đồ ăn vặt chiếm mấy % dthu",
+     "Doanh thu nhóm hàng Đồ ăn vặt chiếm bao nhiêu phần trăm tổng doanh thu tháng 2/2026?"),
+    ("khach nhom dai ly th2/2026 mua het bao nhieu tien",
+     "Doanh thu của khách nhóm Đại lý tháng 2/2026 là bao nhiêu?"),
+    ("khách nhóm đại lý th2/2026 bình quân mỗi đơn mua bn",
+     "Tháng 2/2026 khách nhóm Đại lý mua trung bình bao nhiêu tiền hàng mỗi đơn?"),
+    ("khach nhom dai ly chiem may % dthu th2/2026",
+     "Khách nhóm Đại lý chiếm bao nhiêu phần trăm doanh thu tháng 2/2026?"),
+    ("trong 3 thang 11/2025 12/2025 1/2026 thang nao ban dc nhieu tien nhat",
+     "Tháng nào trong 3 tháng 11/2025, 12/2025, 1/2026 có doanh thu cao nhất?"),
+    ("th2/2026 bao nhieu khach mua tu 3 don tro len",
+     "Tháng 2/2026 có bao nhiêu khách mua từ 3 đơn trở lên?"),
+    ("th2/2026 mấy ngày bán đc từ 5tr trở lên",
+     "Tháng 2/2026 có bao nhiêu ngày doanh thu từ 5.000.000 đồng trở lên?"),
+    ("th2/2026 có mấy món nằm trong từ 50 đơn khác nhau trở lên",
+     "Tháng 2/2026 có bao nhiêu mặt hàng có mặt ở từ 50 đơn hàng khác nhau trở lên?"),
+    ("ca chieu th2/2026 ban dc bn tien", "Doanh thu ca chiều tháng 2/2026 là bao nhiêu?"),
+    ("top 5 khach dat nhieu don nhat th2/2026", "5 khách mua nhiều đơn nhất tháng 2/2026 là ai?"),
 )
 
 SYSTEM_PROMPT = f"""You restate one Vietnamese question from a shop owner in the standard
@@ -124,6 +145,8 @@ _GUARDS: tuple[tuple[str, str, bool], ...] = (
     ("cancel", r"\bhuy\b", True),
     ("return", r"\btra (?:hang|lai)\b|\bhoan\b", True),
     ("percent", r"%|\bphan tram\b", True),
+    # "tháng 4/2025" -> "quý 4/2025" keeps every number but asks another period.
+    ("quarter", r"\bquy\b|\bq ?[1-4]\b", True),
     ("compare", r"\bso (?:voi|vs)\b|\bso\b(?= (?:thang|tuan|nam|quy|ngay|tet|ky|cung))", False),
     ("average", r"\b(?:trung binh|binh quan|tb)\b", False),
     ("extreme", r"\bnhat\b|\btop\b", False),
@@ -163,6 +186,28 @@ def _same_numbers(question: str, rewrite: str) -> bool:
 
 def _words(text: str) -> str:
     return " " + " ".join(re.findall(r"[a-z0-9]+", fold(text))) + " "
+
+
+# Month spellings the model misreads as quarters or years ("th4/2026" -> "quý IV",
+# "10/2025" -> "năm 2025"). Written out before the model sees the question; the safety
+# checks compare against this same text, so no number is added or lost.
+_MONTH_YEAR = re.compile(r"\b(?:[Tt]h(?:g|áng|ang)?|[Tt])\s?(\d{1,2})\s*[/.-]\s*(\d{4})\b")
+_MONTH_SHORT_YEAR = re.compile(r"\b(?:[Tt]h(?:g|áng|ang)?|[Tt])\s?(\d{1,2})/([23]\d)\b(?![\d/])")
+_BARE_MONTH_YEAR = re.compile(
+    r"(?<![\d/.-])(?<!tháng )(?<!Tháng )(?<!ngày )(?<!quý )(\d{1,2})\s*[/-]\s*(20\d{2})(?![\d/])")
+_MONTH_ALONE = re.compile(r"\b[Tt]h(?:g)?\s?(\d{1,2})\b(?![\d/.-])")
+
+
+def spell_months(question: str) -> str:
+    """The question with every month written "tháng M/YYYY" (or "tháng M")."""
+    def month(m: re.Match[str], year: str = "") -> str:
+        number = int(m.group(1))
+        return f"tháng {number}{year}" if 1 <= number <= 12 else m.group()
+
+    text = _MONTH_YEAR.sub(lambda m: month(m, f"/{m.group(2)}"), question)
+    text = _MONTH_SHORT_YEAR.sub(lambda m: month(m, f"/20{m.group(2)}"), text)
+    text = _BARE_MONTH_YEAR.sub(lambda m: month(m, f"/{m.group(2)}"), text)
+    return _MONTH_ALONE.sub(month, text)
 
 
 def check_rewrite(question: str, rewrite: str, names: Iterable[str] = ()) -> str | None:
@@ -284,12 +329,13 @@ class RewriteAgent(LocalPlanAgent):
         names = list(self._product_names(context))
         for labels in self._vocabulary(context).values():
             names.extend(labels)
-        chosen = select_examples(question.question, self.examples)
+        asked = spell_months(question.question)  # what the model reads and is checked on
+        chosen = select_examples(asked, self.examples)
         rule_names = [spec.nguon.strip().strip("|").split("|")[0].strip()
                       for spec in self._rule_specs(context.split.rulebook)]
         # Independent restatements: the same examples, most similar first, then last.
-        prompts = [build_rewrite_messages(question.question, chosen, rule_names),
-                   build_rewrite_messages(question.question, chosen[::-1], rule_names)
+        prompts = [build_rewrite_messages(asked, chosen, rule_names),
+                   build_rewrite_messages(asked, chosen[::-1], rule_names)
                    ][:self.votes]
         evidence: dict[str, Any] = {"model": self._model_info,
                                     "planner_confidence": REWRITE_CONFIDENCE,
@@ -313,7 +359,7 @@ class RewriteAgent(LocalPlanAgent):
             attempt["rewrite"] = rewrite
             if rewrite is None:
                 return Candidate(reason="Rewrite model was unsure", evidence=evidence)
-            rejected = check_rewrite(question.question, rewrite, names)
+            rejected = check_rewrite(asked, rewrite, names)
             if rejected:
                 attempt["rejected"] = rejected
                 return Candidate(reason=rejected, evidence=evidence)

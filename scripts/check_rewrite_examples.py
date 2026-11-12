@@ -20,8 +20,9 @@ from datamate.semantics.lunar_periods import plan_tet
 from datamate.semantics.planner import plan_question
 from datamate.semantics.rules import read_rules
 
-# Invented catalogue entries used by the examples.
+# Invented catalogue entries and group labels used by the examples.
 NAMES = ("Bánh quy bơ", "Kẹo gừng hộp 10 gói")
+VOCABULARY = {"product_group": ("Đồ ăn vặt",), "customer_group": ("Đại lý",)}
 
 
 def main() -> int:
@@ -35,7 +36,7 @@ def main() -> int:
         question = Question("example", "example", standard, date(2026, 3, 15))
         plan = (plan_question(question, rules)
                 or plan_tet(question, rules, rulebook, args.split / "calendar.csv")
-                or plan_question(question, rules, NAMES))
+                or plan_question(question, rules, NAMES, VOCABULARY))
         rejected = check_rewrite(raw, standard, NAMES)
         if plan is None or rejected:
             failures += 1

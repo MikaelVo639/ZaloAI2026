@@ -14,6 +14,7 @@ from datamate.agent.rewrite import (
     build_rewrite_messages,
     check_rewrite,
     numbers,
+    spell_months,
     parse_rewrite,
     select_examples,
 )
@@ -95,6 +96,34 @@ class RewriteCheckTests(unittest.TestCase):
         self.assertIsNotNone(check_rewrite("dthu thang nay", "Doanh thu\ntháng này"))
         self.assertIsNotNone(check_rewrite("dthu thang nay", "x" * 301))
         self.assertIsNotNone(check_rewrite("dthu thang nay", ""))
+
+
+class SpellMonthsTests(unittest.TestCase):
+    """Month spellings written out before the model reads the question (synthetic)."""
+
+    def test_month_spellings(self):
+        for raw, spelled in (("dthu th4/2026 tăng hay giảm", "dthu tháng 4/2026 tăng hay giảm"),
+                             ("T6/2025 món nào lời nhất", "tháng 6/2025 món nào lời nhất"),
+                             ("10/2025 khách nào mua nhiều", "tháng 10/2025 khách nào mua nhiều"),
+                             ("trả hết trong 12-2025", "trả hết trong tháng 12/2025"),
+                             ("thang 4/25 hom nao", "tháng 4/2025 hom nao"),
+                             ("Th4 dthu nhóm", "tháng 4 dthu nhóm"),
+                             ("giữa th1/2026, th2/2026", "giữa tháng 1/2026, tháng 2/2026")):
+            with self.subTest(raw=raw):
+                self.assertEqual(spell_months(raw), spelled)
+
+    def test_dates_quarters_and_impossible_months_stay(self):
+        for text in ("đến hết ngày 05/04/2026", "từ 01/02/2026 tới 10/02/2026", "quý 4/2025",
+                     "doanh thu tháng 3/2026", "top 3 món th13/2026"):
+            with self.subTest(text=text):
+                self.assertEqual(spell_months(text), text)
+
+    def test_checks_use_the_spelled_question(self):
+        asked = spell_months("dthu th4/25 bn")
+        self.assertIsNone(check_rewrite(asked, "Doanh thu tháng 4/2025 là bao nhiêu?"))
+        for wrong in ("Doanh thu quý 4/2025 là bao nhiêu?", "Doanh thu năm 2025 là bao nhiêu?"):
+            self.assertIsNotNone(check_rewrite(asked, wrong), wrong)
+        self.assertIsNone(check_rewrite("dthu quý 4/2025", "Doanh thu quý 4/2025 là bao nhiêu?"))
 
 
 class RewritePromptTests(unittest.TestCase):
