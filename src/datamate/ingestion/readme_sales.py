@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from datamate.contracts import Catalog, Table
-from datamate.ingestion.catalog import iter_rows
+from datamate.ingestion.catalog import is_repeated_header, iter_data_rows
 from datamate.ingestion.sales import (
     Sale,
     is_total_label,
@@ -635,8 +635,7 @@ def _records(table: Table, columns: Iterable[str], *,
 
     if needed <= set(table.columns):
         validate_header(table.columns)
-        for ordinal, row in enumerate(iter_rows(table), 1):
-            yield ordinal, row
+        yield from iter_data_rows(table)
         return
     if table.path.suffix.lower() != ".xlsx":
         raise ReadmeSalesError("SCHEMA_MISMATCH", "README columns not found",
@@ -660,6 +659,8 @@ def _records(table: Table, columns: Iterable[str], *,
                                    table=table.key)
         validate_header(header)
         for ordinal, values in enumerate(rows, 1):
+            if is_repeated_header(header, values):
+                continue
             if any(v is not None and (not isinstance(v, str) or v.strip()) for v in values):
                 yield ordinal, {name: value for name, value in zip(header, values) if name}
     finally:

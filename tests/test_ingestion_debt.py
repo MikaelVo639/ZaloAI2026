@@ -125,6 +125,19 @@ class DebtLedgerTests(_Shop):
         })
         self.assertTrue(first.source.endswith("#1"))
 
+    def test_repeated_headers_are_skipped_in_orders_and_payments(self):
+        before = load_debt_ledger(self.catalog(), RULEBOOK)
+        for name in ("orders.csv", "payments.csv"):
+            path = self.data / "shop" / name
+            with path.open(encoding="utf-8-sig", newline="") as stream:
+                header, *rows = csv.reader(stream)
+            with path.open("w", encoding="utf-8-sig", newline="") as stream:
+                csv.writer(stream).writerows([header, rows[0], header, *rows[1:]])
+        after = load_debt_ledger(build_catalog(self.data, "shop"), RULEBOOK)
+        self.assertEqual([o.order_id for o in after.orders], [o.order_id for o in before.orders])
+        self.assertEqual([p.amount for p in after.payments], [p.amount for p in before.payments])
+        self.assertTrue(after.payments[-1].source.endswith("#3"))
+
     def test_latest_order_or_payment_is_fallback_coverage(self):
         readme = README.replace("- Dữ liệu có đến hết 31/01/2026.\n", "")
         ledger = load_debt_ledger(self.catalog(readme=readme), RULEBOOK)

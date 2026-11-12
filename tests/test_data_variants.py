@@ -3,8 +3,13 @@
 import unittest
 from decimal import Decimal
 
-from datamate.evaluation.data_variants import duplicate_orders, monthly_files, summary_rows
-from datamate.ingestion.catalog import build_catalog
+from datamate.evaluation.data_variants import (
+    duplicate_orders,
+    monthly_files,
+    repeated_headers,
+    summary_rows,
+)
+from datamate.ingestion.catalog import build_catalog, iter_rows
 from datamate.ingestion.readme_sales import load_readme_sales
 from test_ingestion_readme_sales import (
     FLAT_HEADER,
@@ -51,6 +56,22 @@ class DataVariantTests(_Shop):
         self.assertEqual(evidence["duplicates_removed"], 2)  # rows 25 and 50
         self.assertEqual(_totals(after), _totals(before))
         self.assertEqual(sum(s.amount for s in after), Decimal(1770000))
+
+    def test_repeated_headers_keep_every_sale_and_leave_the_original_file_intact(self):
+        rows = [FLAT_HEADER,
+                ["HD1", "05/01/2026", "Xong", "Cà phê", "2", "ly", "50000", "2", "An"],
+                ["", "", "", "Trà", "1", "ly", "20000", "1", ""]]
+        original = self.shop(FLAT_README, {"ban_hang.csv": rows})
+        source_path = self.data / "shop" / "ban_hang.csv"
+        source_bytes = source_path.read_bytes()
+        variant = self.data.parent / "variant"
+        self.assertTrue(repeated_headers(self.data / "shop", variant / "shop"))
+        changed = build_catalog(variant, "shop")
+        self.assertEqual(list(iter_rows(changed.tables[0]))[1], dict(zip(FLAT_HEADER, FLAT_HEADER)))
+        self.assertEqual(source_path.read_bytes(), source_bytes)
+        before, _, _ = load_readme_sales(original, RULEBOOK)
+        after, _, _ = load_readme_sales(changed, RULEBOOK)
+        self.assertEqual(after, before)
 
     def test_summary_rows_are_not_sales(self):
         rows = [FLAT_HEADER,

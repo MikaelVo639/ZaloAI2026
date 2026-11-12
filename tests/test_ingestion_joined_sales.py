@@ -131,6 +131,20 @@ class JoinedSalesTests(unittest.TestCase):
             catalog, mapping=mapping or self.mapping, rule_capabilities=rules or self.rules
         )
 
+    def test_repeated_headers_are_skipped_in_every_join_role(self):
+        paths = self._write_sources(details=[
+            ["O001", "01", "P001", "20", "2", "48", "case", "10", "0"],
+            ["O001", "02", "P001", "5", "1", "24", "case", "5", "0"],
+        ])
+        before, _ = self._load()
+        for path in paths:
+            with path.open(encoding="utf-8-sig", newline="") as stream:
+                header, *rows = csv.reader(stream)
+            self._write_csv(path.name, header, [rows[0], header, *rows[1:]])
+        after, evidence = self._load()
+        self.assertEqual(after, before)
+        self.assertEqual(evidence["counts"]["detail_rows_raw"], 2)
+
     def test_documented_customer_context_preserves_order_and_line_grain(self):
         self._write_sources(details=[
             ["O001", "01", "P001", "20", "2", "48", "case", "10", "0"],

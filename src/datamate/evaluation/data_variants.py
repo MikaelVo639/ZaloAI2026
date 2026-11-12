@@ -15,6 +15,7 @@ businesses it changed; ``<name>.answers.jsonl`` beside it holds their train refe
   ``## Cột trong …`` section: the columns are known only by their headers.
 - ``status_labels``: in every documented list with a status column, the returned state is
   written "Khách trả" and the delivering state "Đang ship" (labels written for the variant).
+- ``repeated_headers``: insert the original header halfway through CSV order and sales lists.
 
 Never point this at a public or private split.
 """
@@ -39,10 +40,11 @@ from datamate.ingestion.readme_sales import (
     parse_day,
     parse_sections,
 )
-from datamate.ingestion.source_names import filename_key
+from datamate.ingestion.sales import column_mapping
+from datamate.ingestion.source_names import filename_key, matches_source
 
 VARIANTS = ("monthly_files", "duplicate_orders", "summary_rows", "no_column_docs",
-            "status_labels")
+            "status_labels", "repeated_headers")
 STATUS_LABELS = {"tra hang": "Khách trả", "dang giao": "Đang ship"}
 DUPLICATE_EVERY = 25
 FAMILY_NOTE = "Các file `{template}` là dữ liệu chia theo tháng, mỗi tháng một file, cùng cột."
@@ -277,9 +279,44 @@ def status_labels(source: Path, destination: Path) -> bool:
     return True
 
 
+def repeated_headers(source: Path, destination: Path) -> bool:
+    """Insert a second CSV header without changing the source records or README."""
+    catalog = build_catalog(source.parent, source.name)
+    sections = parse_sections(catalog.readme)
+    required = {"order_id", "date", "status"}
+    rewritten = []
+    for table in catalog.tables:
+        if table.path.suffix.lower() != ".csv":
+            continue
+        documented = any(
+            matches_source(section.file, table.path.name)
+            and section.sheet in (None, table.name)
+            and required <= section.fields.keys()
+            for section in sections
+        )
+        if not documented and not required <= column_mapping(table.columns).keys():
+            continue
+        with table.path.open(encoding=table.encoding, newline="") as stream:
+            header, *rows = csv.reader(stream, delimiter=table.delimiter)
+        if len(rows) >= 2:
+            rows.insert(len(rows) // 2, header)
+            rewritten.append((table, header, rows))
+    if not rewritten:
+        return False
+    _link_tree(source, destination)
+    for table, header, rows in rewritten:
+        target = destination / table.path.relative_to(source)
+        target.unlink()
+        with target.open("x", encoding=table.encoding, newline="") as stream:
+            writer = csv.writer(stream, delimiter=table.delimiter)
+            writer.writerow(header)
+            writer.writerows(rows)
+    return True
+
+
 _BUILDERS = {"monthly_files": monthly_files, "duplicate_orders": duplicate_orders,
              "summary_rows": summary_rows, "no_column_docs": no_column_docs,
-             "status_labels": status_labels}
+             "status_labels": status_labels, "repeated_headers": repeated_headers}
 
 
 def build_variant(train: Path, output: Path, name: str) -> dict[str, Any]:

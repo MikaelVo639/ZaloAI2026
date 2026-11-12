@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from datamate.contracts import Catalog
-from datamate.ingestion.catalog import iter_rows
+from datamate.ingestion.catalog import iter_data_rows
 from datamate.semantics.text import fold
 
 ALIASES = {
@@ -177,7 +177,7 @@ def load_sales(catalog: Catalog) -> tuple[list[Sale], dict[str, Any]]:
     raw_count = summary_rows = 0
     for table, mapping in tables:
         carry: dict[str, Any] = {}
-        for raw in iter_rows(table):
+        for _, raw in iter_data_rows(table):
             raw_count += 1
             row = {key: raw.get(column) for key, column in mapping.items()}
             if not any(value not in (None, "") for value in row.values()):

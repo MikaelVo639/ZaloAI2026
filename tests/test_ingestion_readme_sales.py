@@ -21,7 +21,7 @@ from datamate.ingestion.readme_sales import (
     parse_quantity,
     parse_sections,
 )
-from datamate.ingestion.sales import Sale
+from datamate.ingestion.sales import Sale, load_sales
 
 RULEBOOK = """# Synthetic split rules
 | Luật | Mặc định |
@@ -410,6 +410,17 @@ class ConversionListTests(_Shop):
 
 
 class ReportReadmeTests(_Shop):
+    def test_repeat_of_a_header_below_xlsx_title_keeps_order_continuation(self):
+        header = [*FLAT_HEADER, None]
+        rows = [["Export at 06:00"], header,
+                ["T01", "05/01/2026", "Xong", "Cà phê", 2, "ly", 50000, 2, "An"],
+                header, [None, None, None, "Trà", 1, "ly", 20000, 1, "An"]]
+        readme = FLAT_README.replace("ban_hang.csv", "report.xlsx")
+        catalog = self.shop(readme, {"report.xlsx": {"Sales": rows}})
+        sales, _, _ = load_readme_sales(catalog, RULEBOOK)
+        self.assertEqual([(sale.order_id, sale.amount) for sale in sales],
+                         [("T01", Decimal(50000)), ("T01", Decimal(20000))])
+
     def test_title_rows_monthly_sheets_blank_cells_and_conversions(self):
         orders = {
             "01.2026": [["Trạng thái đơn hàng", "Đặt hàng (Đã duyệt)"], [], REPORT_HEADER,
@@ -619,6 +630,17 @@ class InvoiceListTests(_Shop):
 
 
 class AdapterSelectionTests(_Shop):
+    def test_flat_sales_skips_full_header_but_rejects_a_header_like_status(self):
+        header = ["order_id", "order_date", "status", "product_name", "line_amount", ""]
+        rows = [header, ["A1", "2026-01-05", "completed", "Bánh", "1000", ""],
+                [f" {column} " if column else "" for column in header],
+                ["A2", "2026-01-06", "completed", "Trà", "2000", ""]]
+        sales, _ = load_sales(self.shop("", {"sales.csv": rows}))
+        self.assertEqual([sale.order_id for sale in sales], ["A1", "A2"])
+        rows.append(["A3", "2026-01-07", "status", "Trà", "2000", ""])
+        with self.assertRaisesRegex(ValueError, "Unknown status"):
+            load_sales(self.shop("", {"sales.csv": rows}))
+
     def test_flat_sales_get_documented_base_unit_without_changing_the_adapter(self):
         readme = """# Flat export
 ## Cột trong `sales.csv`

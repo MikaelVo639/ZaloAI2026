@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
 from datamate.contracts import Catalog, Table
-from datamate.ingestion.catalog import iter_rows
+from datamate.ingestion.catalog import iter_data_rows
 from datamate.ingestion.inventory import _sha256
 from datamate.ingestion.readme_sales import (
     joined_customer_sources,
@@ -470,7 +470,7 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
     status_counts: Counter[str] = Counter()
     header_total_parse_failures = 0
     summary_order_rows = 0
-    for row_ordinal, raw in enumerate(iter_rows(orders_table), 1):
+    for row_ordinal, raw in iter_data_rows(orders_table):
         if is_total_label(raw.get(mapping.orders.fields["order_id"])) and all(
                 _missing(raw.get(mapping.orders.fields[key])) for key in ("date", "status")):
             summary_order_rows += 1  # a total row written in the id column, not an order
@@ -554,7 +554,7 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
         status_counts[canonical_status] += 1
 
     products: dict[str, dict[str, Any]] = {}
-    for row_ordinal, raw in enumerate(iter_rows(products_table), 1):
+    for row_ordinal, raw in iter_data_rows(products_table):
         product_id = _identifier(
             raw.get(mapping.products.fields["product_id"]), field_name="product_id",
             source=mapping.products.source, row_ordinal=row_ordinal,
@@ -580,7 +580,7 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
     seen_line_keys: dict[tuple[str, str], tuple[str, ...]] = {}
     skipped_ordinals: set[int] = set()
     detail_order_ids: set[str] = set()
-    for row_ordinal, raw in enumerate(iter_rows(details_table), 1):
+    for row_ordinal, raw in iter_data_rows(details_table):
         raw_detail_rows += 1
         try:
             order_id = _identifier(
@@ -640,7 +640,7 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
     service_fee_rows = 0
     line_amounts_by_order: dict[str, Decimal] = {}
     service_names = {fold(value) for value in rule_capabilities.service_fee_names}
-    for row_ordinal, raw in enumerate(iter_rows(details_table), 1):
+    for row_ordinal, raw in iter_data_rows(details_table):
         if row_ordinal in skipped_ordinals:
             continue
         order_id = str(raw[mapping.details.fields["order_id"]])

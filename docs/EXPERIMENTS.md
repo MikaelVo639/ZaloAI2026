@@ -1115,3 +1115,16 @@ Lượt train đủ 3.000 câu chạy thành bốn nhóm theo cửa hàng, dùng
 rulebook, calendar và cấu hình với đối chứng. Sau khi ghép, tất cả kết
 quả trùng theo ID. Scorer local proxy ghi 2.949 đúng, 1 sai và 50 abstain.
 Cả train và public đều có 0 lỗi thực thi.
+
+## Dòng tiêu đề lặp trong CSV/XLSX
+
+Bộ đọc bán hàng và công nợ bỏ qua dòng lặp nguyên tiêu đề trước khi xác định
+trạng thái, khóa nối hoặc ô kế thừa. Số thứ tự dòng trong bằng chứng nguồn
+vẫn giữ nguyên. Fixture tự soạn bao phủ bán hàng phẳng, XLSX có dòng tiêu đề
+bên dưới nhan đề, ghép đơn với chi tiết và hàng hóa, và công nợ. Dòng chỉ
+trùng một ô tiêu đề vẫn được kiểm tra như dữ liệu.
+
+Theo scorer **LOCAL PROXY**, biến thể train `repeated_headers` chèn lại
+nguyên tiêu đề CSV cho 514 câu. Hai lượt có cùng 513 đúng, 1 sai và 0
+`abstain`, với 0 kết quả thay đổi. Train đủ 3.000 câu có 2.984 đúng, 1 sai,
+15 `abstain` và 0 kết quả thay đổi theo ID so với `3e9d372`.

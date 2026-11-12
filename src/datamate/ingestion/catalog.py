@@ -6,7 +6,7 @@ import sqlite3
 from contextlib import closing
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from datamate.contracts import Catalog, Table
 from datamate.io import contained_path
@@ -72,6 +72,31 @@ def iter_rows(table: Table) -> Iterator[dict[str, Any]]:
             cursor = connection.execute(f"SELECT * FROM {quote_identifier(table.name)}")
             for values in cursor:
                 yield dict(zip(table.columns, values))
+
+
+def is_repeated_header(columns: Iterable[str], values: Iterable[Any]) -> bool:
+    """Match the full header of a file export, including any empty header cells."""
+    named = 0
+    for index, (column, value) in enumerate(itertools.zip_longest(columns, values)):
+        if not column or column == f"_empty_{index}":
+            if value is not None and (not isinstance(value, str) or value.strip()):
+                return False
+        elif isinstance(value, str) and value.strip() == column:
+            named += 1
+        else:
+            return False
+    return named >= 2
+
+
+def iter_data_rows(table: Table) -> Iterator[tuple[int, dict[str, Any]]]:
+    """Read an export's records while retaining their original ordinals for lineage."""
+    rows = enumerate(iter_rows(table), 1)
+    if table.path.suffix.lower() not in {".csv", ".xlsx"}:
+        yield from rows
+        return
+    for ordinal, row in rows:
+        if not is_repeated_header(table.columns, map(row.get, table.columns)):
+            yield ordinal, row
 
 
 def build_catalog(data_root: Path, business_id: str, sample_size: int = 3) -> Catalog:
