@@ -1,17 +1,20 @@
 """Robustness splits: rewrites keep numbers, dates and names; labels stay outside the split."""
 
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
 
-from datamate.evaluation.robustness import PERTURBATIONS, build_splits, perturb
+from datamate.evaluation.robustness import MODEL_PERTURBATIONS, PERTURBATIONS, build_splits, perturb
 
 
 class PerturbationTests(unittest.TestCase):
     def test_each_rewrite_keeps_the_numbers(self):
         question = "Doanh thu tháng 3/2025 của cửa hàng tăng hay giảm bao nhiêu % so với tháng trước?"
         for name in PERTURBATIONS:
+            if name == "clause_order":
+                continue  # multiple periods are deliberately ineligible
             with self.subTest(name=name):
                 rewritten = perturb(name, question, f"{name}:q1")
                 self.assertIsNotNone(rewritten)
@@ -19,6 +22,25 @@ class PerturbationTests(unittest.TestCase):
                 year = "/25" if name == "short_year" else "2025"
                 for number in ("3", year):
                     self.assertIn(number, rewritten)
+
+    def test_model_variants_keep_period_amount_and_exact_product_name(self):
+        question = "Tháng 4/2026 doanh thu của Trà đồi Sương 12 gói là bao nhiêu?"
+        for name in MODEL_PERTURBATIONS:
+            with self.subTest(name=name):
+                changed = perturb(name, question, "synthetic")
+                self.assertIsNotNone(changed)
+                self.assertIn("Trà đồi Sương 12 gói", changed)
+                self.assertRegex(changed, r"[Tt]háng 4/2026")
+                self.assertCountEqual(re.findall(r"\d+", question), re.findall(r"\d+", changed))
+                self.assertEqual(changed, perturb(name, question, "synthetic"))
+
+    def test_clause_order_leaves_multiple_periods_alone(self):
+        comparison = "Tháng 4/2026 doanh thu tăng bao nhiêu so với tháng 3/2026?"
+        sequence = "Tháng 4/2026 và tháng 5/2026 doanh thu lần lượt là bao nhiêu?"
+        for question in (comparison, sequence):
+            self.assertIsNone(perturb("clause_order", question, "synthetic"))
+        self.assertEqual(perturb("clause_order", "Doanh thu trong tháng 4/2026?", "synthetic"),
+                         "tháng 4/2026, Doanh thu?")
 
     def test_short_year_and_chat_style(self):
         self.assertRegex(perturb("short_year", "Doanh thu tháng 3/2025?", "k"),

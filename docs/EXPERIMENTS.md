@@ -1148,3 +1148,55 @@ lợi nhuận về đúng kết quả của train gốc. Việc mô tả lại c
 
 Train đầy đủ theo **LOCAL PROXY** có 2.984 đúng, 1 sai và 15 `abstain`, với
 0 kết quả thay đổi theo ID so với `3e9d372`.
+
+## Bộ đo rewrite trên train
+
+`scripts/model_benchmark.py build` lấy các câu có đáp án cụ thể đúng trong
+baseline train và giữ biến thể mà bộ lập kế hoạch baseline bỏ qua. Các kiểu
+biến thể gồm đổi vị trí một kỳ tháng độc lập, diễn đạt lại phép đo ở đầu
+câu, thêm lời dẫn và kết hợp các kiểu trên. Mỗi câu gốc chỉ xuất hiện một
+lần. Việc lấy mẫu luân phiên theo kiểu biến thể, intent và doanh nghiệp.
+`score` chạy dự đoán trên thư mục `split` rồi mới đọc đáp án ở thư mục
+cha để ghi số đúng, sai, bỏ qua và ID sai theo **LOCAL PROXY**.
+
+### Chạy trên Colab L4
+
+Sau khi cài bundle, giải nén train, tải snapshot model vào đúng vị trí
+`configs/rewrite.toml` và mount Drive, chạy cell sau.
+
+```bash
+%%bash
+set -euo pipefail
+cd /content/ZaloAI2026
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+stamp=$(date +%Y%m%d-%H%M%S)
+ref="outputs/runs/train-ref-$stamp"
+bench="outputs/model-bench/train-$stamp"
+run="outputs/model-bench/rewrite-$stamp"
+dest="/content/drive/MyDrive/datamate-colab/results/model-benchmark-$stamp"
+uv run --offline --no-sync datamate predict --config configs/baseline.toml \
+  --data-dir data/raw/train --output-dir "$ref"
+uv run --offline --no-sync python scripts/model_benchmark.py build \
+  --data-dir data/raw/train --original "$ref/submission.jsonl" --output-dir "$bench"
+uv run --offline --no-sync python scripts/model_benchmark.py score \
+  --bench "$bench" --config configs/rewrite.toml --output-dir "$run"
+mkdir -p "$dest"
+cp "$bench/build.json" "$bench/cases.jsonl" "$dest/"
+cp -R "$run" "$dest/rewrite"
+```
+
+### Kết quả train tại mốc a900351
+
+Hai lần dựng độc lập tạo cùng câu hỏi, đáp án và danh sách ca theo byte.
+Tập có 480 câu từ 29 doanh nghiệp, phủ 36 intent. Baseline trên tập này
+đạt 0 đúng, 0 sai và 480 `abstain` theo **LOCAL PROXY**.
+
+| Biến thể | Áp dụng | Mất kế hoạch | Được chọn |
+|---|---:|---:|---:|
+| `clause_order` | 434 | 17 | 17 |
+| `paraphrase` | 231 | 231 | 155 |
+| `verbose_chat` | 2.921 | 2.921 | 154 |
+| `combo` | 2.921 | 2.921 | 154 |
+
+Train gốc đủ 3.000 câu đạt 2.984 đúng, 1 sai và 15 `abstain`, với 0 đáp án
+thay đổi theo ID. Tập biến thể đã sẵn sàng để đo model thật trên L4.

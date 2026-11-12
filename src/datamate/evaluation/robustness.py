@@ -19,8 +19,10 @@ import unicodedata
 from pathlib import Path
 from typing import Callable
 
+MODEL_PERTURBATIONS = ("clause_order", "paraphrase", "verbose_chat", "combo")
+
 PERTURBATIONS = ("unaccented", "month_abbreviation", "particle", "synonym", "transposition",
-                 "short_year", "chat_style", "store_word", "greeting", "chat_typos")
+                 "short_year", "chat_style", "store_word", "greeting", "chat_typos", *MODEL_PERTURBATIONS)
 
 
 def _choice(key: str, options: tuple[str, ...]) -> str:
@@ -197,6 +199,63 @@ def _chat_typos(text: str, key: str) -> str | None:
     return result
 
 
+_EXPLICIT_MONTH = r"tháng\s+(?:0?[1-9]|1[0-2])\s*/\s*20\d{2}"
+_LEADING_MONTH = re.compile(rf"^({_EXPLICIT_MONTH})(?:,\s*|\s+)(.+)$", re.I)
+_TRAILING_MONTH = re.compile(rf"^(.+?)\s+(?:trong\s+)?({_EXPLICIT_MONTH})([?.!]*)$", re.I)
+_OTHER_PERIOD = re.compile(
+    r"\b(?:tháng|quý|tuần|năm|ngày|Tết|hôm|so với|lần lượt|kỳ|từ|đến)\b|\d\s*[/.-]\s*\d",
+    re.I,
+)
+
+
+def _clause_order(text: str, key: str) -> str | None:
+    """Move a single explicit month as a unit. Leave comparisons and sequences alone."""
+    leading = _LEADING_MONTH.fullmatch(text)
+    if leading and not _OTHER_PERIOD.search(leading[2]):
+        ending = _END.search(leading[2])[1]
+        body = _END.sub("", leading[2])
+        return f"{body}, trong {leading[1]}{ending}"
+    trailing = _TRAILING_MONTH.fullmatch(text)
+    if trailing and not _OTHER_PERIOD.search(trailing[1]):
+        return f"{trailing[2]}, {trailing[1]}{trailing[3]}"
+    return None
+
+
+_PARAPHRASES = (
+    # A modifier of the same revenue measure. It does not imply cash collected or profit.
+    (re.compile(r"^doanh thu\b", re.I), "số doanh thu ghi nhận"),
+    # Arithmetic mean of the value of one order, keeping the unit and denominator.
+    (re.compile(r"^giá trị trung bình (một|mỗi) đơn\b", re.I),
+     r"giá trị bình quân tính cho \1 đơn"),
+)
+
+
+def _paraphrase(text: str, key: str) -> str | None:
+    prefix = _LEADING_MONTH.fullmatch(text)
+    offset = prefix.start(2) if prefix else 0
+    for pattern, wording in _PARAPHRASES:
+        body, count = pattern.subn(wording, text[offset:], count=1)
+        if count:
+            return text[:offset] + body
+    return None
+
+
+_VERBOSE_OPENINGS = (
+    "Mình đang gom số liệu để hoàn tất báo cáo nội bộ. Nhờ tra giúp câu này: ",
+    "Mình cần đối chiếu số liệu trước khi chốt bản tổng hợp. Câu muốn hỏi là: ",
+)
+
+
+def _verbose_chat(text: str, key: str) -> str:
+    return _choice(key, _VERBOSE_OPENINGS) + text
+
+
+def _combo(text: str, key: str) -> str:
+    changed = _clause_order(text, key) or _paraphrase(text, key) or text
+    # The particle and context are optional conversational framing, with no new constraints.
+    return _verbose_chat(_particle(changed, key) or changed, key + ":combo")
+
+
 _FUNCTIONS: dict[str, Callable[[str, str], str | None]] = {
     "unaccented": _unaccented,
     "month_abbreviation": _month_abbreviation,
@@ -208,6 +267,10 @@ _FUNCTIONS: dict[str, Callable[[str, str], str | None]] = {
     "store_word": _store_word,
     "greeting": _greeting,
     "chat_typos": _chat_typos,
+    "clause_order": _clause_order,
+    "paraphrase": _paraphrase,
+    "verbose_chat": _verbose_chat,
+    "combo": _combo,
 }
 
 
