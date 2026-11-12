@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Callable
 
 PERTURBATIONS = ("unaccented", "month_abbreviation", "particle", "synonym", "transposition",
-                 "short_year", "chat_style")
+                 "short_year", "chat_style", "store_word", "greeting", "chat_typos")
 
 
 def _choice(key: str, options: tuple[str, ...]) -> str:
@@ -41,7 +41,8 @@ def _unaccented(text: str, key: str) -> str | None:
     return result if result != text else None
 
 
-_MONTH_YEAR = re.compile(r"\b[Tt]háng\s+(\d{1,2})\s*/\s*(\d{4})\b"
+# Not "3 tháng 4/2026, 5/2026, 6/2026": there "tháng" belongs to the count of months.
+_MONTH_YEAR = re.compile(r"(?<!\d )\b[Tt]háng\s+(\d{1,2})\s*/\s*(\d{4})\b"
                          r"|\b[Tt]háng\s+(\d{1,2})\s+năm\s+(\d{4})\b")
 _MONTH_STYLES = ("T{m}/{y}", "th{m}/{y}", "thg {m}/{y}", "{m}-{y}")
 
@@ -79,6 +80,7 @@ _SYNONYMS = (
     (re.compile(r"\bnăm nay\b", re.I), "năm ni"),
     (re.compile(r"\bhôm qua\b", re.I), "bữa qua"),
     (re.compile(r"\bmang về\b", re.I), "đem về"),
+    (re.compile(r"\btrung bình\b", re.I), "bình quân"),
 )
 
 
@@ -145,6 +147,56 @@ def _chat_style(text: str, key: str) -> str | None:
     return f"{_choice(key, _CALLS)} {first} rồi{ending}"
 
 
+# How a shop owner names the shop: replaces the question's own shop phrase, or follows
+# "doanh thu" when the question has none.
+_STORE_PHRASE = re.compile(r"\b(?:của cửa hàng|của shop|cửa hàng|shop)\b", re.I)
+_STORE_WORDS = ("của quán", "của tiệm", "quán mình", "tiệm mình", "bên mình", "shop mình")
+
+
+def _store_word(text: str, key: str) -> str | None:
+    word = _choice(key, _STORE_WORDS)
+    match = _STORE_PHRASE.search(text)
+    if match:
+        if not match.group().lower().startswith("của"):
+            word = word.removeprefix("của ")  # the subject: "tiệm bán", not "của tiệm bán"
+        result = text[:match.start()] + word + text[match.end():]
+    else:
+        result = re.sub(r"\b([Dd]oanh thu)\b", rf"\1 {word}", text, count=1)
+    return result if result != text else None
+
+
+# A greeting before and a thank-you after the question.
+_OPENINGS = ("Alo", "Cho em hỏi", "Chị ơi cho em hỏi", "Hello shop", "Dạ cho mình hỏi")
+_THANKS = ("", " cảm ơn", " thanks", " nha cảm ơn ạ")
+
+
+def _greeting(text: str, key: str) -> str | None:
+    body = _END.sub("", text)
+    ending = _END.search(text).group(1)
+    first = body[:1].lower() + body[1:]
+    return f"{_choice(key, _OPENINGS)} {first}{_choice(key + ':end', _THANKS)}{ending}"
+
+
+# Chat spellings of grammar words; at most two per question.
+_TYPOS = (
+    (re.compile(r"\bbao nhiêu\b"), "bao nhiu"), (re.compile(r"\btrong\b"), "trog"),
+    (re.compile(r"\bnhất\b"), "nhứt"), (re.compile(r"\bkhông\b"), "ko"),
+    (re.compile(r"\bđược\b"), "đc"), (re.compile(r"\bvậy\b"), "dza"),
+    (re.compile(r"\bdoanh thu\b", re.I), "dthu"), (re.compile(r"\btháng\b"), "thg"),
+)
+
+
+def _chat_typos(text: str, key: str) -> str | None:
+    present = [(p, r) for p, r in _TYPOS if p.search(text)]
+    if not present:
+        return None
+    start = int(hashlib.sha256(key.encode()).hexdigest(), 16) % len(present)
+    result = text
+    for pattern, replacement in (present[start:] + present[:start])[:2]:
+        result = pattern.sub(replacement, result)
+    return result
+
+
 _FUNCTIONS: dict[str, Callable[[str, str], str | None]] = {
     "unaccented": _unaccented,
     "month_abbreviation": _month_abbreviation,
@@ -153,6 +205,9 @@ _FUNCTIONS: dict[str, Callable[[str, str], str | None]] = {
     "transposition": _transposition,
     "short_year": _short_year,
     "chat_style": _chat_style,
+    "store_word": _store_word,
+    "greeting": _greeting,
+    "chat_typos": _chat_typos,
 }
 
 

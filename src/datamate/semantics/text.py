@@ -32,6 +32,9 @@ ABBREVIATIONS = {
     "mik": "minh", "mk": "minh", "kua": "cua", "dh": "don hang",
     # "giùm", "dùm", "jum" = "giúp".
     "gium": "giup", "dum": "giup", "jum": "giup",
+    # Chat spellings of grammar words: "trog", "dza". ("nhứt", "ko" only in context below:
+    # "Nhựt" is a person's name.)
+    "trog": "trong", "dza": "vay",
 }
 _TONE_KEYS = "sfrxj"
 
@@ -58,9 +61,17 @@ _TRANSPOSABLE = frozenset("""
 # Not "do", "luon", "rua", "ta": at the end they may be part of a name ("áo đỏ", "lươn",
 # "nước rửa") or a unit ("tạ").
 _CLOSING = re.compile(
-    r"(?:\s+(?:vay|day|dzay|zay|zi|z|v|a|ak|ah|ha|nhi|nha|nhe|nhen|hen|ne|di|the nhi|roi))+$")
+    r"(?:\s+(?:vay|day|dzay|zay|zi|z|v|a|ak|ah|ha|nhi|nha|nhe|nhen|hen|ne|di|the nhi|roi"
+    r"|cam on(?: nhieu)?|thanks?(?: you)?|tks|thx))+$")
 # Calling someone at the start of a question: "em ơi", "ad ơi", "ủa".
 _CALLING = re.compile(r"^(?:(?:(?:e|em|a|anh|chi|ad|admin|ban|be|shop) )?oi |(?:ui|ua|e{2,}) )+")
+# Greetings and "cho … hỏi" opening a question: "alo", "hello shop", "dạ cho em hỏi".
+# "dạ", "chào", "hi" only before whom they address: "Đá xay", "Cháo gà" are product names
+# and go through this normalisation too.
+_GREETING = re.compile(
+    r"^(?:(?:alo|a lo|hello|xin chao)(?: (?:shop|ad|admin|em|anh|chi|ban))? "
+    r"|(?:hi|chao|da) (?:(?:shop|ad|admin|em|anh|chi|ban) |(?=cho )))+")
+_ASKING = re.compile(r"^(?:cho (?:em|e|minh|toi|tui|chi|anh|con) hoi )+")
 # Month/year with a two-digit year: "12/25", "th 3/26". The data years 2020-2039 are all
 # above 12, so "1/26" cannot be a day and a month.
 _SHORT_YEAR = re.compile(r"(?<![\d/])(?:\b(?:thang|thg|th|t) ?)?(\d{1,2})/([23]\d)\b(?![\d/])")
@@ -85,7 +96,7 @@ def normalize_question(value: object) -> str:
     # fold() also drops "≥": "doanh thu ≥ 580.000 đồng", "mua ≥ 4 đơn" are the rulebook's
     # "từ N trở lên" (gồm N). "≤", "<", ">" stay unread, so those questions abstain.
     raw = re.sub(r"(?:≥|>=|⩾)\s*(\d[\d.,]*)\s*((?:đồng|dong|đ|vnđ|vnd|"
-                 r"(?:đơn|don|bill|order)(?: (?:hàng|hang))?(?: (?:khác|khac) nhau)?)(?!\w))?",
+                 r"(?:đơn|don|đh|dh|bill|order)(?: (?:hàng|hang))?(?: (?:khác|khac) nhau)?)(?!\w))?",
                  lambda m: f" từ {m.group(1)} {m.group(2) or ''} trở lên ", raw, flags=re.I)
     # fold() also drops "-": "15-3-2026" / "3-2026" are the same dates as "15/3/2026" / "3/2026".
     raw = re.sub(r"(?<![\d/-])(\d{1,2})-(\d{1,2})-(\d{4})(?![\d/-])", r"\1/\2/\3", raw)
@@ -103,6 +114,7 @@ def normalize_question(value: object) -> str:
     text = re.sub(r"\btuan roi\b", "tuan truoc", text)
     text = _SHORT_YEAR.sub(lambda m: f"thang {int(m.group(1))}/20{m.group(2)}"
                            if 1 <= int(m.group(1)) <= 12 else m.group(), text)
+    text = re.sub(r"\bthg(?= \d)", "thang", text)  # "thg 3 năm 2026" before the line below
     # "tháng 8 năm 2025" / "quý 2 năm 2026" -> "tháng 8/2025" / "quý 2/2026"
     text = re.sub(r"\b(thang|quy) (\d{1,2}) nam (\d{4})\b", r"\1 \2/\3", text)
     # Month and quarter abbreviations: "T3/2025", "th3/2025", "thg 3/2025", "Q2/2026".
@@ -122,8 +134,29 @@ def normalize_question(value: object) -> str:
     text = re.sub(r"\b(?:cua hang|quan|tiem|shop) (?:minh|nha minh|em|toi|ta)\b", "cua hang",
                   text)
     # "tiệm" as the subject: "hôm nay tiệm bán được…".
-    text = re.sub(r"\btiem(?= (?:ban|co|dat|nhan|len|thu)\b)", "cua hang", text)
-    return _CLOSING.sub("", _CALLING.sub("", text))
+    text = re.sub(r"\btiem(?= (?:ban|co|dat|nhan|len|thu|nhap|bo ra)\b)", "cua hang", text)
+    # Owing the shop: "nợ quán", "công nợ với tiệm" ("quán" alone may be "quần" elsewhere).
+    text = re.sub(r"\b(no|voi) (?:quan|tiem)\b", r"\1 cua hang", text)
+    # "bên mình" is the shop speaking of itself.
+    text = re.sub(r"\bben (?:minh|em|toi)\b", "cua hang", text)
+    # The shop between the revenue word and "trung bình" adds nothing: "doanh thu (của) cửa
+    # hàng trung bình một đơn". Elsewhere it stays: "doanh thu được" would read "thu được"
+    # (money collected from debtors).
+    text = re.sub(r"\b(doanh thu|dthu) (?:cua )?cua hang (?=trung binh|binh quan)", r"\1 ",
+                  text)
+    # "bình quân một đơn" = "trung bình một đơn" (order value only: "giá nhập bình quân" is
+    # the quantity-weighted purchase price, its own grammar).
+    text = re.sub(r"\bbinh quan(?= (?:tren )?(?:mot|moi|1) (?:don|bill|order|hoa don)\b)"
+                  r"|(?<=\bgia tri )binh quan\b", "trung binh", text)
+    # "cao nhứt", "nhiều nhứt": southern "nhứt" after a comparison; "… ko" = "… không".
+    text = re.sub(r"\b(cao|nhieu|it|lon|thap|chay|nho|re|dat|tot|kem|manh|nhanh|tien|don|lan"
+                  r"|luong|gan|loi|han|nhiu|som|muon|lau) nhut\b",
+                  r"\1 nhat", text)
+    text = re.sub(r"\bko(?= (?:co|duoc|phai)\b)|\bko$", "khong", text)
+    for _ in range(3):  # greetings, calls and "cho em hỏi" may follow one another
+        text = _ASKING.sub("", _CALLING.sub("", _GREETING.sub("", text)))
+    text = _CLOSING.sub("", text)
+    return re.sub(r"\bla chi$", "la gi", text)  # "là chi z" -> "là chi" -> "là gì"
 
 
 def normalize_answer(value: str) -> str:

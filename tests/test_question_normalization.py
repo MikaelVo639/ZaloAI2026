@@ -90,6 +90,57 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(normalize_question("doanh thu quần"), "doanh thu quan")
 
 
+class EverydayWordingTests(unittest.TestCase):
+    """Wordings found with the train question variants (store_word, greeting, chat_typos)."""
+
+    def test_greetings_and_thanks_around_a_question(self):
+        expected = normalize_question("doanh thu tháng 3/2026 là bao nhiêu")
+        for text in ("Alo doanh thu tháng 3/2026 là bao nhiêu cảm ơn",
+                     "Hello shop doanh thu tháng 3/2026 là bao nhiêu thanks",
+                     "Dạ cho em hỏi doanh thu tháng 3/2026 là bao nhiêu nha cảm ơn ạ",
+                     "Chị ơi cho em hỏi doanh thu tháng 3/2026 là bao nhiêu"):
+            with self.subTest(text=text):
+                self.assertEqual(normalize_question(text), expected)
+
+    def test_names_that_look_like_greetings_stay(self):
+        self.assertEqual(normalize_question("Đá xay"), "da xay")
+        self.assertEqual(normalize_question("Cháo gà"), "chao ga")
+        self.assertEqual(normalize_question("Dạ cho mình hỏi doanh thu"), "doanh thu")
+        self.assertEqual(normalize_question("Chào shop doanh thu"), "doanh thu")
+
+    def test_revenue_of_the_shop_is_not_money_collected(self):
+        self.assertIn("doanh thu cua cua hang duoc",
+                      normalize_question("doanh thu của cửa hàng được bao nhiêu tiền"))
+
+    def test_chat_spellings_in_context_only(self):
+        self.assertEqual(normalize_question("dthu ngày nào cao nhứt trog thg 6 năm 2026"),
+                         "dthu ngay nao cao nhat trong thang 6/2026")
+        self.assertEqual(normalize_question("7 ngày gần nhứt bán bao nhiu dza"),
+                         "7 ngay gan nhat ban bao nhiu")
+        self.assertEqual(normalize_question("tháng 3 có tăng ko"), "thang 3 co tang khong")
+        # "Nhựt" is a name, "ko" inside a name stays.
+        self.assertEqual(normalize_question("khách Trần Minh Nhựt mua bao nhiêu"),
+                         "khach tran minh nhut mua bao nhieu")
+
+    def test_the_shop_named_by_the_owner(self):
+        self.assertEqual(normalize_question("doanh thu bên mình trung bình một đơn tháng 3"),
+                         normalize_question("doanh thu trung bình một đơn tháng 3"))
+        self.assertEqual(normalize_question("số khách còn nợ quán"),
+                         normalize_question("số khách còn nợ cửa hàng"))
+        # A bare "quán" may be "quần" (a product): left alone.
+        self.assertIn("quan ban", normalize_question("tháng này quán bán được bao nhiêu"))
+
+    def test_binh_quan_is_trung_binh_only_for_orders(self):
+        self.assertEqual(normalize_question("giá trị bình quân một đơn"),
+                         "gia tri trung binh mot don")
+        self.assertEqual(normalize_question("bình quân mỗi đơn"), "trung binh moi don")
+        self.assertIn("binh quan", normalize_question("giá nhập bình quân một thùng"))
+
+    def test_particle_after_la_chi(self):
+        self.assertEqual(normalize_question("top 5 hàng chạy nhất là chi nha"),
+                         "top 5 hang chay nhat la gi")
+
+
 class PlanTests(unittest.TestCase):
     def plan(self, text, today="2026-03-04"):
         rules = read_rules(rulebook())

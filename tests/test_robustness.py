@@ -28,6 +28,21 @@ class PerturbationTests(unittest.TestCase):
         self.assertRegex(rewritten, r"^(em ơi|ad ơi|shop ơi|ủa) cho mik hỏi doanh thu kua "
                                     r"cửa hàng rồi\?$")
 
+    def test_store_word_greeting_and_chat_typos(self):
+        self.assertRegex(perturb("store_word", "Tháng này cửa hàng bán được bao nhiêu?", "k"),
+                         r"^Tháng này (quán mình|tiệm mình|bên mình|shop mình|quán|tiệm) bán")
+        self.assertRegex(perturb("store_word", "Doanh thu tháng 3/2026?", "k"),
+                         r"^Doanh thu \S+( \S+)? tháng 3/2026\?$")
+        rewritten = perturb("greeting", "Doanh thu tháng 3/2026?", "k")
+        self.assertRegex(rewritten, r"^(Alo|Cho em hỏi|Chị ơi cho em hỏi|Hello shop|Dạ cho mình "
+                                    r"hỏi) doanh thu tháng 3/2026.*\?$")
+        typos = perturb("chat_typos", "Doanh thu tháng 3/2026 cao nhất là bao nhiêu?", "k")
+        self.assertNotEqual(typos, "Doanh thu tháng 3/2026 cao nhất là bao nhiêu?")
+        self.assertIn("3/2026", typos)
+        self.assertIsNone(perturb("chat_typos", "Top 3 khách?", "k"))
+        # "3 tháng 4/2026, 5/2026": "tháng" counts the months and stays.
+        self.assertIsNone(perturb("month_abbreviation", "3 tháng 4/2026, 5/2026", "k"))
+
     def test_month_abbreviation_styles(self):
         rewritten = perturb("month_abbreviation", "Doanh thu tháng 8 năm 2025?", "k")
         self.assertRegex(rewritten, r"^Doanh thu (T8/2025|th8/2025|thg 8/2025|8-2025)\?$")
