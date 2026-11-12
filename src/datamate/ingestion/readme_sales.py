@@ -41,6 +41,11 @@ from datamate.ingestion.sales import (
     parse_minute,
     price_per_base_unit,
 )
+from datamate.ingestion.header_schema import (
+    header_columns,
+    looks_like_sales_lines,
+    sales_list_name,
+)
 from datamate.ingestion.source_names import filename_key, is_family, matches_source
 from datamate.ingestion.status import StatusError, status_policy
 from datamate.semantics.rules import rule_line
@@ -330,6 +335,62 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
         if has_lines and has_orders:
             return sections
     return []
+
+
+# amount = unit price x quantity - line discount on most rows, and never more than price x
+# quantity on (almost) all: an unlisted discount may lower a line, nothing raises it.
+_EXACT_SHARE, _AT_MOST_SHARE = Decimal("0.90"), Decimal("0.99")
+_ARITHMETIC_ROWS = 2000
+
+
+def header_sections(catalog: Catalog, documented: list[Section]) -> list[Section]:
+    """Sales line lists the README leaves undescribed, described from their headers.
+
+    Only a list whose file or sheet name says "sales" (header_schema.sales_list_name), whose
+    headers name every needed field exactly once (header_columns), and whose rows check out
+    (_amounts_check_out) is described; the guessed "amount" is then the line amount after
+    discount, as the loader reads it. All or nothing: when one sales-named list cannot be
+    described, none is, since a missing month would silently shrink every total.
+    """
+    undocumented = [t for t in catalog.tables
+                    if not any(matches_source(s.file, t.path.name) and s.sheet in (None, t.name)
+                               for s in documented)]
+    sections = []
+    for table, header in _table_headers(undocumented):
+        if not (sales_list_name(table.path.name, table.name)
+                and looks_like_sales_lines(sorted(header))):
+            continue
+        columns = header_columns(sorted(header))
+        section = None if columns is None else Section(table.path.name, table.name, columns,
+                                                       origin="header")
+        if section is None or not _amounts_check_out(table, section):
+            return []
+        sections.append(section)
+    return sections
+
+
+def _amounts_check_out(table: Table, section: Section) -> bool:
+    fields = section.fields
+    if not {"unit_price", "quantity", "amount"} <= set(fields):
+        return False  # nothing to check the guessed amount against
+    checked = exact = at_most = 0
+    for _, raw in _records(table, section.columns):
+        try:
+            price = parse_amount(raw.get(fields["unit_price"]))
+            quantity = parse_quantity(raw.get(fields["quantity"]))
+            amount = parse_amount(raw.get(fields["amount"]))
+            discount = (Decimal(0) if "discount" not in fields
+                        or _blank(raw.get(fields["discount"]))
+                        else parse_amount(raw.get(fields["discount"])))
+        except (TypeError, ValueError, ArithmeticError):
+            continue
+        checked += 1
+        exact += abs(price * quantity - discount - amount) <= 1
+        at_most += amount <= price * quantity - discount + 1
+        if checked >= _ARITHMETIC_ROWS:
+            break
+    return (checked >= 20 and exact >= _EXACT_SHARE * checked
+            and at_most >= _AT_MOST_SHARE * checked)
 
 
 def sale_cost_column(readme: str, table: Table, header: set[str]) -> str | None:
@@ -720,6 +781,9 @@ def load_readme_sales(catalog: Catalog, rulebook: str
     """
     sections = parse_sections(catalog.readme)
     sections += profile_sections(catalog, sections)
+    if not any({"order_id", "amount"} <= set(s.fields) or "order_goods" in s.fields
+               for s in sections):
+        sections += header_sections(catalog, sections)
     if not sections:
         raise ReadmeSalesError("README_COLUMNS_MISSING", "README has no column descriptions")
     roles = _classify(sections, catalog)
@@ -1123,6 +1187,11 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
             catalog, roles, headers)
     if fee_rows and rules.service_fee is None:
         eligible = set()
+    if (any(s.origin == "header" for s in roles["lines"].sections)
+            and "product_id" not in line_fields):
+        # Header-guessed columns with product names only: no catalogue says which spellings
+        # are one product or breaks ties by code. Product rankings, counts and filters abstain.
+        evidence["product_identity"] = "names_unverified"
     return sales, evidence, frozenset(eligible)
 
 

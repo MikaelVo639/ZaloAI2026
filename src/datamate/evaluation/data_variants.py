@@ -11,6 +11,8 @@ businesses it changed; ``<name>.answers.jsonl`` beside it holds their train refe
   identical in every cell (an export duplicate the rulebook says to count once).
 - ``summary_rows``: every dated list with order ids gets a daily total row after each day,
   the label written in the order id column ("Tổng dd/mm"), no date, status or quantity.
+- ``no_column_docs``: the README keeps its file list and conventions but no
+  ``## Cột trong …`` section: the columns are known only by their headers.
 
 Never point this at a public or private split.
 """
@@ -37,7 +39,7 @@ from datamate.ingestion.readme_sales import (
 )
 from datamate.ingestion.source_names import filename_key
 
-VARIANTS = ("monthly_files", "duplicate_orders", "summary_rows")
+VARIANTS = ("monthly_files", "duplicate_orders", "summary_rows", "no_column_docs")
 DUPLICATE_EVERY = 25
 FAMILY_NOTE = "Các file `{template}` là dữ liệu chia theo tháng, mỗi tháng một file, cùng cột."
 
@@ -217,8 +219,26 @@ def summary_rows(source: Path, destination: Path) -> bool:
     return True
 
 
+def no_column_docs(source: Path, destination: Path) -> bool:
+    """Write ``destination`` as ``source`` without the README's column sections; False when
+    the README documents no columns."""
+    readme = (source / "README.md").read_text(encoding="utf-8-sig")
+    kept, skipping = [], False
+    for line in readme.splitlines():
+        if line.startswith("## "):
+            skipping = bool(re.match(r"##\s+Cột trong\b", line))
+        if not skipping:
+            kept.append(line)
+    if len(kept) == len(readme.splitlines()):
+        return False
+    _link_tree(source, destination)
+    (destination / "README.md").unlink()
+    (destination / "README.md").write_text("\n".join(kept) + "\n", encoding="utf-8")
+    return True
+
+
 _BUILDERS = {"monthly_files": monthly_files, "duplicate_orders": duplicate_orders,
-             "summary_rows": summary_rows}
+             "summary_rows": summary_rows, "no_column_docs": no_column_docs}
 
 
 def build_variant(train: Path, output: Path, name: str) -> dict[str, Any]:

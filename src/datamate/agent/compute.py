@@ -116,6 +116,18 @@ def daily_revenue(selected: list[Sale]) -> list[tuple[date, Decimal]]:
     return sorted(by_day.items(), key=lambda item: (-item[1], item[0]))
 
 
+PRODUCT_IDENTITY_INTENTS = frozenset({"top_products", "unsold_count", "top_gross_profit",
+                                      "quantity"})
+
+
+def _needs_product_identity(plan: Plan) -> bool:
+    """Plans whose answer depends on which rows are one product (rank, count, filter)."""
+    return (plan.intent in PRODUCT_IDENTITY_INTENTS
+            or any(f.field in ("product", "size") for f in plan.filters)
+            or (plan.threshold is not None and plan.threshold.subject == "product")
+            or plan.rank_by.startswith("mat_hang:"))
+
+
 def ranking_candidates(sales: list[Sale], eligible: frozenset[int] | None) -> list[Sale]:
     """Rows allowed into a product ranking (the joined adapter excludes service fees)."""
     if eligible is None:
@@ -767,6 +779,10 @@ def _answer_rule_rank(cache: dict[str, Any], catalog: Catalog, plan: Plan, ruleb
             if not prepared["ok"]:
                 return Candidate(reason=prepared["reason"], evidence=evidence)
             sales, source = cache["sales"]
+            if (spec.doi_tuong == "mat_hang"
+                    and source.get("product_identity") == "names_unverified"):
+                return Candidate(reason="Products known only by header-guessed names",
+                                 evidence=evidence)
             if spec.chi_tieu == "so_luong_quy_doi":
                 sales = ranking_candidates(sales, cache.get("ranking_eligible"))
             groups = sales_groups(spec, sales, plan.start, plan.end)
@@ -1588,6 +1604,10 @@ def _answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                                  "Kỳ hỏi nằm hoàn toàn trước ngày bắt đầu ghi bán hàng", evidence)
             return Candidate(reason="No sales in period; business coverage is not established",
                              evidence=evidence)
+    if source.get("product_identity") == "names_unverified" and _needs_product_identity(plan):
+        return Candidate(reason="Products known only by names in header-guessed columns; "
+                                "no catalogue tells which spellings are one product",
+                         evidence=evidence)
     needs_customer = plan.intent == "top_customers" or (
         plan.intent == "count_where" and plan.threshold is not None
         and plan.threshold.subject == "customer"
