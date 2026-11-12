@@ -1128,3 +1128,23 @@ Theo scorer **LOCAL PROXY**, biến thể train `repeated_headers` chèn lại
 nguyên tiêu đề CSV cho 514 câu. Hai lượt có cùng 513 đúng, 1 sai và 0
 `abstain`, với 0 kết quả thay đổi. Train đủ 3.000 câu có 2.984 đúng, 1 sai,
 15 `abstain` và 0 kết quả thay đổi theo ID so với `3e9d372`.
+
+## Giá vốn theo đơn vị bán và đơn vị cơ bản từ danh mục
+
+Bộ đọc lấy giá vốn từ quy ước README khi quy ước chỉ đúng một cột trong
+bảng bán hàng. Danh mục có mã, tên, nhóm và đơn vị cơ bản vẫn dùng được khi
+có thêm cột tồn kho. Fixture kiểm trường hợp quy ước chỉ hai cột giá vốn,
+thiếu quy ước và danh sách có cột nghiệp vụ nhập hàng.
+
+| Biến thể train | Câu | Đúng | Sai | `abstain` | Sai mới |
+|---|---:|---:|---:|---:|---:|
+| `catalogue_stock_column` | 354 | 354 | 0 | 0 | 0 |
+| `cost_convention_only` | 473 | 283 | 0 | 190 | 0 |
+
+Trên cùng hai biến thể, thay đổi khôi phục lần lượt 51 đáp án và 11 đáp án
+lợi nhuận về đúng kết quả của train gốc. Việc mô tả lại các bảng POS trong
+`cost_convention_only` cũng làm 181 câu từng đúng trên train gốc chuyển sang
+`abstain`, chủ yếu ở khâu đọc công nợ và ngày bán.
+
+Train đầy đủ theo **LOCAL PROXY** có 2.984 đúng, 1 sai và 15 `abstain`, với
+0 kết quả thay đổi theo ID so với `3e9d372`.

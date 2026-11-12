@@ -4,6 +4,7 @@ import unittest
 from decimal import Decimal
 
 from datamate.evaluation.data_variants import (
+    catalogue_stock_column,
     duplicate_orders,
     monthly_files,
     repeated_headers,
@@ -72,6 +73,33 @@ class DataVariantTests(_Shop):
         before, _, _ = load_readme_sales(original, RULEBOOK)
         after, _, _ = load_readme_sales(changed, RULEBOOK)
         self.assertEqual(after, before)
+
+    def test_catalogue_stock_column_keeps_the_documented_base_unit(self):
+        readme = FLAT_README + """
+## Cột trong `catalogue.csv`
+- **Mã**: mã hàng
+- **Hàng**: tên
+- **ĐV**: đơn vị cơ bản
+- **Loại**: nhóm hàng
+"""
+        files = {
+            "ban_hang.csv": [FLAT_HEADER,
+                             ["A1", "05/01/2026", "Xong", "Trà", 1, "hộp", 9000, 12, "An"]],
+            "catalogue.csv": [["Mã", "Hàng", "ĐV", "Loại"], ["SKU01", "Trà", "gói", "Đồ uống"]],
+        }
+        original = self.shop(readme, files)
+        variant = self.data.parent / "variant"
+        self.assertTrue(catalogue_stock_column(self.data / "shop", variant / "shop"))
+        before, _, _ = load_readme_sales(original, RULEBOOK)
+        after, _, _ = load_readme_sales(build_catalog(variant, "shop"), RULEBOOK)
+        self.assertEqual(after, before)
+        self.assertEqual(after[0].base_unit, "goi")
+
+        files["catalogue.csv"] = [[*files["catalogue.csv"][0], "Phiếu nhập"],
+                                  [*files["catalogue.csv"][1], "N001"]]
+        other = self.shop(readme + "- **Phiếu nhập**: mã phiếu nhập\n", files, business="receipt")
+        sales, _, _ = load_readme_sales(other, RULEBOOK)
+        self.assertIsNone(sales[0].base_unit)
 
     def test_summary_rows_are_not_sales(self):
         rows = [FLAT_HEADER,

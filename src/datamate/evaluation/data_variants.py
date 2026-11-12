@@ -16,6 +16,9 @@ businesses it changed; ``<name>.answers.jsonl`` beside it holds their train refe
 - ``status_labels``: in every documented list with a status column, the returned state is
   written "Khách trả" and the delivering state "Đang ship" (labels written for the variant).
 - ``repeated_headers``: insert the original header halfway through CSV order and sales lists.
+- ``cost_convention_only``: document the POS sales columns while leaving the selling cost
+  column described only by the README convention.
+- ``catalogue_stock_column``: add an empty, documented stock balance column to CSV catalogues.
 
 Never point this at a public or private split.
 """
@@ -35,16 +38,18 @@ from datamate.evaluation.robustness import _link_tree
 from datamate.ingestion.catalog import build_catalog
 from datamate.ingestion.readme_sales import (
     _classify,
+    _matching_tables,
     _records,
     parse_amount,
     parse_day,
     parse_sections,
+    profile_sections,
 )
 from datamate.ingestion.sales import column_mapping
 from datamate.ingestion.source_names import filename_key, matches_source
 
 VARIANTS = ("monthly_files", "duplicate_orders", "summary_rows", "no_column_docs",
-            "status_labels", "repeated_headers")
+            "status_labels", "repeated_headers", "cost_convention_only", "catalogue_stock_column")
 STATUS_LABELS = {"tra hang": "Khách trả", "dang giao": "Đang ship"}
 DUPLICATE_EVERY = 25
 FAMILY_NOTE = "Các file `{template}` là dữ liệu chia theo tháng, mỗi tháng một file, cùng cột."
@@ -314,9 +319,76 @@ def repeated_headers(source: Path, destination: Path) -> bool:
     return True
 
 
+def cost_convention_only(source: Path, destination: Path) -> bool:
+    """Describe the profiled columns explicitly, leaving cost in its original convention."""
+    catalog = build_catalog(source.parent, source.name)
+    if parse_sections(catalog.readme):
+        return False
+    sections = profile_sections(catalog, [])
+    if not any("unit_cost_at_sale" in section.fields for section in sections):
+        return False
+    blocks = []
+    for section in sections:
+        heading = f"## Cột trong `{section.file}`"
+        if section.sheet is not None:
+            heading += f", sheet `{section.sheet}`"
+        cost = section.fields.get("unit_cost_at_sale")
+        blocks.append("\n".join([heading, *(f"- **{column}**: {meaning}"
+                                             for column, meaning in section.columns.items()
+                                             if column != cost)]))
+    _link_tree(source, destination)
+    target = destination / "README.md"
+    target.unlink()
+    target.write_text(catalog.readme.rstrip() + "\n\n" + "\n\n".join(blocks) + "\n",
+                      encoding="utf-8")
+    return True
+
+
+def catalogue_stock_column(source: Path, destination: Path) -> bool:
+    """Add a documented stock column with no recorded values to a product catalogue."""
+    catalog = build_catalog(source.parent, source.name)
+    required = {"product_id", "base_unit", "product_group"}
+    column = "Tồn kiểm kê"
+    candidates = []
+    for section in parse_sections(catalog.readme):
+        fields = set(section.fields)
+        if not required <= fields or not fields & {"product_name", "name"}:
+            continue
+        if fields & {"_other", "order_id", "quantity", "amount", "date", "status"}:
+            continue
+        matches = _matching_tables(catalog, section)
+        if len(matches) == 1 and matches[0].path.suffix.lower() == ".csv" and section.sheet is None:
+            table = matches[0]
+            if column not in table.columns:
+                candidates.append((section, table))
+    if len(candidates) != 1:
+        return False
+    section, table = candidates[0]
+    heading = re.compile(rf"(?m)^(##\s+Cột trong\s+`{re.escape(section.file)}`[ \t]*)$")
+    readme, edits = heading.subn(lambda match: f"{match[1]}\n- **{column}**: tồn kho",
+                                 catalog.readme)
+    if edits != 1:
+        return False
+    _link_tree(source, destination)
+    target = destination / table.path.relative_to(source)
+    target.unlink()
+    with (table.path.open(encoding=table.encoding, newline="") as original,
+          target.open("x", encoding=table.encoding, newline="") as output):
+        reader = csv.reader(original, delimiter=table.delimiter)
+        writer = csv.writer(output, delimiter=table.delimiter)
+        writer.writerow([*next(reader), column])
+        writer.writerows([*row, ""] for row in reader)
+    target_readme = destination / "README.md"
+    target_readme.unlink()
+    target_readme.write_text(readme, encoding="utf-8")
+    return True
+
+
 _BUILDERS = {"monthly_files": monthly_files, "duplicate_orders": duplicate_orders,
              "summary_rows": summary_rows, "no_column_docs": no_column_docs,
-             "status_labels": status_labels, "repeated_headers": repeated_headers}
+             "status_labels": status_labels, "repeated_headers": repeated_headers,
+             "cost_convention_only": cost_convention_only,
+             "catalogue_stock_column": catalogue_stock_column}
 
 
 def build_variant(train: Path, output: Path, name: str) -> dict[str, Any]:

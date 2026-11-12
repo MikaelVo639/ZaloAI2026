@@ -393,8 +393,9 @@ def _amounts_check_out(table: Table, section: Section) -> bool:
             and at_most >= _AT_MOST_SHARE * checked)
 
 
-def sale_cost_column(readme: str, table: Table, header: set[str]) -> str | None:
-    """A cost column explicitly documented for one selling unit."""
+def sale_cost_column(readme: str, table: Table, header: set[str] | None = None) -> str | None:
+    """Find a unique column explicitly documented as the cost of one selling unit."""
+    candidates = set()
     for line in readme.splitlines():
         heading, separator, definition = line.partition(":")
         if not (separator and "gia von" in fold(heading)
@@ -406,9 +407,10 @@ def sale_cost_column(readme: str, table: Table, header: set[str]) -> str | None:
             source, sep, column = name.rpartition(".")
             if sep and source != table.name:
                 continue
-            if (column or name) in header:
-                return column or name
-    return None
+            candidates.add(column or name)
+    if candidates:
+        candidates.intersection_update(header if header is not None else _header_names(table))
+    return next(iter(candidates)) if len(candidates) == 1 else None
 
 
 def optional_sale_cost(value: Any) -> Decimal | None:
@@ -676,13 +678,26 @@ class _Role:
 _OPTIONAL_ROLES = frozenset({"customers"})
 
 
+def _catalogue_with_stock(section: Section, fields: set[str]) -> bool:
+    """A product catalogue can also carry a stock balance column."""
+    return (
+        {"product_id", "base_unit", "product_group"} <= fields
+        and bool(fields & {"name", "product_name"})
+        and not fields & {"order_id", "quantity", "amount", "date", "status", "big_unit", "factor"}
+        and all(fold(meaning).startswith("ton kho") for meaning in section.columns.values()
+                if meaning_field(meaning) == "_other")
+    )
+
+
 def _classify(sections: list[Section], catalog: Catalog) -> dict[str, _Role]:
     roles: dict[str, _Role] = {}
     for section in sections:
         fields = set(section.fields)
         if "_other" in fields:
-            continue
-        if {"big_unit", "factor"} <= fields:
+            if not _catalogue_with_stock(section, fields):
+                continue
+            role = "products"
+        elif {"big_unit", "factor"} <= fields:
             role = "conversions"
         elif {"order_id", "returned_quantity"} <= fields:
             role = "lots"
@@ -724,11 +739,15 @@ _BASE_PRICE_MEANINGS = {
 
 def _role_rows(
     entry: _Role, headers: dict[tuple[Path, str], set[str]] | None = None,
-    with_file: bool = False,
+    with_file: bool = False, *, sale_cost_readme: str = "",
 ) -> Iterator[tuple[str, int, dict[str, Any]]]:
     """``(sheet, ordinal, row)``; ``with_file`` adds the source file name as ``_file``."""
     for section, table in entry.tables:
         fields = section.fields
+        if sale_cost_readme and "unit_cost_at_sale" not in fields:
+            cost = sale_cost_column(sale_cost_readme, table)
+            if cost and cost not in section.columns:
+                fields["unit_cost_at_sale"] = cost
         key = (table.path, table.name)
         price_column = fields.get("unit_price", "")
         price_is_base = fold(section.columns.get(price_column, "")) in _BASE_PRICE_MEANINGS
@@ -983,7 +1002,9 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
     # repeats sheet names, so its records are qualified by file.
     several_files = len({table.path for _, table in roles["lines"].tables}) > 1
     count_keys = [k for k in ("quantity", "quantity_base") if k in line_fields]
-    for sheet, ordinal, row in _role_rows(roles["lines"], headers, with_file=True):
+    for sheet, ordinal, row in _role_rows(
+        roles["lines"], headers, with_file=True, sale_cost_readme=catalog.readme,
+    ):
         source_file = row.pop("_file")
         counts["line_rows_raw"] += 1
         if _summary_row(row, order_keys + count_keys):

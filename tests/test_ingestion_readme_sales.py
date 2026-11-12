@@ -243,6 +243,22 @@ class ParsingTests(unittest.TestCase):
 
 
 class FlatReadmeTests(_Shop):
+    def test_header_sales_uses_only_unambiguous_documented_selling_cost(self):
+        header = ["Mã bill", "Ngày", "Status", "Tên hàng", "SL", "ĐVT", "Đơn giá",
+                  "Thành tiền", "Chi phí dòng", "Chi phí dự kiến"]
+        rows = [header, *[[f"T{n}", "05/01/2026", "Xong", "Trà", 2, "ly", 10000,
+                           20000, 3000, 4000] for n in range(24)]]
+        definition = "- **Giá vốn**: **Chi phí dòng** là giá vốn một đơn vị bán.\n"
+        second = "- **Giá vốn**: **Chi phí dự kiến** là giá vốn một đơn vị bán.\n"
+        for label, readme, expected in (("unique", definition, Decimal(3000)),
+                                        ("ambiguous", definition + second, None),
+                                        ("undocumented", "", None)):
+            with self.subTest(label=label):
+                catalog = self.shop(readme, {"sales.csv": rows}, business=label)
+                sales, evidence, _ = load_readme_sales(catalog, RULEBOOK)
+                self.assertEqual(evidence["column_meanings"], ["header"])
+                self.assertEqual({sale.unit_cost_at_sale for sale in sales}, {expected})
+
     def test_zip_filename_encoding_preserves_sources_and_schema_meanings(self):
         from datamate.ingestion.schema_description import describe_schema
 
