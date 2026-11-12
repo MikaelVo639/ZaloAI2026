@@ -15,7 +15,7 @@ from typing import Any, Callable
 from datamate import __version__
 from datamate.agent.baseline import AbstainAgent, BaselineAgent
 from datamate.agent.local_plan import LocalPlanAgent
-from datamate.agent.rewrite import RewriteAgent
+from datamate.agent.rewrite import EXAMPLES, RewriteAgent
 from datamate.semantics.rule_spec import report as rule_spec_report
 from datamate.contracts import Agent, BusinessContext, Candidate
 from datamate.evaluation.validation import finalize
@@ -36,6 +36,7 @@ class Config:
     max_input_tokens: int = 8192
     max_new_tokens: int = 1024
     rewrite_retries: int = 1
+    rewrite_examples: int = 6
 
     def __post_init__(self) -> None:
         if self.backend not in ("baseline", "abstain", "local_plan", "rewrite"):
@@ -55,6 +56,8 @@ class Config:
                 raise ValueError(f"{name} must be a positive integer")
         if type(self.rewrite_retries) is not int or self.rewrite_retries not in (0, 1):
             raise ValueError("rewrite_retries must be 0 or 1")
+        if type(self.rewrite_examples) is not int or not 1 <= self.rewrite_examples <= len(EXAMPLES):
+            raise ValueError("rewrite_examples must be between 1 and the number of examples")
         if self.max_input_tokens + self.max_new_tokens > 32768:
             raise ValueError("Model context exceeds prototype limit")
 
@@ -80,7 +83,8 @@ def predict(data_dir: Path, output_dir: Path, config: Config,
         if config.backend in ("local_plan", "rewrite"):
             model_agent = LocalPlanAgent if config.backend == "local_plan" else RewriteAgent
             if config.backend == "rewrite":
-                timeouts["rewrite_retries"] = config.rewrite_retries
+                timeouts.update(rewrite_retries=config.rewrite_retries,
+                                examples=config.rewrite_examples)
             agent = model_agent(config.model_path, model_load_timeout=config.model_load_timeout,
                                 model_timeout=config.model_timeout,
                                 max_input_tokens=config.max_input_tokens,

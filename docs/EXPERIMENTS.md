@@ -1214,3 +1214,37 @@ lập cùng một kế hoạch. Log `evidence.rewrites` ghi từng lần gọi.
 định mỗi lần hỏi lại mất thêm khoảng một giây, 369 câu cần hỏi lại một
 hoặc cả hai lượt sẽ tốn thêm khoảng 6–12 phút trên bộ 1.000 câu. Ước lượng
 này cần được kiểm tra trên L4 bằng log thời gian từng lần gọi.
+
+## Ví dụ rewrite theo kế hoạch train
+
+Bộ kiểm chạy 78 cặp ví dụ tự soạn qua parser và bước kiểm an toàn.
+Các ví dụ phủ 36 intent và 69 dạng kế hoạch quan sát được trên train,
+phân theo phép so sánh, kiểu đầu ra, loại bộ lọc, đối tượng ngưỡng,
+top-k và chuỗi kỳ. Cấu hình rewrite chọn 10 ví dụ mỗi lượt.
+
+| Intent | Ví dụ | Intent | Ví dụ |
+|---|---:|---|---:|
+| `average_order` | 2 | `gross_profit` | 1 |
+| `avg_purchase_price` | 1 | `net_profit` | 1 |
+| `best_day` | 1 | `order_count` | 5 |
+| `cancel_count` | 1 | `out_of_stock_count` | 1 |
+| `cancel_rate` | 1 | `purchase_total` | 1 |
+| `count_where` | 5 | `quantity` | 4 |
+| `daily_sale_price` | 1 | `revenue` | 27 |
+| `debt_age_buckets` | 1 | `revenue_increasing` | 1 |
+| `debt_collected` | 1 | `stock` | 1 |
+| `debt_customer_count` | 1 | `stock_split` | 1 |
+| `debt_flow` | 1 | `stock_value` | 1 |
+| `debt_total` | 2 | `top_customers` | 3 |
+| `delivery_count` | 1 | `top_debt_customers` | 1 |
+| `earliest_expiry` | 1 | `top_gross_profit` | 1 |
+| `expiring_lot_cost` | 1 | `top_products` | 2 |
+| `expiring_lot_count` | 1 | `top_staff` | 1 |
+| `expiring_product_count` | 1 | `top_supplier` | 1 |
+| `expiring_products` | 1 | `unsold_count` | 1 |
+
+Kiểm tokenizer Qwen có sẵn trong cache với 3.000 câu train, 480 câu benchmark,
+78 câu tự soạn và cả hai thứ tự ví dụ. Dài nhất là 1.133 token cho prompt
+đầu, 1.264 token khi mô phỏng hỏi lại và 1.838 token với ca ép câu viết lại
+dài 300 ký tự. Ngân sách input là 4.096 token. Đây là kiểm tokenizer trên
+CPU, lần chạy model thật dùng cell Colab ở trên.

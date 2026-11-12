@@ -11,6 +11,7 @@ from datamate.agent.rewrite import (
     EXAMPLES,
     UNSURE,
     RewriteAgent,
+    _retry_messages,
     build_rewrite_messages,
     check_rewrite,
     numbers,
@@ -27,7 +28,7 @@ from datamate.semantics.planner import plan_question, unread_words
 from datamate.semantics.rules import read_rules
 
 # Invented catalogue entries used by EXAMPLES.
-NAMES = ("Bánh quy bơ", "Kẹo gừng hộp 10 gói")
+NAMES = ("Bánh quy bơ", "Kẹo gừng hộp 10 gói", "Trà mây tía")
 STANDARD = "Doanh thu tháng này là bao nhiêu?"
 UNPLANNED = "Doanh thu tháng này là bao nhiêu khúc ngó?"
 
@@ -166,6 +167,22 @@ class RewritePromptTests(unittest.TestCase):
         self.assertEqual(len(chosen), 3)
         self.assertIn("huỷ", chosen[0][1])
         self.assertEqual(chosen, select_examples("thang 2/2026 bi huy may don", 3))
+
+    def test_configured_prompt_keeps_ten_examples_on_retry(self):
+        config = Config.load(Path(__file__).resolve().parents[1] / "configs" / "rewrite.toml")
+        self.assertEqual(config.rewrite_examples, 10)
+        wording = "Tháng 7/2025 quầy thu được bao nhiêu tiền?"
+        examples = select_examples(wording, config.rewrite_examples)
+        for ordered in (examples, list(reversed(examples))):
+            prompt = build_rewrite_messages(wording, ordered)
+            self.assertEqual(len(_shots(prompt)), 11)
+            retry = _retry_messages(prompt, UNPLANNED, "khuc ngo")
+            self.assertEqual(retry[:2], prompt)
+            self.assertEqual(len(_shots(retry)), 11)
+            self.assertEqual(len(prompt), 2)
+            self.assertIn(UNSURE, retry[-1]["content"])
+        with self.assertRaisesRegex(ValueError, "rewrite_examples"):
+            Config(rewrite_examples=0)
 
     def test_prompt_has_question_and_examples_but_no_routing_ids(self):
         question = Question("secret-id", "secret-business", "dthu thang nay", date(2026, 8, 27))

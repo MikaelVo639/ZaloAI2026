@@ -15,3 +15,5 @@ max_input_tokens = 4096
 max_new_tokens = 128
 # Retry a safe restatement once when the deterministic grammar cannot plan it.
 rewrite_retries = 1
+# Number of closest examples sent in each vote.
+rewrite_examples = 10
