@@ -1,4 +1,6 @@
 import math
+import re
+from dataclasses import replace
 from datetime import date
 from typing import Any
 
@@ -17,6 +19,7 @@ from datamate.semantics.planner import (
     stock_question,
 )
 from datamate.semantics.rules import read_rules
+from datamate.semantics.text import fold, opening_cuts
 
 QUESTION_TIMEOUT_SECONDS = 30.0
 INGESTION_TIMEOUT_SECONDS = 300.0
@@ -80,6 +83,20 @@ class BaselineAgent:
                          f"Shop không ghi thông tin {attribute}", evidence)
 
     def _plan(self, question: Question, context: BusinessContext) -> Plan | None:
+        """Plan the question; failing that, the question without its small-talk opening."""
+        plan = self._plan_text(question, context)
+        if plan is not None or not _CUT_HINT.search(question.question):
+            return plan
+        labels = [label for values in self._vocabulary(context).values() for label in values]
+        names = tuple(fold(name) for name in [*self._product_names(context), *labels])
+        for rest in opening_cuts(question.question, names):
+            plan = self._plan_text(replace(question, question=rest), context)
+            if plan is not None:
+                opening = question.question[:question.question.rindex(rest)].strip()
+                return replace(plan, evidence=(*plan.evidence, f"Opening left out: {opening}"))
+        return None
+
+    def _plan_text(self, question: Question, context: BusinessContext) -> Plan | None:
         """Shared deterministic planning, including SEM-01's product-name retry."""
         if "rules" not in context.cache:
             context.cache["rules"] = read_rules(context.split.rulebook)
@@ -203,6 +220,9 @@ class BaselineAgent:
         context.cache[cache_key] = {"ok": False, "reason": reason, "evidence": evidence,
                                     "rulebook": rulebook}
         return Candidate(reason=reason, evidence=dict(evidence))
+
+
+_CUT_HINT = re.compile(r"[.!:]\s")
 
 
 def _failure_reason(step: str, result: WorkerResult) -> str:

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 from datamate.contracts import Question
 from datamate.demo import create_demo
@@ -22,8 +23,11 @@ class ModelBenchmarkTests(unittest.TestCase):
             predict(train, ref, Config())
             prediction_file = ref / "submission.jsonl"
             left, right = root / "left", root / "right"
-            report = build(train, prediction_file, left, limit=8)
-            self.assertEqual(build(train, prediction_file, right, limit=8, workers=2), report)
+            # The grammar now reads every demo variant (small-talk openings are cut), so the
+            # selection is exercised with the cut turned off; workers=1 keeps the patch.
+            with patch("datamate.agent.baseline.opening_cuts", return_value=[]):
+                report = build(train, prediction_file, left, limit=8)
+                self.assertEqual(build(train, prediction_file, right, limit=8), report)
             self.assertEqual(report["questions"], 8)
             for relative in ("split/questions.jsonl", "answers.jsonl", "cases.jsonl", "build.json"):
                 self.assertEqual((left / relative).read_bytes(), (right / relative).read_bytes())
@@ -31,10 +35,15 @@ class ModelBenchmarkTests(unittest.TestCase):
             ids = {row["id"] for row in read_jsonl(left / "split" / "questions.jsonl")}
             self.assertEqual(ids, {row["id"] for row in read_jsonl(left / "answers.jsonl")})
             results = score(left, Config(), root / "score")
-            self.assertEqual((results["correct"], results["wrong"], results["abstain"]), (0, 0, 8))
+            # Scored with the cut on, the baseline answers the selected variants itself.
+            self.assertEqual((results["correct"], results["wrong"], results["abstain"]), (8, 0, 0))
             self.assertEqual(results["wrong_ids"], [])
             with self.assertRaisesRegex(ValueError, "overwrite"):
                 build(train, prediction_file, left, limit=8)
+            # Parallel scanning gives the same result as one worker.
+            for workers in (1, 2):
+                with self.subTest(workers=workers), self.assertRaisesRegex(ValueError, "No correct"):
+                    build(train, prediction_file, root / f"none-{workers}", limit=8, workers=workers)
 
     def test_selection_reaches_rare_intents_before_repeating_common_ones(self):
         questions = [Question(str(n), f"shop-{n}", "sample", date(2026, 2, 3))

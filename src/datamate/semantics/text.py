@@ -106,8 +106,19 @@ def normalize_question(value: object) -> str:
     # stays: it may be a product ("quần").
     raw = re.sub(r"(?<!\w)(?:[Cc]ả )?(?:[Qq]uán|[Tt]iệm)(?= (?:bán|có|nhập|thu|đạt|nhận|chốt)\b)",
                  "cửa hàng", raw)
-    raw = re.sub(r"(?<!\w)(?:doanh thu|dthu) (?:của )?cả (?:quán|tiệm|shop|cửa hàng)(?!\w)",
-                 "tổng doanh thu", raw)
+    raw = re.sub(r"(?<!\w)(?:doanh thu|dthu) (?:của )?cả (?:quán|tiệm|shop|cửa hàng)"
+                 r"(?: (?:mình|nhà mình|em|tôi|ta))?(?!\w)", "tổng doanh thu", raw)
+    # "doanh thu tiệm mình được bao nhiêu": the shop owns the revenue, "được" stays with it.
+    raw = re.sub(r"(?<!\w)((?:[Dd]oanh thu|dthu) )(?:của )?(?:quán|tiệm|shop|bên)"
+                 r"(?: (?:mình|nhà mình|em|tôi|ta))?(?= (?:được|đươc|đc|dc|duoc)(?!\w))",
+                 r"\1của cửa hàng", raw)
+    # A month moved after the question ("…, trong tháng 3/2026?") reads as the leading period.
+    raw = re.sub(r"^(.+?),\s*trong\s+(tháng\s+\d{1,2}/\d{4})"
+                 r"((?:\s+(?:nhỉ|nhé|nha|vậy|hả|ạ|dậy|z|ha|á|nhá))?\s*[?.!]*)$", r"\2 \1\3", raw,
+                 flags=re.I)
+    # The shop as an object or subject: "thiếu tiền quán", "chi tiền cho quán", "quán còn …".
+    raw = re.sub(r"(?<!\w)(tiền|cho) (?:quán|tiệm)(?!\w)", r"\1 cửa hàng", raw)
+    raw = re.sub(r"(?<!\w)(?:[Qq]uán|[Tt]iệm)(?= còn(?!\w))", "cửa hàng", raw)
     raw = re.sub(r"(?<!\w)((?:[Dd]oanh thu|dthu) )(?:của )?(?:quán|tiệm|shop|bên)"
                  r"(?: (?:mình|nhà mình|em|tôi|ta))?(?!\w)"
                  # "doanh thu (của quán) được" must not become "thu được" (debt collected).
@@ -123,6 +134,17 @@ def normalize_question(value: object) -> str:
     text = re.sub(r"\bth (truoc|roi|nay|lien truoc)\b", r"thang \1", text)  # "th trước"
     text = re.sub(r"\b(thang|tuan) vua (?:roi|qua)\b", r"\1 truoc", text)
     text = re.sub(r"\bthang roi\b", "thang truoc", text)
+    # Same measure, other words: "(số) doanh thu ghi nhận", "bình quân" (not of purchases),
+    # "tính cho một đơn",
+    # "lên hay xuống", southern "nhứt".
+    text = re.sub(r"\b(?:so )?doanh thu ghi nhan\b", "doanh thu", text)
+    if not re.search(r"\bnhap\b", text):  # "giá nhập bình quân" is its own measure (§5)
+        text = re.sub(r"\bbinh quan\b", "trung binh", text)
+    text = re.sub(r"\btinh cho (mot|moi) don\b", r"\1 don", text)
+    text = re.sub(r"\blen hay xuong\b", "tang hay giam", text)
+    # "nhứt" after a measure word ("nhiều đơn hàng nhứt"); "Nhựt" alone is a name.
+    text = re.sub(r"\b((?:nhieu|it|cao|thap|chay|lon|nho|hot|dat|re|manh|tot|gioi|kem|lau|gan|moi|dong)"
+                  r"(?: \w+){0,2}) nhut\b", r"\1 nhat", text)
     # "tuần rồi" = "tuần trước", also when "rồi" would close the question.
     text = re.sub(r"\btuan roi\b", "tuan truoc", text)
     text = _SHORT_YEAR.sub(lambda m: f"thang {int(m.group(1))}/20{m.group(2)}"
@@ -181,3 +203,46 @@ def normalize_answer(value: str) -> str:
     value = unicodedata.normalize("NFC", value).lower()
     return " ".join("".join(c if c.isalnum() or c.isspace() else " "
                             for c in value).split())
+
+
+# ---------------------------------------------------------------- openings
+
+_CUT = re.compile(r"[.!:]\s+")
+# Words that carry a question or a condition. An opening holding any of them is part of the
+# question, never small talk ("So doanh thu … tháng này: mỗi bên bao nhiêu?"). Read with
+# accents when the opening has them: "gom số liệu" is not "gồm", "bản tổng hợp" not "bán".
+_KEPT_WORDS = (
+    "bao nhiêu|bn|bnhiu|nhiêu|nhiều|ít|nào|mấy|không|ko|gì|chưa|hay|liệt kê|so sánh|so với"
+    "|doanh thu|dthu|lời|lãi|nợ|tồn|nhập|bán|mua|trả|thu|chi|giá|tiền|đơn|khách|nhóm|kênh"
+    "|mặt hàng|sản phẩm|món|thuốc|ca|ngày|hôm|tuần|tháng|quý|năm|tết|riêng|trừ|loại|gồm"
+    "|kể cả|tính|ngoài|online|offline|trực tiếp|tại quầy|chuyển khoản|tiền mặt|thẻ|ví")
+_KEPT_ACCENTED = re.compile(rf"(?<!\w)(?:{_KEPT_WORDS})(?!\w)")
+_KEPT_FOLDED = re.compile(
+    rf"(?<!\w)(?:{'|'.join(sorted({fold(word) for word in _KEPT_WORDS.split('|')}))})(?!\w)")
+
+
+def _kept_opening(opening: str) -> bool:
+    lowered = opening.lower()
+    if lowered != fold(lowered):  # typed with accents
+        return bool(_KEPT_ACCENTED.search(lowered))
+    return bool(_KEPT_FOLDED.search(lowered))
+
+
+def opening_cuts(question: str, names: tuple[str, ...] = ()) -> list[str]:
+    """The question without its leading small talk, shortest cut first.
+
+    An opening is the text before a ". ", "! " or ": " that has no digit, no question
+    word, no measure, period or filter word and no catalogue name: "Mình đang gom số liệu
+    cho báo cáo nội bộ. Nhờ tra giúp câu này: …". Only for planning a question the grammar
+    cannot read whole; a cut that still does not plan is ignored."""
+    cuts = []
+    for match in _CUT.finditer(question):
+        opening, rest = question[:match.start()], question[match.end():].strip()
+        folded = fold(opening)
+        if re.search(r"\d", opening) or _kept_opening(opening):
+            break
+        if any(len(name) >= 4 and f" {name} " in f" {folded} " for name in names):
+            break
+        if len(rest.split()) >= 3:
+            cuts.append(rest)
+    return cuts

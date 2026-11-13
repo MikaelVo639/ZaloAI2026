@@ -147,9 +147,55 @@ class EverydayWordingTests(unittest.TestCase):
         self.assertEqual(normalize_question("bình quân mỗi đơn"), "trung binh moi don")
         self.assertIn("binh quan", normalize_question("giá nhập bình quân một thùng"))
 
+    def test_same_measure_in_other_words(self):
+        for wording, train in (
+                ("số doanh thu ghi nhận hôm qua", "doanh thu hôm qua"),
+                ("giá trị bình quân tính cho một đơn tháng 7/2026", "giá trị trung bình một đơn tháng 7/2026"),
+                ("bình quân mỗi ngày bán ra lên hay xuống bao nhiêu %",
+                 "trung bình mỗi ngày bán ra tăng hay giảm bao nhiêu %"),
+                ("khách nào mua nhiều đơn nhứt", "khách nào mua nhiều đơn nhất"),
+                ("Ca chiều tuần trước doanh thu tiệm mình được bao nhiêu?",
+                 "Ca chiều tuần trước doanh thu của cửa hàng được bao nhiêu?"),
+                ("chiếm bao nhiêu phần trăm doanh thu cả quán mình", "chiếm bao nhiêu phần trăm tổng doanh thu"),
+                ("thuốc kê đơn chiếm bao nhiêu % doanh thu, trong Tháng 1/2025?",
+                 "Tháng 1/2025 thuốc kê đơn chiếm bao nhiêu % doanh thu?"),
+                ("thuốc kê đơn bán được bao nhiêu, trong tháng 1/2025 hả?",
+                 "tháng 1/2025 thuốc kê đơn bán được bao nhiêu hả?"),
+                ("khách còn thiếu tiền quán", "khách còn thiếu tiền cửa hàng"),
+                ("khách chi nhiều tiền nhất cho tiệm", "khách chi nhiều tiền nhất cho cửa hàng"),
+                ("quán còn bao nhiêu khách nợ", "cửa hàng còn bao nhiêu khách nợ"),
+                ("nhân viên bán giỏi nhứt", "nhân viên bán giỏi nhất")):
+            with self.subTest(wording=wording):
+                self.assertEqual(normalize_question(wording), normalize_question(train))
+        # "So doanh thu …" compares; only "số doanh thu ghi nhận" is the revenue itself.
+        self.assertIn("so doanh thu", normalize_question("So doanh thu tháng này với tháng trước"))
+        self.assertIn("binh quan", normalize_question("giá nhập bình quân một thùng tháng 3"))
+
     def test_particle_after_la_chi(self):
         self.assertEqual(normalize_question("top 5 hàng chạy nhất là chi nha"),
                          "top 5 hang chay nhat la gi")
+
+
+class OpeningTests(unittest.TestCase):
+    def test_small_talk_before_the_question_is_cut(self):
+        from datamate.semantics.text import opening_cuts
+        question = ("Mình đang gom số liệu để hoàn tất báo cáo nội bộ. Nhờ tra giúp câu này: "
+                    "hôm qua doanh thu bao nhiêu?")
+        self.assertEqual(opening_cuts(question)[-1], "hôm qua doanh thu bao nhiêu?")
+        self.assertEqual(opening_cuts("minh dang lam bao cao. cho hoi: hom qua dthu bao nhieu")[-1],
+                         "hom qua dthu bao nhieu")
+
+    def test_an_opening_with_a_condition_or_number_is_kept(self):
+        from datamate.semantics.text import opening_cuts
+        for question in ("Chỉ tính đơn online. Hôm qua doanh thu bao nhiêu?",
+                         "So doanh thu tháng này: mỗi bên bao nhiêu?",
+                         "Từ ngày 16/03/2025 giá tăng. So 7 ngày kể từ đó với 7 ngày trước",
+                         "Khách hàng thân thiết thôi nhé. Hôm qua doanh thu bao nhiêu?",
+                         "Riêng Bánh quy bơ nha. Hôm qua bán được bao nhiêu?"):
+            with self.subTest(question=question):
+                self.assertEqual(opening_cuts(question), [])
+        self.assertEqual(opening_cuts("Xem giúp Bánh quy bơ nha. Hôm qua bán được mấy hộp?",
+                                      ("banh quy bo",)), [])
 
 
 class PlanTests(unittest.TestCase):
