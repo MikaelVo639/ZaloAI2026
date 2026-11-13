@@ -124,6 +124,9 @@ def normalize_question(value: object) -> str:
                  r"(?: (?:mình|nhà mình|em|tôi|ta))?(?!\w)"
                  # "doanh thu (của quán) được" must not become "thu được" (debt collected).
                  r"(?! (?:được|đươc|đc|dc|duoc|thu)(?!\w))", r"\1", raw)
+    # A small count written as a word before what it counts: "ba khách", "năm mặt hàng".
+    # Read with accents ("nam khách" may be male customers); "hai"/"ba" also unaccented.
+    raw = _COUNT_WORD.sub(lambda m: _COUNT_DIGITS[fold(m[1])], raw)
     raw = re.sub(r"(?<![\d/-])(\d{1,2})-(\d{1,2})-(\d{4})(?![\d/-])", r"\1/\2/\3", raw)
     raw = re.sub(r"(?<![\d/-])(\d{1,2})-(\d{4})(?![\d/-])", r"\1/\2", raw)
     tokens = [_untranspose(_untelex(token)) for token in fold(raw).split()]
@@ -193,11 +196,42 @@ def normalize_question(value: object) -> str:
                   r"|luong|gan|loi|han|nhiu|som|muon|lau) nhut\b",
                   r"\1 nhat", text)
     text = re.sub(r"\bko(?= (?:co|duoc|phai)\b)|\bko$", "khong", text)
+    text = _everyday_words(text)
     text = _standard_wording(text)
     for _ in range(3):  # greetings, calls and "cho em hỏi" may follow one another
         text = _ASKING.sub("", _CALLING.sub("", _GREETING.sub("", text)))
     text = _CLOSING.sub("", text)
     return re.sub(r"\bla chi$", "la gi", text)  # "là chi z" -> "là chi" -> "là gì"
+
+
+# ---------------------------------------------------------------- everyday words
+
+_COUNT_DIGITS = {"hai": "2", "ba": "3", "bon": "4", "nam": "5", "sau": "6", "bay": "7",
+                 "tam": "8", "chin": "9", "muoi": "10"}
+_COUNT_WORD = re.compile(
+    r"(?<!\w)(hai|ba|bốn|năm|sáu|bảy|tám|chín|mười|Hai|Ba|Bốn|Năm|Sáu|Bảy|Tám|Chín|Mười)"
+    r"(?= (?:mặt hàng|mat hang|khách|khach|sản phẩm|san pham|món|nhân viên|nhan vien|đơn|"
+    r"nhà cung cấp|lô|ngày|ngay|tuần|tuan)(?!\w))")
+# Same meaning, other words, measured on TRAIN questions with the word swapped (LOCAL PROXY).
+_EVERYDAY: tuple[tuple[str, str], ...] = (
+    (r"\bdoanh so\b", "doanh thu"),                     # "doanh số" = sales revenue
+    (r"\b(bao nhieu|bao nhiu|bnhiu|bn|nhieu|nhiu|may) dong\b", r"\1 tien"),
+    (r"\bhoa don\b(?! dien tu)", "don"),
+    (r"\bkh\b(?= [a-z])", "khach hang"),
+    (r"\bncc\b", "nha cung cap"),
+    (r"\bnv\b(?! ?\d)", "nhan vien"),
+    (r"\bban ra duoc\b", "ban duoc"),
+    (r"\b(cong|tinh) moi san pham\b", r"\1 moi mat hang"),
+    (r"\bcac san pham con lai\b", "cac mat hang con lai"),
+    (r"\b(tu (?:ngay )?\d{1,2}/\d{1,2}/\d{4}) toi\b", r"\1 den"),
+)
+_EVERYDAY_RULES = tuple((re.compile(pattern), repl) for pattern, repl in _EVERYDAY)
+
+
+def _everyday_words(text: str) -> str:
+    for pattern, repl in _EVERYDAY_RULES:
+        text = pattern.sub(repl, text)
+    return text
 
 
 # ---------------------------------------------------------------- standard wordings

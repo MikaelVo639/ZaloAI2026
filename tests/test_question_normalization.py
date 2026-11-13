@@ -244,6 +244,31 @@ class EverydayWordingTests(unittest.TestCase):
             with self.subTest(restated=restated):
                 self.assertEqual(normalize_question(restated), normalize_question(standard))
 
+    def test_everyday_words_read_as_the_grammar_words(self):
+        for everyday, usual in (
+                ("Doanh số tháng 3/2026 là bao nhiêu?", "Doanh thu tháng 3/2026 là bao nhiêu?"),
+                ("Hôm nay cửa hàng bán được bao nhiêu đồng?",
+                 "Hôm nay cửa hàng bán được bao nhiêu tiền?"),
+                ("Liệt kê ba khách chi tiêu nhiều nhất tháng 6/2025",
+                 "Liệt kê 3 khách chi tiêu nhiều nhất tháng 6/2025"),
+                ("Tháng 4/2025, năm khách nào chi tiêu nhiều nhất?",
+                 "Tháng 4/2025, 5 khách nào chi tiêu nhiều nhất?"),
+                ("Hôm qua cửa hàng có bao nhiêu hóa đơn?", "Hôm qua cửa hàng có bao nhiêu đơn?"),
+                ("Top 3 KH mua nhiều tiền nhất tháng 3/2026", "Top 3 khách hàng mua nhiều tiền nhất"
+                 " tháng 3/2026"),
+                ("NV mã NV003 tháng 12/2025 bán được bao nhiêu tiền",
+                 "Nhân viên mã NV003 tháng 12/2025 bán được bao nhiêu tiền"),
+                ("tiền nhập hàng từ NCC nào cao nhất", "tiền nhập hàng từ nhà cung cấp nào cao nhất"),
+                ("Hôm qua cửa hàng bán ra được mấy đơn?", "Hôm qua cửa hàng bán được mấy đơn?"),
+                ("từ 14/09/2026 tới hết 12/01/2027", "từ 14/09/2026 đến hết 12/01/2027")):
+            with self.subTest(everyday=everyday):
+                self.assertEqual(normalize_question(everyday), normalize_question(usual))
+        # Kept: an amount in đồng, male customers, a staff code, an e-invoice.
+        self.assertIn("500 000 dong", normalize_question("đơn từ 500.000 đồng trở lên"))
+        self.assertIn("khach nam", normalize_question("Khách nam mua bao nhiêu"))
+        self.assertIn("nv003", normalize_question("NV003 bán bao nhiêu"))
+        self.assertIn("hoa don dien tu", normalize_question("hóa đơn điện tử tháng này"))
+
     def test_telex_words(self):
         self.assertIn("tong tien nhap hang",
                       normalize_question("nhà cung cấp nào có tổng tiền nhaapj hàng lớn nhất"))
