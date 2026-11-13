@@ -208,6 +208,10 @@ def normalize_question(value: object) -> str:
 _P = (r"(?:thang \d{1,2}/\d{4}|quy \d/\d{4}|nam \d{4}|tuan (?:truoc|nay)|thang (?:nay|truoc)"
       r"|hom (?:nay|qua)|ngay \d{1,2}/\d{1,2}/\d{4}|\d+ ngay gan nhat)")
 _D = r"\d{1,2}/\d{1,2}/\d{4}"
+_UNIT = r"[a-z]+(?: \d[a-z0-9]*)?"
+_AGE_SNAPSHOT = r"((?:tinh )?den het (?:ngay )?" + _D + r")"
+_OLDER_ORDERS = (r"(?:(?:cac|nhung) )?don dat(?: hang)? (?:da |cach (?:do |day |den )?)?"
+                 r"hon (\d{1,4}) ngay (?:ma|nhung) (?:khach )?chua tra het")
 _ORDER = r"(?:don hang|don|hoa don)"
 # "kèm số tiền còn nợ (từng khách)", "mỗi người còn nợ bao nhiêu": the amounts and nothing
 # more ("… và hạn trả" asks a column the table does not have).
@@ -253,6 +257,19 @@ _STANDARD: tuple[tuple[str, str], ...] = (
     (r"\btop (\d+) san pham ban chay nhat\b", r"\1 mat hang ban chay nhat"),
     (r"\b(?:mat )?hang nao co (?:tong )?loi nhuan (cao|thap) nhat\b",
      r"hang nao co tong lai gop \1 nhat"),
+    # Weighted purchase price with an explicit purchase unit.
+    (r"^(" + _P + r") (?:cua hang )?nhap (.+?) (?:gia nhap )?(?:binh quan|trung binh) mot (" + _UNIT
+     + r") (?:la )?bao nhieu(?: tien)?$", r"\1 gia nhap binh quan mot \3 \2 la bao nhieu"),
+    (r"^(" + _P + r") (?:cua hang )?nhap (.+?) (?:binh quan|trung binh) (?:la |gia )?"
+     r"bao nhieu(?: tien)? mot (" + _UNIT + r")$", r"\1 gia nhap binh quan mot \3 \2 la bao nhieu"),
+    # Daily selling price; keep the sale cue, product and any explicit unit.
+    (r"^don gia ban ra (?:cua )?(.+?) ngay (" + _D
+     + r") la bao nhieu(?: tien)? mot (" + _UNIT + r")$",
+     r"ngay \2 \1 ban ra voi don gia bao nhieu tien mot \3"),
+    (r" (ban ra voi don gia bao nhieu(?: tien)? mot " + _UNIT + r") vao (ngay " + _D + r")$",
+     r" \1 \2"),
+    (r"^don gia (?:cua )?(.+?) ban ra vao ngay (" + _D + r") la bao nhieu$",
+     r"don gia ban ra \1 ngay \2 la bao nhieu"),
     # Purchases, stock value, deliveries.
     (r"\bcua hang bo ra tong cong bao nhieu tien nhap hang\b",
      "tong gia tri cac phieu nhap hang la bao nhieu"),
@@ -262,12 +279,31 @@ _STANDARD: tuple[tuple[str, str], ...] = (
      + r")(?: (?:tinh )?theo gia von)?\b", r"tien hang nam trong kho vao cuoi ngay \1 theo gia von"),
     (r"\bcua hang (?:da )?giao hang tong cong bao nhieu dot\b",
      "cua hang giao bao nhieu dot hang cho khach"),
+    (r"^(" + _P + r") xe tai (?:da )?giao hang tong cong bao nhieu dot$",
+     r"\1 cua hang giao bao nhieu dot hang cho khach"),
     (r"\bso luong dot giao hang trong (" + _P + r") la bao nhieu\b",
      r"\1 cua hang giao bao nhieu dot hang cho khach"),
     # Unsold items over a span of days.
     (r"\b(?:trong )?(?:khoang thoi gian |giai doan )?tu (?:ngay )?(" + _D + r") den (?:het )?(?:ngay )?("
      + _D + r") (?:cua hang )?(?:co )?(?:tong cong )?(?:bao nhieu|may) mat hang (?:bi )?e\b(?: han)?",
      r"tu ngay \1 den het ngay \2 co may mat hang e han"),
+    (r"^(?:trong )?(?:khoang thoi gian|giai doan) (?=tu (?:ngay )?" + _D + r"\b)", ""),
+    (r"(\b(?:mat hang|san pham)\b.*?)\b(?:khong|chua) ban (?:ra )?duoc(?: gi)?$",
+     r"\1khong ban duoc cai nao"),
+    (r"(\b(?:mat hang|san pham)\b.*?)\bchua ban (?:ra )?duoc cai nao$", r"\1khong ban duoc cai nao"),
+    (r"(\bmat hang e han )khong ai mua$", r"\1khong ai mua cai nao"),
+    # The expiry parser still checks the date range against the stated horizon.
+    (r"\b(bao nhieu mat hang) con ton (?:se|sap) het han(?= trong \d+ ngay toi\b)",
+     r"\1 con lo ton sap het han"),
+    (r"^(?:san pham|hang hoa) nao het han(?= .*\bma hien van con ton kho$)", "hang nao het han"),
+    # Stock with an explicit count unit and today's snapshot.
+    (r"^hom nay so luong ([a-z]+) (.+?) con ton tai trong kho luc cuoi ngay la bao nhieu$",
+     r"ton kho \2 cuoi ngay hom nay la bao nhieu \1"),
+    # A price change and the same two explicitly stated comparison windows.
+    (r"^so luong ?([a-z]+) (.+?) ban ra (trong \d+ ngay ke tu ngay " + _D + r") sau khi"
+     r"( tang gia len \d[\d ]*(?:d| dong) so voi \d+ ngay truoc do (?:thay doi|tang hay giam)"
+     r" bao nhieu phan tram)$", r"so \1 \2 ban ra \3\4"),
+    (r"\b(don(?: hang)? (?:duoc )?ban (?:qua|tren) )zalo ?/ ?oa\b", r"\1zalo oa"),
     # Revenue comparisons and shares.
     (r"\bdoanh thu (" + _P + r") so voi (" + _P + r") (?:tang hay giam|thay doi) bao nhieu "
      r"phan tram\b", r"doanh thu \1 thay doi bao nhieu phan tram so voi \2"),
@@ -293,6 +329,8 @@ _STANDARD: tuple[tuple[str, str], ...] = (
     (r"^doanh thu tu (thang \d{1,2}/\d{4}) den (thang \d{1,2}/\d{4}) co (?:luon cao hon thang "
      r"truoc|tang len moi thang|tang lien tuc) khong$",
      r"tu \1 den \2 doanh thu thang sau co luon cao hon thang truoc khong"),
+    (r"^doanh thu ban hang khong can don bac si (?:trong )?(" + _P + r") la bao nhieu$",
+     r"hang khong ke don \1 ban duoc tong cong bao nhieu tien"),
     # Net profit after every cost.
     (r"^lai rong (" + _P + r") sau khi tru het chi phi la bao nhieu$",
      r"loi nhuan rong \1 la bao nhieu"),
@@ -302,10 +340,11 @@ _STANDARD: tuple[tuple[str, str], ...] = (
     (r"\bco bao nhieu mat hang duoc mua tu (\d+) don(?: hang)? khac nhau tro len\b",
      r"co bao nhieu mat hang co mat o tu \1 don hang khac nhau tro len"),
     (r"\bhay dem so khach da mua tu (\d+) don tro len\b", r"co bao nhieu khach mua tu \1 don tro len"),
-    (r"\bco bao nhieu don hang co gia tri tu ([\d.]+ dong) tro len\b",
+    (r"\bco bao nhieu don hang co gia tri tu ((?:\d{1,3}(?: \d{3})+|\d+) dong) tro len\b",
      r"co bao nhieu don co doanh thu tu \1 tro len"),
     (r"\bso don (ca (?:sang|chieu|toi)) co bao nhieu " + _ORDER + r"\b", r"\1 co bao nhieu don hang"),
     (r"\bco bao nhieu hoa don bi huy\b", "co bao nhieu don bi huy"),
+    (r"\b(ca (?:sang|chieu)) co bao nhieu hoa don$", r"\1 co bao nhieu don"),
     # Cups of one size over every drink.
     (r"^(" + _P + r") (?:tong so luong ly size (\w+) ban duoc la bao nhieu|tong cong cua hang ban "
      r"duoc bao nhieu ly size (\w+)) (?:tinh|cong) tat ca cac (?:mat hang|mon)$",
@@ -325,6 +364,17 @@ _STANDARD: tuple[tuple[str, str], ...] = (
      r"|phan tuoi no con lai thanh 3 nhom) 0 7 ngay 8 15 ngay(?: va)? tren 15 ngay"
      r"(?: (?:la bao nhieu|moi nhom (?:co tong tien )?(?:la )?bao nhieu(?: tien)?))?$",
      r"tinh den het ngay \1 khach con no bao nhieu theo nhom tuoi no 0 7 ngay 8 15 ngay va tren 15 ngay"),
+    (r"^tuoi no (?:cua )?khach den het ngay (" + _D + r") so tien con no cua (?:tung )?nhom "
+     r"0 7 ngay 8 15 ngay(?: va)? tren 15 ngay lan luot la bao nhieu$",
+     r"tinh den het ngay \1 khach con no bao nhieu theo nhom tuoi no 0 7 ngay 8 15 ngay va tren 15 ngay"),
+    (r"^" + _AGE_SNAPSHOT + r" (?:cac )?khoan no co tuoi lon hon (\d{1,4}) ngay con bao nhieu tien$",
+     r"\1 khach con no qua \2 ngay tong cong bao nhieu tien"),
+    (r"^" + _AGE_SNAPSHOT + r" khach(?: hang)? con no cua hang tong cong bao nhieu tien vi "
+     + _OLDER_ORDERS + r"$", r"\1 khach chua tra het con no qua \2 ngay tong cong bao nhieu tien"),
+    (r"^" + _AGE_SNAPSHOT + r" " + _OLDER_ORDERS + r" (?:cong )?no tong cong (?:la )?bao nhieu$",
+     r"\1 khach chua tra het con no qua \2 ngay tong cong bao nhieu tien"),
+    (r"^" + _OLDER_ORDERS + r" (?:cong )?no tong cong (?:la )?bao nhieu " + _AGE_SNAPSHOT + r"$",
+     r"\2 khach chua tra het con no qua \1 ngay tong cong bao nhieu tien"),
     (r"^\b(doanh thu (?:cua hang )?)?(" + _P + r") tu (?:viec )?khach tra no la bao nhieu$",
      r"\2 cua hang thu duoc bao nhieu tien khach tra no"),
 )

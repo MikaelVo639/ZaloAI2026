@@ -4,8 +4,9 @@ from datetime import date
 from test_ingestion_readme_sales import REPORT_HEADER, REPORT_README, RULEBOOK, _Shop
 from test_semantics_periods import rulebook
 
+from datamate.agent.baseline import BaselineAgent
 from datamate.agent.compute import answer_plan
-from datamate.contracts import Question
+from datamate.contracts import BusinessContext, Question, Split
 from datamate.semantics.planner import plan_question
 from datamate.semantics.rules import read_rules
 
@@ -80,6 +81,18 @@ class DailySalePriceTests(_Shop):
         catalog = self.shop(readme, sources, business="base_price")
         plan = self.plan("Giá bán một gói Bánh quy mè ngày 05/01/2026 là bao nhiêu?")
         candidate = answer_plan({}, catalog, plan, RULEBOOK + PRICE_RULE)
+        self.assertEqual((candidate.type, candidate.answer), ("number", 100))
+
+        question = Question("example", catalog.business_id,
+                            "Đơn giá Bánh quy mè ngày 05/01/2026 là bao nhiêu?",
+                            date(2026, 2, 1))
+        root = catalog.tables[0].path.parent
+        split = Split(root, (question,), RULEBOOK + PRICE_RULE, root / "calendar.csv")
+        agent = BaselineAgent()
+        self.addCleanup(agent.close)
+        context = BusinessContext(split, catalog)
+        self.assertEqual(agent._plan(question, context).unit, "goi")
+        candidate = agent.answer(question, context)
         self.assertEqual((candidate.type, candidate.answer), ("number", 100))
 
     def test_explicit_top_k_after_a_month(self):

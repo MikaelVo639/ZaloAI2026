@@ -41,7 +41,7 @@ from datamate.contracts import (
 )
 from datamate.ingestion.business_measures import load_deliveries, load_expenses
 from datamate.ingestion.debt import DebtSourceError, _coverage_day, load_debt_ledger
-from datamate.ingestion.drugs import Drug, ingredient_key, load_drugs
+from datamate.ingestion.drugs import Drug, DrugCatalog, ingredient_key, load_drugs
 from datamate.ingestion.expiry import load_lots
 from datamate.ingestion.purchases import (
     PurchaseLine,
@@ -317,6 +317,20 @@ def vocabulary(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -> d
         result[f"{kind}_terms"] = label_terms(labels, field_meanings(catalog.readme, attribute),
                                               kind)
     return result
+
+
+def rewrite_identity_names(cache: dict[str, Any], catalog: Catalog, rulebook: str) -> list[str]:
+    """Names absent from the product and group vocabularies used by the planner."""
+    names = set()
+    if prepare_sales(cache, catalog, rulebook)["ok"]:
+        sales, _ = cache["sales"]
+        names.update(s.customer_name for s in sales if s.customer_name)
+    if prepare_debt(cache, catalog, rulebook)["ok"]:
+        names.update(order.customer_name for order in cache["debt"].orders if order.customer_name)
+    drugs = _drug_catalog(cache, catalog)
+    if not isinstance(drugs, ValueError):
+        names.update(drug.ingredient for drug in drugs.products.values() if drug.ingredient)
+    return sorted(names)
 
 
 def price_history(cache: dict[str, Any], catalog: Catalog,
@@ -1193,6 +1207,25 @@ def stock_names(cache: dict[str, Any], catalog: Catalog) -> list[str]:
                    if name})
 
 
+def plan_base_unit(cache: dict[str, Any], catalog: Catalog, rulebook: str, plan: Plan) -> str:
+    """Resolve an omitted unit from the same product identity used for execution."""
+    name = plan.filters[0].value
+    sales = (select_product(cache["sales"][0], name)
+             if prepare_sales(cache, catalog, rulebook)["ok"] else [])
+    if plan.intent == "stock":
+        snapshot = _stock_snapshot(cache, catalog)
+        if isinstance(snapshot, StockSourceError):
+            return ""
+        if plan.end < snapshot.day:
+            snapshot = load_stock(catalog, as_of=plan.end)
+        if plan.end != snapshot.day:
+            return ""
+        item = stock_item(snapshot.items, name, {sale.product_id for sale in sales if sale.product_id})
+        return fold(item.base_unit) if item and item.base_unit else ""
+    units = {fold(sale.base_unit or "") for sale in select_period(sales, plan.start, plan.end)}
+    return units.pop() if len(units) == 1 else ""
+
+
 def split_stock(quantity: Decimal, factor: Decimal) -> list[int | float]:
     if not quantity.is_finite() or quantity < 0 or not factor.is_finite() or factor <= 1:
         raise ValueError("Stock or conversion factor is invalid")
@@ -1915,12 +1948,7 @@ def select_drugs(rows: list[Sale], products: dict[str, Drug], field: str,
     return [row for row in rows if (row.product_id in codes) == (value == "rx")]
 
 
-def _answer_drug_revenue(cache: dict[str, Any], catalog: Catalog, rulebook: str, plan: Plan,
-                         sales: list[Sale], evidence: dict[str, Any]) -> Candidate:
-    field, value = plan.filters[0].field, plan.filters[0].value
-    rules = read_rules(rulebook)
-    if not rules.revenue or not getattr(rules, f"{field}_revenue"):
-        return Candidate(reason="Split rulebook does not support the drug filter", evidence=evidence)
+def _drug_catalog(cache: dict[str, Any], catalog: Catalog) -> DrugCatalog | ValueError:
     key = (_catalog_key(catalog), catalog.readme)
     if cache.get("drugs_key") != key:
         try:
@@ -1928,7 +1956,16 @@ def _answer_drug_revenue(cache: dict[str, Any], catalog: Catalog, rulebook: str,
         except ValueError as exc:
             cache["drugs"] = exc
         cache["drugs_key"] = key
-    drugs = cache["drugs"]
+    return cache["drugs"]
+
+
+def _answer_drug_revenue(cache: dict[str, Any], catalog: Catalog, rulebook: str, plan: Plan,
+                         sales: list[Sale], evidence: dict[str, Any]) -> Candidate:
+    field, value = plan.filters[0].field, plan.filters[0].value
+    rules = read_rules(rulebook)
+    if not rules.revenue or not getattr(rules, f"{field}_revenue"):
+        return Candidate(reason="Split rulebook does not support the drug filter", evidence=evidence)
+    drugs = _drug_catalog(cache, catalog)
     if isinstance(drugs, ValueError):
         return Candidate(reason=str(drugs), evidence=evidence)
     if not any(row.product_id in drugs.products for row in sales):

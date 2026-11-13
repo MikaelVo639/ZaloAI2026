@@ -4,6 +4,7 @@ Each rule is a general Vietnamese typing convention, checked on rewritten TRAIN 
 (scripts/robustness_eval.py); none comes from public or private questions.
 """
 import unittest
+from dataclasses import replace
 from datetime import date
 
 from test_semantics_periods import rulebook
@@ -208,6 +209,41 @@ class EverydayWordingTests(unittest.TestCase):
         self.assertNotIn("gia von", normalize_question("Tổng tiền hàng tồn kho vào cuối ngày"
                                                        " 12/06/2026 là bao nhiêu?"))
 
+    def test_model_restatements_preserve_units_windows_and_thresholds(self):
+        for restated, standard in (
+                ("Tháng 8/2025 cửa hàng nhập Trà sen trung bình bao nhiêu tiền một thùng?",
+                 "Tháng 8/2025 giá nhập bình quân một thùng Trà sen là bao nhiêu?"),
+                ("Đơn giá bán ra của Vở ô ly ngày 15/07/2026 là bao nhiêu tiền một quyển?",
+                 "Ngày 15/07/2026 Vở ô ly bán ra với đơn giá bao nhiêu tiền một quyển?"),
+                ("Đơn đặt cách đây hơn 12 ngày nhưng chưa trả hết nợ, tổng cộng là bao nhiêu"
+                 " đến hết ngày 23/07/2026?",
+                 "Đến hết ngày 23/07/2026 khách chưa trả hết còn nợ quá 12 ngày tổng cộng bao nhiêu tiền?"),
+                ("Tuổi nợ của khách đến hết ngày 23/07/2026: số tiền còn nợ của từng nhóm 0–7 ngày,"
+                 " 8–15 ngày và trên 15 ngày lần lượt là bao nhiêu?",
+                 "Tính đến hết ngày 23/07/2026 khách còn nợ bao nhiêu theo nhóm tuổi nợ"
+                 " 0–7 ngày, 8–15 ngày và trên 15 ngày?"),
+                ("Có bao nhiêu mặt hàng còn tồn sẽ hết hạn trong 30 ngày tới?",
+                 "Có bao nhiêu mặt hàng còn lô tồn sắp hết hạn trong 30 ngày tới?"),
+                ("Trong 8 ngày gần nhất có bao nhiêu mặt hàng không bán được gì?",
+                 "Trong 8 ngày gần nhất có bao nhiêu mặt hàng không bán được cái nào?"),
+                ("Hôm nay số lượng gói Hạt sen còn tồn tại trong kho lúc cuối ngày là bao nhiêu?",
+                 "Tồn kho Hạt sen cuối ngày hôm nay là bao nhiêu gói?"),
+                ("Tháng 8/2025 xe tải giao hàng tổng cộng bao nhiêu đợt?",
+                 "Tháng 8/2025 cửa hàng giao bao nhiêu đợt hàng cho khách?"),
+                ("Doanh thu đơn bán qua Zalo/OA tháng này là bao nhiêu?",
+                 "Doanh thu đơn bán qua Zalo OA tháng này là bao nhiêu?"),
+                ("Doanh thu bán hàng không cần đơn bác sĩ trong tháng 8/2025 là bao nhiêu?",
+                 "Hàng không kê đơn tháng 8/2025 bán được tổng cộng bao nhiêu tiền?"),
+                ("Tháng 8/2025 có bao nhiêu đơn hàng có giá trị từ 180.500 đồng trở lên?",
+                 "Tháng 8/2025 có bao nhiêu đơn có doanh thu từ 180.500 đồng trở lên?"),
+                ("Tuần này ca sáng có bao nhiêu hóa đơn?", "Tuần này ca sáng có bao nhiêu đơn?"),
+                ("Số lượng gói Hạt sen bán ra trong 5 ngày kể từ ngày 15/07/2026, sau khi tăng giá"
+                 " lên 22.000đ so với 5 ngày trước đó, thay đổi bao nhiêu phần trăm?",
+                 "Số gói Hạt sen bán ra trong 5 ngày kể từ ngày 15/07/2026 tăng giá lên 22.000đ"
+                 " so với 5 ngày trước đó thay đổi bao nhiêu phần trăm?")):
+            with self.subTest(restated=restated):
+                self.assertEqual(normalize_question(restated), normalize_question(standard))
+
     def test_particle_after_la_chi(self):
         self.assertEqual(normalize_question("top 5 hàng chạy nhất là chi nha"),
                          "top 5 hang chay nhat la gi")
@@ -252,6 +288,15 @@ class PlanTests(unittest.TestCase):
                 expected = self.plan(train)
                 self.assertIsNotNone(expected)
                 self.assertEqual(self.plan(rewritten), expected)
+
+    def test_delivery_capacity_does_not_plan_as_recorded_deliveries(self):
+        rules = replace(read_rules(rulebook()), delivery_count=True, calendar_month=True)
+        for text, intent in (
+                ("Tháng 8/2025 xe tải giao hàng tổng cộng bao nhiêu đợt?", "delivery_count"),
+                ("Xe tháng 8/2025 có thể giao bao nhiêu đợt hàng?", None)):
+            with self.subTest(text=text):
+                plan = plan_question(Question("x", "b", text, date(2026, 3, 4)), rules)
+                self.assertEqual(plan.intent if plan else None, intent)
 
     def test_conditions_are_still_not_dropped(self):
         # Words that may carry a condition still make the question abstain.

@@ -250,6 +250,49 @@ class RewriteCheckTests(unittest.TestCase):
             with self.subTest(question=question):
                 self.assertIsNone(check_rewrite(question, rewrite))
 
+    def test_restatement_keeps_rank_basis_payment_and_package_units(self):
+        for question, rewrite, reason in (
+                ("Món nào lời nhất trong tháng này?", "Món nào có lãi gộp thấp nhất tháng này?",
+                 "direction"),
+                ("Tháng này cửa hàng giao mấy đợt hàng?", "Tháng này đã giao bao nhiêu đơn hàng?",
+                 "counts"),
+                ("Khách nào mua nhiều lần nhất, tính theo số đơn?", "Khách nào mua nhiều lần nhất?",
+                 "ranking basis"),
+                ("Khách nào đứng đầu, tính theo doanh thu?", "Khách nào đứng đầu, tính theo số đơn?",
+                 "ranking basis"),
+                ("Khách trả bao nhiêu nợ của đơn mua chịu?", "Khách trả bao nhiêu nợ của đơn đã mua?",
+                 "credit"),
+                ("Khách trả bao nhiêu nợ của đơn mua chịu?",
+                 "Khách trả bằng thẻ bao nhiêu nợ của đơn mua chịu?", "card payment"),
+                ("Tồn kho Trà sen còn mấy thùng chẵn, mấy gói lẻ?",
+                 "Tồn kho Trà sen còn bao nhiêu thùng nguyên, bao nhiêu hộp lẻ?", "remainder"),
+                ("Cuối ngày hôm nay Bút bi còn mấy cái?",
+                 "Hôm nay Bút bi còn bao nhiêu chiếc trong kho?", "stock count unit")):
+            with self.subTest(rewrite=rewrite):
+                self.assertIn(reason, check_rewrite(question, rewrite) or "")
+        for question, rewrite in (
+                ("Món nào lời nhất tháng này?", "Món nào có tổng lãi gộp cao nhất tháng này?"),
+                ("Tồn kho Trà sen còn mấy thùng chẵn, mấy gói lẻ?",
+                 "Tồn kho Trà sen còn bao nhiêu thùng nguyên, bao nhiêu gói lẻ?"),
+                ("Đếm số ngày có doanh thu", "Dem so ngay co doanh thu")):
+            with self.subTest(question=question):
+                self.assertIsNone(check_rewrite(question, rewrite))
+
+    def test_restatement_preserves_customer_and_ingredient_labels(self):
+        names = ("Võ Mỹ An", "Kali iodid")
+        for question, rewrite in (
+                ("Khách Võ Mỹ An ghi nợ thêm bao nhiêu?", "Khách Võ Mỹ Anh ghi nợ thêm bao nhiêu?"),
+                ("Doanh thu thuốc hoạt chất Kali iodid?", "Doanh thu thuốc hoạt chất Kali iod?")):
+            with self.subTest(question=question):
+                self.assertIn("name", check_rewrite(question, rewrite, names) or "")
+
+    def test_name_typo_is_accepted_only_for_a_unique_catalogue_label(self):
+        question = "Trứng cuộn và Sơn trong nhà 20L bán bao nhiêu tiền?"
+        rewrite = "Trnug cuon va Son trog nha 20L ban bao nhieu tien?"
+        names = ("Trứng cuộn", "Sơn trong nhà 20L")
+        self.assertIsNone(check_rewrite(question, rewrite, names))
+        self.assertIn("name", check_rewrite(question, rewrite, (*names, "Trnug cuộn")) or "")
+
     def test_output_must_be_one_short_line(self):
         self.assertIsNotNone(check_rewrite("dthu thang nay", "Doanh thu\ntháng này"))
         self.assertIsNotNone(check_rewrite("dthu thang nay", "x" * 301))

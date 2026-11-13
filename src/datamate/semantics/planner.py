@@ -1095,6 +1095,7 @@ _SALE_PRICE = (
                rf"(?:la )?{_AMOUNT}(?: tien)?(?: ta| do)?"),
     re.compile(rf"(?:cua hang )?ban(?: ra)? (?:(?:voi )?don gia|gia) {_AMOUNT}(?: tien)? "
                rf"{_ONE} (?P<unit>[a-z][a-z0-9]*)"),
+    re.compile(rf"don gia(?: ban ra)?(?: vao)? (?:la )?{_AMOUNT}(?: tien)?"),
 )
 
 
@@ -1116,7 +1117,7 @@ def _daily_sale_price(text: str, today: date, rules: Rules,
         match = pattern.fullmatch(" ".join(rest.split()))
         if match:
             return Plan("daily_sale_price", day, day,
-                        filters=(Filter("product", product),), unit=match["unit"],
+                        filters=(Filter("product", product),), unit=match.groupdict().get("unit", ""),
                         evidence=_rows(rules, *used))
     return None
 
@@ -1399,7 +1400,8 @@ def _price_effect(text: str, today: date, rules: Rules, names: Iterable[str],
 
 
 _STOCK_CUE = re.compile(r"\b(?:ton kho|kho con ton|kho con|con ton|ton cuoi)\b"
-                        r"|\bcuoi (?:ngay )?hom nay\b|\bluc cuoi ngay\b|\bhet hom nay\b")
+                        r"|\bcuoi (?:ngay )?hom nay\b|\bluc cuoi ngay\b|\bhet hom nay\b"
+                        rf"|\bcon {_AMOUNT} [a-z]+ trong kho\b")
 _STOCK_UNIT = re.compile(rf"\b{_AMOUNT} ([a-z][a-z0-9]*)\b")
 _STOCK_PAIR = re.compile(
     rf"\b{_AMOUNT} (?P<big>[a-z][a-z0-9]*(?: \d+[a-z][a-z0-9]*)?) (?:chan|nguyen) "
@@ -1431,7 +1433,10 @@ def _stock_plan(text: str, today: date, rules: Rules, filters: list[Filter]) -> 
                     filters=tuple(filters), unit=f"{big}|{base}")
     unit = _stock_unit(text)
     if unit is None:
-        return None
+        # An unqualified count of one named product can use its documented base unit.
+        if not re.fullmatch(rf"cuoi ngay hom nay so con (?:la )?{_AMOUNT}", text):
+            return None
+        unit = ""
     return Plan("stock", today, today, evidence=_rows(rules, *features),
                 filters=tuple(filters), unit=unit)
 

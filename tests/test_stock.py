@@ -11,8 +11,9 @@ from pathlib import Path
 from test_semantics_periods import rulebook
 
 from datamate.agent import compute
+from datamate.agent.baseline import BaselineAgent
 from datamate.agent.validation import check_executed
-from datamate.contracts import Question
+from datamate.contracts import BusinessContext, Question, Split
 from datamate.ingestion import build_catalog
 from datamate.ingestion import stock as stock_source
 from datamate.ingestion.sales import Sale
@@ -140,6 +141,19 @@ class StockTests(unittest.TestCase):
         _, candidate = self.answer("Tồn kho Bia Tiger lon cuối ngày hôm nay là bao nhiêu lon?",
                                    today="2026-07-10")
         self.assertEqual(candidate.type, "abstain")  # stock only known at the end of 14/07
+
+    def test_end_of_day_count_with_omitted_unit_uses_the_stock_source(self):
+        catalog = self.catalog()
+        question = Question("example", catalog.business_id,
+                            "Cuối ngày hôm nay, số Bia Tiger lon còn bao nhiêu?",
+                            date(2026, 7, 14))
+        root = catalog.tables[0].path.parent
+        split = Split(root, (question,), BOOK, root / "calendar.csv")
+        agent = BaselineAgent()
+        self.addCleanup(agent.close)
+        context = BusinessContext(split, catalog)
+        self.assertEqual(agent._plan(question, context).unit, "lon")
+        self.assertEqual(agent.answer(question, context).answer, 43)
 
     def test_bua_nay_reads_as_hom_nay(self):
         result = plan("Tồn kho Bia Tiger lon cuối ngày bữa nay là bao nhiêu lon?")

@@ -20,10 +20,11 @@ import re
 import unicodedata
 from collections import Counter
 from collections.abc import Iterable
+from functools import lru_cache
 from typing import Any
 
-from datamate.agent import code_answer
-from datamate.agent.baseline import _execution_failure
+from datamate.agent import code_answer, compute
+from datamate.agent.baseline import BaselineAgent, _execution_failure
 from datamate.agent.code_answer import (
     CODE_EXAMPLES,
     CODE_MAX_NEW_TOKENS,
@@ -43,7 +44,7 @@ from datamate.agent.rule_spec_model import model_specs
 from datamate.contracts import BusinessContext, Candidate, Plan, Question
 from datamate.semantics.planner import unread_words
 from datamate.semantics.rule_spec import enabled_specs
-from datamate.semantics.text import fold, normalize_question
+from datamate.semantics.text import _untranspose, fold, normalize_question
 
 REWRITE_CONFIDENCE = 0.5  # fixed diagnostic score, not a calibrated probability
 UNSURE = "KHONG_RO"
@@ -256,40 +257,56 @@ _GUARDS: tuple[tuple[str, str, bool, str], ...] = (
     # "tháng 4/2025" -> "quý 4/2025" keeps every number but asks another period.
     ("quarter", r"\bquy\b|\bq ?[1-4]\b", True,
      r"\bquy (?:doi|ra|cach|dinh|tac|uoc|trinh|khach)\b"),
-    ("compare", r"\bso (?:voi|vs)\b|\bso\b(?= (?:thang|tuan|nam|quy|ngay|tet|ky|cung))", False, ""),
     ("average", r"\b(?:trung binh|binh quan|tb)\b", False, ""),
-    ("extreme", r"\bnhat\b|\btop\b", False,
+    ("extreme", r"\b(?:nhat|nhut|top)\b", False,
      r"\b(?:it nhat|toi thieu)(?= \d)|\bduy nhat\b|\bcap nhat\b"
      r"|\b(?:\d+|hai|ba|bon|nam|sau|bay|tam|chin|muoi) (?:ngay|tuan|thang|nam|don|lan)"
      r" (?:gan|gan day) nhat\b"),
     # "lãi gộp" restated as "lợi nhuận ròng" (after every cost) is another measure.
     ("net", r"\brong\b", True, ""),
-    ("payment", r"\b(?:tien mat|chuyen khoan|cod|quet the)\b", False, ""),
+    ("payment", r"\b(?:tien mat|chuyen khoan|cod)\b", False, ""),
+    ("card payment", r"\b(?:quet the|(?:bang|tra|thanh toan) the)\b", True, ""),
+    ("credit purchase", r"\b(?:mua chiu|ghi no|no them)\b", True, ""),
+    ("order ranking basis", r"\btinh theo so don\b", False, ""),
+    ("spend ranking basis", r"\btinh theo (?:so tien|tong tien|doanh thu)\b", False, ""),
     ("staff", r"\b(?:nhan vien|nv)\b", False, ""),
     ("customer", r"\b(?:khach|kh)\b", False, ""),
     ("supplier", r"\b(?:nha cung cap|ncc)\b", False, ""),
     ("purchase", r"\bnhap\b", False, ""),
-    ("stock", r"\bton\b|\bkho\b", False, ""),
+    ("stock", r"\bton\b|\b(?:trong kho|nam kho|kho con)\b", False, ""),
     ("debt", r"\bno\b", False, ""),
     ("group", r"\bnhom\b", False, ""),
     ("profit", r"\b(?:loi|lai)\b", False,
      r"\b(?:con|tra|hoan|doi|ban|mua|nhap|xem|tinh|kiem|quay|ghi|giu|de|gui|lam|cap) lai\b"
      r"|\blai (?:lan|nua|tu dau)\b|\btra loi\b|\b(?:hang|bi|san pham|mon) loi\b"),
 )
+_COMPARE = re.compile(
+    r"\bso (?:voi|vs)\b|(?<!dem )\bso (?=(?:thang|tuan|nam|quy|ngay|tet|ky|cung)\b)")
+_LOWEST = re.compile(
+    r"\b(?:thap|it(?: tien| don| lan)?|kem|cham|nho|re|te|thua(?: lo)?|lo) nh(?:at|ut)\b"
+    r"(?! \d)")
+_PACK_UNITS = re.compile(
+    r"\b(?:bao nhieu|bao nhiu|bnhiu|bn|may|nhieu|nhiu) "
+    r"([a-z]+(?: \d+[a-z][a-z0-9]*)?) (chan|nguyen|le)\b")
+_STOCK_COUNT_UNIT = re.compile(
+    r"\b(?:bao nhieu|bao nhiu|bnhiu|bn|may) ([a-z]+)(?= trong kho\b|$)")
 # Accented words that fold onto a guard word with another meaning ("số" -> "so", "nó" ->
 # "no", "lại" -> "lai", "khô" -> "kho"). Read with accents only; an unaccented question
 # keeps the cautious folded reading.
-_HOMOGRAPHS = re.compile(r"(?<!\w)(?:số|nó|lỗi|tốn|khó|khô|quỹ)(?!\w)")
+_HOMOGRAPHS = re.compile(r"(?<!\w)(?:nó|lỗi|tốn|khó|khô|quỹ)(?!\w)")
 
 
 def _plain(text: str) -> str:
     return re.sub(r"\s+", " ", normalize_question(text)).strip()
 
 
-def _guard_text(text: str, names: Iterable[str]) -> str:
+def _guard_text(text: str, names: Iterable[str], *, hide_count: bool = False) -> str:
     """Folded text for the meaning guards, without catalogue names (checked on their own)
     and without accented homographs of guard words."""
-    plain = f" {_plain(_HOMOGRAPHS.sub(' ', unicodedata.normalize('NFC', text).lower()))} "
+    raw = unicodedata.normalize("NFC", text).lower()
+    if hide_count:
+        raw = re.sub(r"\bsố\b", " ", raw)
+    plain = f" {_plain(_HOMOGRAPHS.sub(' ', raw))} "
     for key in sorted({_plain(name) for name in names}, key=len, reverse=True):
         if len(key) >= 4:
             plain = plain.replace(f" {key} ", "  ")
@@ -413,7 +430,7 @@ _COUNT = re.compile(
     r"\b(?:bao nhieu|bao nhiu|bnhiu|bn|may|so luong|tong so|so)"
     r" (?:nguoi |luot |cai |tat ca )?"
     r"(khach|don|bill|hoa don|mat hang|san pham|mon|ngay|lan|nhan vien|nha cung cap"
-    r"|phieu)\b")
+    r"|phieu|dot|lo)\b")
 _COUNT_SAME = {"bill": "don", "hoa don": "don", "san pham": "mat hang", "mon": "mat hang"}
 
 
@@ -426,10 +443,60 @@ def _counted(text: str) -> set[str]:
     return {_COUNT_SAME.get(noun, noun) for noun in _COUNT.findall(f" {_plain(text)} ")}
 
 
+def _pack_units(text: str) -> set[tuple[str, str]]:
+    return {(unit, "whole" if part in ("chan", "nguyen") else "remainder")
+            for unit, part in _PACK_UNITS.findall(text)}
+
+
+def rewrite_names(agent: BaselineAgent, context: BusinessContext) -> tuple[str, ...]:
+    """Identity labels available from the current business's offline sources."""
+    if "rewrite_names" not in context.cache:
+        result = agent.worker.run(compute.rewrite_identity_names, agent.ingestion_timeout,
+                                  catalog=context.catalog, rulebook=context.split.rulebook)
+        labels = [label for field in ("product_group", "customer_group")
+                  for label in agent._vocabulary(context).get(field, ())]
+        context.cache["rewrite_names"] = (
+            *agent._product_names(context), *labels, *(result.value if result.ok else ()))
+    return context.cache["rewrite_names"]
+
+
 # Invented names of the standard restatements. One in a restatement but not in the question
 # was copied from the prompt ("khách Lê Thị Mai" for another customer).
 _EXAMPLE_NAMES = ("le thi mai", "banh quy bo", "keo gung", "tra may tia", "do an vat",
-                  "dai ly", "kem gluconat", "nv007", "nv036")
+                  "dai ly", "kem gluconat", "nv007", "nv036", "nguyen van a")
+
+
+def _name_spelling(text: str) -> str:
+    return " ".join("trong" if word == "trog" else _untranspose(word) for word in text.split())
+
+
+@lru_cache(maxsize=8)
+def _name_index(names: tuple[str, ...]) -> tuple[dict[str, str], dict[str, str], set[int]]:
+    index = {}
+    for name in names:
+        key = _words(name).strip()
+        if len(key) >= 4:
+            index[key] = name
+    spellings: dict[str, set[str]] = {}
+    for key in index:
+        spellings.setdefault(_name_spelling(key), set()).add(key)
+    aliases = {spelling: next(iter(keys)) for spelling, keys in spellings.items() if len(keys) == 1}
+    return index, aliases, {len(key.split()) for key in index}
+
+
+def _mentioned_names(text: str, index: dict[str, str], aliases: dict[str, str],
+                     lengths: set[int]) -> set[str]:
+    words, corrected = text.split(), _name_spelling(text).split()
+    mentions = set()
+    for length in lengths:
+        for start in range(len(words) - length + 1):
+            end = start + length
+            key = " ".join(words[start:end])
+            if key in index:
+                mentions.add(key)
+            elif alias := aliases.get(" ".join(corrected[start:end])):
+                mentions.add(alias)
+    return mentions
 
 
 def check_rewrite(question: str, rewrite: str, names: Iterable[str] = ()) -> str | None:
@@ -438,13 +505,27 @@ def check_rewrite(question: str, rewrite: str, names: Iterable[str] = ()) -> str
         return "Rewrite is empty, too long or not one line"
     if not _same_numbers(question, rewrite):
         return "Rewrite changed the numbers of the question"
-    names = list(names)
     asked, restated = _words(question), _words(rewrite)
-    for name in names:
-        key = _words(name)
-        if len(key.strip()) >= 4 and (key in asked) != (key in restated):
-            return f"Rewrite added or dropped the name {name!r}"
+    index, aliases, lengths = _name_index(tuple(names))
+    before_names = _mentioned_names(asked, index, aliases, lengths)
+    after_names = _mentioned_names(restated, index, aliases, lengths)
+    if before_names != after_names:
+        changed = min(before_names ^ after_names)
+        return f"Rewrite added or dropped the name {index[changed]!r}"
+    names = [index[key] for key in before_names]
     plain_question, plain_rewrite = _guard_text(question, names), _guard_text(rewrite, names)
+    if bool(_LOWEST.search(plain_question)) != bool(_LOWEST.search(plain_rewrite)):
+        return "Rewrite changed the direction of the extreme"
+    if _pack_units(plain_question) != _pack_units(plain_rewrite):
+        return "Rewrite changed a whole or remainder unit"
+    before_unit, after_unit = (_STOCK_COUNT_UNIT.search(plain_question.strip()),
+                               _STOCK_COUNT_UNIT.search(plain_rewrite.strip()))
+    if (before_unit and after_unit and before_unit[1] != after_unit[1]
+            and " trong kho " in plain_rewrite):
+        return "Rewrite changed the stock count unit"
+    if _COMPARE.search(_guard_text(question, names, hide_count=True)) and not _COMPARE.search(
+            _guard_text(rewrite, names, hide_count=True)):
+        return "Rewrite changed the 'compare' meaning"
     for concept, pattern, both, ignore in _GUARDS:
         before_text = re.sub(ignore, " ", plain_question) if ignore else plain_question
         after_text = re.sub(ignore, " ", plain_rewrite) if ignore else plain_rewrite
@@ -453,7 +534,7 @@ def check_rewrite(question: str, rewrite: str, names: Iterable[str] = ()) -> str
         if (before and not after) or (both and after and not before):
             return f"Rewrite changed the '{concept}' meaning"
     copied = next((name for name in _EXAMPLE_NAMES
-                   if f" {name} " in _words(rewrite) and f" {name} " not in _words(question)), None)
+                   if f" {name} " in restated and f" {name} " not in asked), None)
     if copied is not None:
         return f"Rewrite copied the name {copied!r} from the examples"
     if _periods(question) != _periods(rewrite):
@@ -596,7 +677,7 @@ class RewriteAgent(LocalPlanAgent):
         return cache[rulebook]
 
     def _vote(self, vote: int, messages: list[dict[str, str]], question: Question,
-              context: BusinessContext, asked: str, names: list[str], product_names,
+              context: BusinessContext, asked: str, names: tuple[str, ...], product_names,
               vocabulary, evidence: dict[str, Any]) -> Plan | str | Candidate:
         """One restatement (with its retry): a Plan, the reason it failed, or a Candidate
         when the model itself failed."""
@@ -757,7 +838,7 @@ class RewriteAgent(LocalPlanAgent):
     def _rewrite_answer(self, question: Question, context: BusinessContext) -> Candidate:
         product_names = self._product_names(context)
         vocabulary = self._vocabulary(context)
-        names = [*product_names, *(label for labels in vocabulary.values() for label in labels)]
+        names = rewrite_names(self, context)
         asked = spell_months(question.question)  # what the model reads and is checked on
         chosen = select_examples(asked, self.examples)
         rule_names = [spec.nguon.strip().strip("|").split("|")[0].strip()

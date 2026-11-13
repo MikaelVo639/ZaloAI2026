@@ -115,7 +115,7 @@ class BaselineAgent:
                 context.cache["stock_names"] = result.value if result.ok else []
             stock_plan = plan_question(question, rules, context.cache["stock_names"])
             if stock_plan and stock_plan.intent in ("stock", "stock_split"):
-                return stock_plan
+                return self._with_base_unit(stock_plan, context)
         if plan is None:
             # Retry with this business's product names/codes ("doanh thu <mặt hàng> …").
             names = self._product_names(context)
@@ -133,7 +133,14 @@ class BaselineAgent:
                                          price_increases=increases, price_source=source)
         if plan is None:
             plan = plan_rule_rank(question, rules, self._rule_specs(context.split.rulebook))
-        return plan
+        return self._with_base_unit(plan, context) if plan is not None else None
+
+    def _with_base_unit(self, plan: Plan, context: BusinessContext) -> Plan | None:
+        if plan.unit or plan.intent not in ("stock", "daily_sale_price"):
+            return plan
+        result = self.worker.run(tasks.plan_base_unit, self.question_timeout,
+                                 catalog=context.catalog, rulebook=context.split.rulebook, plan=plan)
+        return replace(plan, unit=result.value) if result.ok and result.value else None
 
     def _rule_specs(self, rulebook: str) -> tuple:
         """Enabled rule specs of the split, computed once per rulebook."""
