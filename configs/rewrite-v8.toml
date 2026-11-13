@@ -1,0 +1,26 @@
+# Rewrite, version 8: configs/rewrite-v7.toml without the model calculation fallback.
+# On the 480-question TRAIN model benchmark (LOCAL PROXY, Colab L4, commit 7a1e64f) the
+# version 7 restatement options answered 325 correct / 7 wrong against 272 / 1 for
+# configs/rewrite.toml, while the model calculation answered 10 correct / 36 wrong.
+# So the restatement options stay and the calculation is off.
+backend = "rewrite"
+# Fixed diagnostic score for rewrite answers, NOT a calibrated probability.
+min_confidence = 0.5
+max_seconds = 20000
+model_path = "models/qwen2.5-coder-7b-instruct"
+question_timeout = 30
+ingestion_timeout = 300
+model_load_timeout = 600
+model_timeout = 30
+# Every example is in the prompt (about 5k tokens), so the input budget is larger.
+max_input_tokens = 8192
+max_new_tokens = 128
+rewrite_retries = 1
+rewrite_examples = 78
+# Answer KHONG_RO only when a condition would be lost, not when no example is alike.
+rewrite_lenient = true
+# Spend the retry on a restatement the safety checks rejected, too.
+rewrite_retry_rejected = true
+# Two of three restatements must lead to the same plan (third asked only when needed).
+rewrite_votes = 3
+rewrite_code_fallback = false

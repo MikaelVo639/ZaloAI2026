@@ -3,6 +3,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -464,6 +465,12 @@ class RewriteAgentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "lenient"):
             RewriteAgent("unused", lenient="yes")
 
+    def test_version_8_is_version_7_without_the_model_calculation(self):
+        root = Path(__file__).resolve().parents[1] / "configs"
+        v7, v8 = (Config.load(root / f"rewrite-v{n}.toml") for n in (7, 8))
+        self.assertEqual((v7.rewrite_code_fallback, v8.rewrite_code_fallback), (True, False))
+        self.assertEqual(replace(v7, rewrite_code_fallback=False), v8)
+
     def test_config_accepts_the_rewrite_backend(self):
         config = Config.load(Path(__file__).resolve().parents[1] / "configs" / "rewrite.toml")
         self.assertEqual((config.backend, config.min_confidence, config.rewrite_retries),
@@ -499,7 +506,6 @@ class RewriteRuleSpecTests(unittest.TestCase):
 
     def setUp(self):
         RewriteAgentTests.setUp(self)
-        from dataclasses import replace
         self.split = replace(self.split, rulebook=self.split.rulebook + "\n" + RULE_ROW + "\n")
         self.context = BusinessContext(self.split, self.context.catalog)
 
