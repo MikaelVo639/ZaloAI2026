@@ -83,7 +83,7 @@ def disagreement_after_retry_generate(cache, messages, max_input_tokens, max_new
         return {"text": UNPLANNED}
     question = _shots(messages)[-1].removeprefix("Câu hỏi: ")
     forward = _shots(messages)[0] == f"Câu hỏi: {select_examples(question)[0][0]}"
-    return {"text": STANDARD if forward else "Doanh thu hôm nay là bao nhiêu?"}
+    return {"text": STANDARD if forward else "Số đơn tháng này là bao nhiêu?"}
 
 
 
@@ -111,7 +111,7 @@ def _order(messages):
 
 
 def third_vote_breaks_tie_generate(cache, messages, max_input_tokens, max_new_tokens):
-    return {"text": "Doanh thu hôm nay là bao nhiêu?" if _order(messages) == 1 else STANDARD}
+    return {"text": "Số đơn tháng này là bao nhiêu?" if _order(messages) == 1 else STANDARD}
 
 
 def first_vote_unsure_generate(cache, messages, max_input_tokens, max_new_tokens):
@@ -119,8 +119,8 @@ def first_vote_unsure_generate(cache, messages, max_input_tokens, max_new_tokens
 
 
 def three_way_generate(cache, messages, max_input_tokens, max_new_tokens):
-    return {"text": [STANDARD, "Doanh thu hôm nay là bao nhiêu?",
-                     "Doanh thu tuần này là bao nhiêu?"][_order(messages)]}
+    return {"text": [STANDARD, "Số đơn tháng này là bao nhiêu?",
+                     "Giá trị trung bình một đơn tháng này là bao nhiêu?"][_order(messages)]}
 
 
 def echo_generate(cache, messages, max_input_tokens, max_new_tokens):
@@ -208,6 +208,43 @@ class RewriteCheckTests(unittest.TestCase):
                 ("không cần đơn bác sĩ", "Thuốc cần đơn bác sĩ", "negation")):
             with self.subTest(question=question):
                 self.assertIn(concept, check_rewrite(question, rewrite) or "")
+
+    def test_restatement_keeps_the_period_and_what_is_counted(self):
+        # Shapes of restatements Qwen produced on the TRAIN model benchmark (LOCAL PROXY).
+        for question, rewrite, reason in (
+                ("tuan roi ca chieu co bao nhiu bill", "Tuần sau ca chiều có bao nhiêu đơn?",
+                 "period"),
+                ("trung binh moi don tuan roi mang ve bao nhieu dthu",
+                 "Trung bình mỗi đơn tuần này đem về bao nhiêu doanh thu?", "period"),
+                ("Hôm qua cửa hàng có bao nhiêu đơn hàng?", "Hôm nay cửa hàng có bao nhiêu đơn?",
+                 "period"),
+                ("liệt kê 3 mặt hàng bán chạy nhất tuần rồi", "Liệt kê 3 mặt hàng bán chạy nhất tuần.",
+                 "period"),
+                ("đến hết ngày 04/08/2026, có bao nhiêu khách còn nợ cửa hàng",
+                 "Đến hết ngày 04/08/2026, khách còn nợ cửa hàng tổng cộng bao nhiêu tiền?",
+                 "counts"),
+                ("đến hết ngày 04/08/2026, có bao nhiêu khách còn nợ cửa hàng",
+                 "Đến hết ngày 04/08/2026, cửa hàng còn nợ của khách hàng bao nhiêu?", "counts"),
+                ("tháng 3/2026 bán mấy mặt hàng", "Tháng 3/2026 bán bao nhiêu đơn?", "counts")):
+            with self.subTest(rewrite=rewrite):
+                self.assertIn(reason, check_rewrite(question, rewrite) or "")
+        for question, rewrite in (
+                ("tuần vừa rồi bán mấy bill", "Tuần trước có bao nhiêu đơn?"),
+                ("dthu từ đầu thg này đến hết bữa nay hơn hay kém cùng kỳ thg rồi bnhiu %",
+                 "Doanh thu từ đầu tháng đến hôm nay tăng hay giảm bao nhiêu % so với cùng kỳ"
+                 " tháng trước?"),
+                ("doanh thu từ đầu năm tới hết hnay", "Doanh thu từ đầu năm đến hiện tại?"),
+                ("tháng 4/2026 hơn hay kém tháng trước bao nhiêu %",
+                 "Doanh thu tháng 4/2026 thay đổi bao nhiêu % so với tháng trước?"),
+                ("7 ngày qua bán mấy đơn", "7 ngày gần nhất có bao nhiêu đơn?"),
+                ("Từ tháng 2/2026 đến tháng 4/2026, doanh thu tháng sau có luôn cao hơn tháng"
+                 " trước không?", "Doanh thu từ tháng 2/2026 đến tháng 4/2026 có tăng liên tục"
+                 " không?"),
+                ("bn khách mua ít nhất 3 đơn tháng 12/2025",
+                 "Khách mua ít nhất 3 đơn trong tháng 12/2025 là bao nhiêu?"),
+                ("hôm qua bán được bao nhiêu tiền", "Doanh thu hôm qua là bao nhiêu?")):
+            with self.subTest(question=question):
+                self.assertIsNone(check_rewrite(question, rewrite))
 
     def test_output_must_be_one_short_line(self):
         self.assertIsNotNone(check_rewrite("dthu thang nay", "Doanh thu\ntháng này"))

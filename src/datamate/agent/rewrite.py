@@ -370,6 +370,57 @@ def spell_months(question: str) -> str:
     return _MONTH_ALONE.sub(month, text)
 
 
+# Relative periods ("tuần rồi" -> "tuần này" keeps every number but asks another week). Read
+# on normalized text, where "rồi", "vừa qua" are already "trước". Left out: windows with a
+# count ("7 ngày qua", "14 ngày ngay trước đó"), "đầu tháng này" (= "đầu tháng"), "tới"
+# (also "until"), "tháng sau ... tháng trước" inside a run of periods, and the period before
+# or after a named one.
+_WINDOW = re.compile(r"\b\d+ (?:ngay|tuan|thang|nam|quy)(?: ngay)?\b")
+_FROM_START = re.compile(r"\bdau (ngay|tuan|thang|nam|quy) nay\b")
+_STEP = re.compile(r"\b(ngay|tuan|thang|nam|quy) sau\b(.{0,60}?)\b\1 (?:lien )?truoc\b")
+# "đến hiện tại", "tới bây giờ" are "đến hôm nay".
+_NOW = re.compile(r"(?<!ngay )(?<!tuan )(?<!thang )(?<!nam )(?<!quy )\b(?:hien tai|bay gio)\b")
+_RELATIVE = re.compile(
+    r"\b(ngay|tuan|thang|nam|quy) (nay|hien tai|lien truoc|truoc|vua roi|vua qua|roi|qua"
+    r"|ngoai|sau|ke tiep|tiep theo)\b")
+_RELATIVE_DAY = re.compile(r"\b(?:hom|bua) (nay|qua|kia|truoc)\b|\bngay mai\b")
+_WHEN = {"nay": "this", "hien tai": "this", "truoc": "last", "lien truoc": "last",
+         "vua roi": "last", "vua qua": "last", "roi": "last", "qua": "last", "ngoai": "last", "sau": "next", "ke tiep": "next",
+         "tiep theo": "next", "kia": "before last"}
+
+
+def _periods(text: str) -> set[tuple[str, str]]:
+    plain = _WINDOW.sub(" ", f" {_plain(text)} ")
+    plain = _STEP.sub(r" \2 ", _FROM_START.sub(r"dau \1", plain))
+    plain = _NOW.sub("hom nay", plain)
+    # "tháng 4/2026 ... so với tháng trước": the month before a named month, and the
+    # named month keeps its numbers (checked above).
+    found = {(unit, _WHEN[when]) for unit, when in _RELATIVE.findall(plain)
+             if when in ("nay", "hien tai") or not re.search(rf"\b{unit} \d", plain)}
+    for m in _RELATIVE_DAY.finditer(plain):
+        found.add(("ngay", _WHEN[m[1]] if m[1] else "next"))
+    return found
+
+
+# What a "how many" question counts ("bao nhiêu khách" is not "bao nhiêu tiền"). Money is
+# left out: "bán được bao nhiêu tiền" and "doanh thu là bao nhiêu" ask the same.
+_COUNT = re.compile(
+    r"\b(?:bao nhieu|bao nhiu|bnhiu|bn|may|so luong|tong so|so)"
+    r" (?:nguoi |luot |cai |tat ca )?"
+    r"(khach|don|bill|hoa don|mat hang|san pham|mon|ngay|lan|nhan vien|nha cung cap"
+    r"|phieu)\b")
+_COUNT_SAME = {"bill": "don", "hoa don": "don", "san pham": "mat hang", "mon": "mat hang"}
+
+
+# A restatement that drops the count may still ask the same ("bn khách mua ..." -> "Khách mua
+# ... là bao nhiêu?"), but not when it asks an amount of money instead.
+_MONEY = re.compile(r"\b(?:tien|doanh thu|gia tri|no|so du|loi nhuan|lai)\b")
+
+
+def _counted(text: str) -> set[str]:
+    return {_COUNT_SAME.get(noun, noun) for noun in _COUNT.findall(f" {_plain(text)} ")}
+
+
 def check_rewrite(question: str, rewrite: str, names: Iterable[str] = ()) -> str | None:
     """Reason the restatement is unsafe, or None. Never repairs, only rejects."""
     if not rewrite or len(rewrite) > MAX_REWRITE_CHARACTERS or "\n" in rewrite:
@@ -390,6 +441,12 @@ def check_rewrite(question: str, rewrite: str, names: Iterable[str] = ()) -> str
         after = re.search(pattern, after_text) is not None
         if (before and not after) or (both and after and not before):
             return f"Rewrite changed the '{concept}' meaning"
+    if _periods(question) != _periods(rewrite):
+        return "Rewrite changed the period of the question"
+    counted, recounted = _counted(question), _counted(rewrite)
+    if counted and (recounted and recounted != counted
+                    or not recounted and _MONEY.search(f" {_plain(rewrite)} ")):
+        return "Rewrite changed what the question counts"
     return None
 
 
