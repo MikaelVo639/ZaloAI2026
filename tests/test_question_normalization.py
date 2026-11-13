@@ -269,7 +269,14 @@ class EverydayWordingTests(unittest.TestCase):
                 ("Top 3 khách mua nhiều tiền hàng nhất", "Top 3 khách mua nhiều tiền nhất"),
                 ("Tháng 2/2025 có mấy món được mua ở 35 đơn khác nhau trở lên?",
                  "Tháng 2/2025 có mấy mặt hàng được mua ở 35 đơn khác nhau trở lên?"),
-                ("5 người mua có tổng tiền mua cao nhất", "5 khách hàng có tổng tiền mua cao nhất")):
+                ("5 người mua có tổng tiền mua cao nhất", "5 khách hàng có tổng tiền mua cao nhất"),
+                ("Ngày nào trong tháng 6/2025 doanh thu lớn nhất?",
+                 "Ngày nào trong tháng 6/2025 doanh thu cao nhất?"),
+                ("Doanh thu tuần hiện tại là bao nhiêu?", "Doanh thu tuần này là bao nhiêu?"),
+                ("Tháng này các thuốc có hoạt chất Cetirizin thu về bao nhiêu tiền?",
+                 "Tháng này các thuốc có hoạt chất Cetirizin bán được bao nhiêu tiền?"),
+                ("Tháng 4/2025 quán bán được số lượng bao nhiêu ly size M?",
+                 "Tháng 4/2025 quán bán được bao nhiêu ly size M?")):
             with self.subTest(everyday=everyday):
                 self.assertEqual(normalize_question(everyday), normalize_question(usual))
         # Kept: an amount in đồng, male customers, a staff code, an e-invoice.
@@ -280,6 +287,7 @@ class EverydayWordingTests(unittest.TestCase):
         self.assertIn("nhap nhieu tien hang nhat",
                       normalize_question("cửa hàng nhập nhiều tiền hàng nhất từ nhà cung cấp nào"))
         self.assertIn("tat ca cac mon", normalize_question("cộng tất cả các món"))
+        self.assertIn("ban dat nhat", normalize_question("Hàng nào bán đắt nhất tuần rồi?"))
 
     def test_telex_words(self):
         self.assertIn("tong tien nhap hang",

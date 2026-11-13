@@ -236,6 +236,12 @@ _EVERYDAY: tuple[tuple[str, Any], ...] = (
     # Not "cộng tất cả các món", "mọi món" (a size total over every drink).
     (r"(?<!tat ca )\b(may|bao nhieu|bao nhiu|bnhiu|bn|so|cac) mon\b", r"\1 mat hang"),
     (r"\bnguoi mua\b", "khach hang"),
+    (r"\bdoanh thu lon nhat\b", "doanh thu cao nhat"),
+    (r"\b(ngay|tuan|thang|nam|quy) hien tai\b", r"\1 nay"),
+    # Rulebook §1: "bán được bao nhiêu tiền, thu về bao nhiêu tiền" is the revenue.
+    (r"\bthu ve (bao nhieu|bao nhiu|bnhiu|bn) tien\b", r"ban duoc \1 tien"),
+    (r"\bban duoc so luong (bao nhieu|bao nhiu|bnhiu|bn|may)\b", r"ban duoc \1"),
+    # Not "bán đắt nhất": it may be the dearest item, and the rulebook lists it nowhere.
 )
 _EVERYDAY_RULES = tuple((re.compile(pattern), repl) for pattern, repl in _EVERYDAY)
 
