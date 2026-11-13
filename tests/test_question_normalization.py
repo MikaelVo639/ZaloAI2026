@@ -260,7 +260,16 @@ class EverydayWordingTests(unittest.TestCase):
                  "Nhân viên mã NV003 tháng 12/2025 bán được bao nhiêu tiền"),
                 ("tiền nhập hàng từ NCC nào cao nhất", "tiền nhập hàng từ nhà cung cấp nào cao nhất"),
                 ("Hôm qua cửa hàng bán ra được mấy đơn?", "Hôm qua cửa hàng bán được mấy đơn?"),
-                ("từ 14/09/2026 tới hết 12/01/2027", "từ 14/09/2026 đến hết 12/01/2027")):
+                ("từ 14/09/2026 tới hết 12/01/2027", "từ 14/09/2026 đến hết 12/01/2027"),
+                ("nhóm bánh chiếm bao nhiêu % tiền bán hàng", "nhóm bánh chiếm bao nhiêu %"
+                 " doanh thu"),
+                ("Tháng 4/2026 có bao nhiêu đơn bị hủy bỏ?", "Tháng 4/2026 có bao nhiêu đơn bị huỷ?"),
+                ("Giá trị TB một đơn tháng 3/2026", "Giá trị trung bình một đơn tháng 3/2026"),
+                ("Trong quý I năm 2026 doanh thu", "Trong quý 1/2026 doanh thu"),
+                ("Top 3 khách mua nhiều tiền hàng nhất", "Top 3 khách mua nhiều tiền nhất"),
+                ("Tháng 2/2025 có mấy món được mua ở 35 đơn khác nhau trở lên?",
+                 "Tháng 2/2025 có mấy mặt hàng được mua ở 35 đơn khác nhau trở lên?"),
+                ("5 người mua có tổng tiền mua cao nhất", "5 khách hàng có tổng tiền mua cao nhất")):
             with self.subTest(everyday=everyday):
                 self.assertEqual(normalize_question(everyday), normalize_question(usual))
         # Kept: an amount in đồng, male customers, a staff code, an e-invoice.
@@ -268,6 +277,9 @@ class EverydayWordingTests(unittest.TestCase):
         self.assertIn("khach nam", normalize_question("Khách nam mua bao nhiêu"))
         self.assertIn("nv003", normalize_question("NV003 bán bao nhiêu"))
         self.assertIn("hoa don dien tu", normalize_question("hóa đơn điện tử tháng này"))
+        self.assertIn("nhap nhieu tien hang nhat",
+                      normalize_question("cửa hàng nhập nhiều tiền hàng nhất từ nhà cung cấp nào"))
+        self.assertIn("tat ca cac mon", normalize_question("cộng tất cả các món"))
 
     def test_telex_words(self):
         self.assertIn("tong tien nhap hang",

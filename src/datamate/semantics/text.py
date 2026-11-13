@@ -1,5 +1,6 @@
 import re
 import unicodedata
+from typing import Any
 
 
 def fold(value: object) -> str:
@@ -131,6 +132,9 @@ def normalize_question(value: object) -> str:
     raw = re.sub(r"(?<![\d/-])(\d{1,2})-(\d{4})(?![\d/-])", r"\1/\2", raw)
     tokens = [_untranspose(_untelex(token)) for token in fold(raw).split()]
     text = " ".join(ABBREVIATIONS.get(token, token) for token in tokens)
+    # Roman quarters: "quý I năm 2026", "quý IV/2025" (before "quý N năm Y" is read below).
+    text = re.sub(r"\bquy (iv|iii|ii|i)\b",
+                  lambda m: "quy " + {"i": "1", "ii": "2", "iii": "3", "iv": "4"}[m[1]], text)
     # Central "ni" = "này": "năm ni", "tháng ni", "bữa ni".
     text = re.sub(r"\b(nam|thang|tuan|quy|hom|bua) ni\b", r"\1 nay", text)
     text = re.sub(r"\bbua (nay|qua)\b", r"hom \1", text)
@@ -213,7 +217,7 @@ _COUNT_WORD = re.compile(
     r"(?= (?:mặt hàng|mat hang|khách|khach|sản phẩm|san pham|món|nhân viên|nhan vien|đơn|"
     r"nhà cung cấp|lô|ngày|ngay|tuần|tuan)(?!\w))")
 # Same meaning, other words, measured on TRAIN questions with the word swapped (LOCAL PROXY).
-_EVERYDAY: tuple[tuple[str, str], ...] = (
+_EVERYDAY: tuple[tuple[str, Any], ...] = (
     (r"\bdoanh so\b", "doanh thu"),                     # "doanh số" = sales revenue
     (r"\b(bao nhieu|bao nhiu|bnhiu|bn|nhieu|nhiu|may) dong\b", r"\1 tien"),
     (r"\bhoa don\b(?! dien tu)", "don"),
@@ -224,6 +228,14 @@ _EVERYDAY: tuple[tuple[str, str], ...] = (
     (r"\b(cong|tinh) moi san pham\b", r"\1 moi mat hang"),
     (r"\bcac san pham con lai\b", "cac mat hang con lai"),
     (r"\b(tu (?:ngay )?\d{1,2}/\d{1,2}/\d{4}) toi\b", r"\1 den"),
+    (r"\btien ban hang\b", "doanh thu"),                # rulebook §1: tiền bán = doanh thu
+    (r"\bhuy bo\b", "huy"),
+    (r"\btb\b", "trung binh"),
+    # Not "nhập nhiều tiền hàng nhất" (the supplier ranking's own words).
+    (r"(?<!nhap )\bnhieu tien hang nhat\b", "nhieu tien nhat"),
+    # Not "cộng tất cả các món", "mọi món" (a size total over every drink).
+    (r"(?<!tat ca )\b(may|bao nhieu|bao nhiu|bnhiu|bn|so|cac) mon\b", r"\1 mat hang"),
+    (r"\bnguoi mua\b", "khach hang"),
 )
 _EVERYDAY_RULES = tuple((re.compile(pattern), repl) for pattern, repl in _EVERYDAY)
 
