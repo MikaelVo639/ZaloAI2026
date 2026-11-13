@@ -944,7 +944,8 @@ def joined_customer_sources(
             if {"customer_id", "customer_group"} <= fields.keys():
                 lists.append(section)
             continue
-        if section.file != orders.path.name or section.sheet not in (None, orders.name):
+        if (not matches_source(section.file, orders.path.name)
+                or section.sheet not in (None, orders.name)):
             continue
         order_fields.append({key: column for key, column in fields.items()
                              if key in {"customer_id", "customer_name", "customer_group"}})

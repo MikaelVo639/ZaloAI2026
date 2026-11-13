@@ -309,6 +309,23 @@ def _referenced_field(references: dict[str, str], section: Section,
     return next(iter(candidates), None)
 
 
+def _with_referenced_columns(catalog: Catalog, section: Section,
+                             references: dict[str, str]) -> Section:
+    """``section`` plus the columns of its file that a README convention names but the
+    section does not list ("**Tổng sau giảm giá** là số khách phải trả cho cả đơn")."""
+    try:
+        tables = _matching_tables(catalog, section)
+    except ReadmeSalesError:
+        return section
+    header = {str(column) for table in tables for column in table.columns if column}
+    extra = {column: "" for column in sorted(header - section.columns.keys())
+             if _referenced_field(references, section, column)}
+    if not extra:
+        return section
+    return Section(section.file, section.sheet, {**section.columns, **extra},
+                   origin=section.origin)
+
+
 def _section_fields(section: Section, references: dict[str, str]) -> dict[str, str]:
     result: dict[str, str] = {}
     for column, meaning in section.columns.items():
@@ -560,6 +577,7 @@ def _role_sections(catalog: Catalog, sections: list[Section], references: dict[s
     incomplete: list[dict[str, Any]] = []
     payment_tables: list[tuple[Table, Section, dict[str, str]]] = []
     for section in sections:
+        section = _with_referenced_columns(catalog, section, references)
         for column in section.columns:
             referenced = _referenced_field(references, section, column)
             if referenced:

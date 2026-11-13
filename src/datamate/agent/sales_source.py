@@ -15,6 +15,7 @@ detected joined schema):
 Joined and README capabilities must be stated by the rulebook of the split being answered.
 """
 
+import re
 from dataclasses import replace
 from decimal import Decimal
 from typing import Any
@@ -37,6 +38,7 @@ from datamate.ingestion.readme_sales import (
     parse_sections,
 )
 from datamate.ingestion.sales import Sale, load_sales
+from datamate.ingestion.source_names import matches_source
 from datamate.ingestion.status import StatusError, by_elimination, status_policy
 from datamate.semantics.rules import rule_line, table_rows
 
@@ -106,6 +108,24 @@ def _joined_rules(rulebook: str) -> RuleCapabilities:
     )
 
 
+# A README file family: "`don_hang_T<tháng>_<năm>.csv`" (one file per month, same columns).
+_FAMILY = re.compile(r"`([^`]*<[^`>]+>[^`]*)`")
+
+
+def _role_source(catalog: Catalog, tables: list) -> str | None:
+    """The one table of a joined role, or the README family that is exactly its tables."""
+    if len(tables) == 1:
+        return tables[0].path.name
+    if not tables:
+        return None
+    names = {table.path.name for table in tables}
+    for family in dict.fromkeys(_FAMILY.findall(catalog.readme)):
+        members = {t.path.name for t in catalog.tables if matches_source(family, t.path.name)}
+        if members == names and len({tuple(t.columns) for t in tables}) == 1:
+            return family
+    return None
+
+
 def _joined_mapping(catalog: Catalog) -> MappingSpec | None:
     candidates = {
         role: [table for table in catalog.tables if required <= set(table.columns)]
@@ -117,16 +137,14 @@ def _joined_mapping(catalog: Catalog) -> MappingSpec | None:
     }
     if not any(detected.values()):
         return None
-    if any(len(candidates[role]) != 1 for role in _JOIN_COLUMNS):
+    sources = {role: _role_source(catalog, tables) for role, tables in candidates.items()}
+    if any(sources[role] is None for role in _JOIN_COLUMNS):
         raise JoinedSalesError(
             "AMBIGUOUS_JOINED_MAPPING",
             "Joined schema roles must each match exactly one source",
             {"candidate_counts": {role: len(values)
                                   for role, values in sorted(candidates.items())}},
         )
-    orders, details, products = (
-        candidates["orders"][0], candidates["details"][0], candidates["products"][0]
-    )
     structural_evidence = (
         "orders source matched the verified order column signature",
         "details source matched the verified detail column signature",
@@ -135,7 +153,7 @@ def _joined_mapping(catalog: Catalog) -> MappingSpec | None:
     return MappingSpec(
         version="verified_odp_columns.v1",
         orders=SourceMapping(
-            source=orders.path.name,
+            source=sources["orders"],
             fields={
                 "order_id": "Số phiếu", "date": "Ngày bán",
                 "status": "Tình trạng đơn", "total_due": "Phải thu",
@@ -145,7 +163,7 @@ def _joined_mapping(catalog: Catalog) -> MappingSpec | None:
             evidence=(structural_evidence[0],),
         ),
         details=SourceMapping(
-            source=details.path.name,
+            source=sources["details"],
             fields={
                 "order_id": "Số CT", "line_no": "TT dòng",
                 "product_id": "Mã hàng bán", "amount": "Tiền bán",
@@ -156,7 +174,7 @@ def _joined_mapping(catalog: Catalog) -> MappingSpec | None:
             evidence=(structural_evidence[1],),
         ),
         products=SourceMapping(
-            source=products.path.name,
+            source=sources["products"],
             fields={
                 "product_id": "Mã HH", "product_name": "Tên sản phẩm",
                 "base_unit": "Đơn vị tính", "category": "Nhom hang",

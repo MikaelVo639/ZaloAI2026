@@ -44,6 +44,11 @@ class DataVariantTests(_Shop):
         before, _, _ = load_readme_sales(original, RULEBOOK)
         after, _, _ = load_readme_sales(build_catalog(variant, "shop"), RULEBOOK)
         self.assertEqual(_totals(after), _totals(before))
+        # Every monthly file keeps the source header, an always-empty last column included.
+        for path in (variant / "shop").glob("ban_hang_T*.csv"):
+            with self.subTest(path=path.name):
+                self.assertEqual(path.read_text(encoding="utf-8-sig").splitlines()[0].split(","),
+                                 FLAT_HEADER)
 
     def test_duplicate_orders_count_once(self):
         header = ["Mã bill", "Ngày GD", "Status", "Tien hang"]

@@ -61,8 +61,9 @@ def _template(path: Path) -> str:
 
 def _month_rows(table: Any, columns: dict[str, str], date_column: str
                 ) -> tuple[list[str], dict[tuple[int, int], list[dict[str, Any]]]] | None:
-    """Header and rows grouped by month; continuation rows keep the last date seen."""
-    header: list[str] = []
+    """Header and rows grouped by month; continuation rows keep the last date seen. The
+    header is the file's own (an always-empty trailing column stays, as an export keeps it)."""
+    header: list[str] = [str(name) for name in table.columns if name]
     months: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
     last: date | None = None
     for _, row in _records(table, columns):

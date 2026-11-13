@@ -188,6 +188,30 @@ class JoinedSalesAgentTests(unittest.TestCase):
         self.assertEqual(result.type, "abstain")
         self.assertIn("No supported flat sales table", result.reason)
 
+    def test_monthly_order_files_of_a_readme_family_read_as_one_source(self):
+        target = self._write_joined()
+        orders = list(csv.reader((target / "orders.csv").open(encoding="utf-8-sig")))
+        (target / "orders.csv").unlink()
+        # An Excel day serial (46022 = 31/12/2025) reads as that day.
+        self._write_csv(target / "orders_T12_2025.csv", ORDER_HEADER,
+                        [["cash", "0", "7", "completed", "O0", "", "7", "46022"]])
+        self._write_csv(target / "orders_T1_2026.csv", ORDER_HEADER, orders[1:])
+        (target / "README.md").write_text(
+            "Khoảng dữ liệu: 2025-12-01 đến 2026-01-31\n- `orders_T<tháng>_<năm>.csv` (csv)\n"
+            "Các file `orders_T<tháng>_<năm>.csv` là dữ liệu chia theo tháng, mỗi tháng một"
+            " file, cùng cột.\n", encoding="utf-8")
+        agent = self._agent()
+        revenue = agent.answer(self._question("Doanh thu ngày 01/01/2026"), self._context())
+        self.assertEqual((revenue.type, revenue.answer), ("number", 65))
+        self.assertEqual(revenue.evidence["status_counts"], {  # the December order too
+            "cancelled": 1, "returned": 1, "valid": 3,
+        })
+        # A second order file outside the family is still ambiguous.
+        self._write_csv(target / "orders-copy.csv", ORDER_HEADER, [])
+        result = self._answer_in_process(self._question("Doanh thu ngày 01/01/2026"),
+                                         self._context())
+        self.assertIn("AMBIGUOUS_JOINED_MAPPING", result.reason)
+
     def test_orphan_and_duplicate_parent_are_abstains(self):
         cases = {
             "orphan": {

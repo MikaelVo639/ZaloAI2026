@@ -328,6 +328,19 @@ class DebtLedgerTests(_Shop):
             load_debt_ledger(self.catalog(readme=bad), RULEBOOK)
         self.assertEqual(caught.exception.code, "column_missing")
 
+    def test_a_column_named_only_by_the_convention_is_read_from_the_file(self):
+        # The order list's section omits "Tổng thu"; the Công nợ convention names it and
+        # the file has it, as when only the selling-cost convention names its column.
+        readme = README.replace("- **Tổng thu**: số khách phải trả cho cả đơn\n", "")
+        self.assertNotIn("- **Tổng thu**", readme)
+        ledger = load_debt_ledger(self.catalog(readme=readme), RULEBOOK)
+        self.assertEqual((len(ledger.orders), len(ledger.payments)), (4, 2))
+        self.assertEqual(ledger.orders[0].total, Decimal("100000.5"))
+        # A convention naming a column the file does not have still fails.
+        missing = readme.replace("**Tổng thu** là số khách", "**Tổng cần thu** là số khách")
+        with self.assertRaises(DebtSourceError):
+            load_debt_ledger(self.catalog(readme=missing), RULEBOOK)
+
     def test_absent_requires_a_complete_readme_without_debt_hints(self):
         readme = """# Shop
 ## File

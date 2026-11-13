@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
@@ -14,16 +14,17 @@ from datamate.ingestion.inventory import _sha256
 from datamate.ingestion.readme_sales import (
     joined_customer_sources,
     optional_sale_cost,
+    parse_day,
     parse_sections,
     sale_cost_column,
 )
 from datamate.ingestion.sales import (
     Sale,
     is_total_label,
-    parse_date,
     parse_minute,
     price_per_base_unit,
 )
+from datamate.ingestion.source_names import is_family, matches_source
 from datamate.semantics.text import fold
 
 _ADAPTER_VERSION = "joined_sales.v1"
@@ -243,6 +244,36 @@ def _select_table(catalog: Catalog, source_mapping: SourceMapping,
     return table
 
 
+def _select_tables(catalog: Catalog, source_mapping: SourceMapping,
+                   required_fields: set[str]) -> list[Table]:
+    """The declared source, or every file of a README family (``don_hang_T<tháng>_<năm>.csv``:
+    one file per month, same columns) in file-name order."""
+    if not is_family(source_mapping.source):
+        return [_select_table(catalog, source_mapping, required_fields)]
+    tables = sorted((t for t in catalog.tables if matches_source(source_mapping.source, t.path.name)),
+                    key=lambda t: (t.path.name, t.name))
+    if not tables:
+        _fail("SOURCE_SELECTION_ERROR", "Declared file family matches no catalog table",
+              source=source_mapping.source, match_count=0)
+    if any(tuple(t.columns) != tuple(tables[0].columns) for t in tables):
+        _fail("SCHEMA_MISMATCH", "Files of one family must have the same columns",
+              source=source_mapping.source)
+    first = replace(source_mapping, source=tables[0].path.name)
+    _select_table(catalog, first, required_fields)  # same checks as a single source
+    return tables
+
+
+def _family_rows(tables: list[Table]):
+    """``(ordinal, row, table)`` over the files of a source; ordinals stay unique."""
+    offset = 0
+    for table in tables:
+        last = 0
+        for ordinal, raw in iter_data_rows(table):
+            last = ordinal
+            yield offset + ordinal, raw, table
+        offset += last + 1
+
+
 def _readme_evidence(catalog: Catalog, *tokens: str) -> str:
     for line in catalog.readme.splitlines():
         normalized = fold(line)
@@ -443,20 +474,23 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
                       rule_capabilities: RuleCapabilities) -> tuple[list[Sale], dict[str, Any]]:
     """Load one declared O/D/P schema without changing the shared flat adapter."""
     _validate_capabilities(mapping, rule_capabilities)
-    orders_table = _select_table(
+    orders_tables = _select_tables(
         catalog, mapping.orders,
         {"order_id", "date", "status", "total_due"},
     )
-    details_table = _select_table(
+    details_tables = _select_tables(
         catalog, mapping.details,
         {"order_id", "line_no", "product_id", "amount", "quantity",
          "quantity_base", "unit", "unit_price", "discount"},
     )
-    products_table = _select_table(
+    products_tables = _select_tables(
         catalog, mapping.products,
         {"product_id", "product_name", "base_unit", "category"},
     )
-    selected = [orders_table, details_table, products_table]
+    orders_table, details_table = orders_tables[0], details_tables[0]
+    roles = ((orders_tables, mapping.orders), (details_tables, mapping.details),
+             (products_tables, mapping.products))
+    selected = [table for tables, _ in roles for table in tables]
     before_hashes = {table.path: _sha256(table.path) for table in selected}
     status_lookup = _status_lookup(rule_capabilities)
     diagnostics: list[dict[str, Any]] = []
@@ -470,7 +504,7 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
     status_counts: Counter[str] = Counter()
     header_total_parse_failures = 0
     summary_order_rows = 0
-    for row_ordinal, raw in iter_data_rows(orders_table):
+    for row_ordinal, raw, order_source in _family_rows(orders_tables):
         if is_total_label(raw.get(mapping.orders.fields["order_id"])) and all(
                 _missing(raw.get(mapping.orders.fields[key])) for key in ("date", "status")):
             summary_order_rows += 1  # a total row written in the id column, not an order
@@ -504,7 +538,8 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
                 source=mapping.orders.source, row_ordinal=row_ordinal,
             )
         try:
-            day = parse_date(raw.get(mapping.orders.fields["date"]), orders_table.name)
+            # parse_day also reads Excel day serials (45658), as the README adapter does.
+            day = parse_day(raw.get(mapping.orders.fields["date"]), order_source.name)
         except (TypeError, ValueError) as exc:
             raise JoinedSalesError(
                 "DATE_INVALID", "Order date could not be parsed",
@@ -554,7 +589,7 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
         status_counts[canonical_status] += 1
 
     products: dict[str, dict[str, Any]] = {}
-    for row_ordinal, raw in iter_data_rows(products_table):
+    for row_ordinal, raw, _ in _family_rows(products_tables):
         product_id = _identifier(
             raw.get(mapping.products.fields["product_id"]), field_name="product_id",
             source=mapping.products.source, row_ordinal=row_ordinal,
@@ -580,7 +615,7 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
     seen_line_keys: dict[tuple[str, str], tuple[str, ...]] = {}
     skipped_ordinals: set[int] = set()
     detail_order_ids: set[str] = set()
-    for row_ordinal, raw in iter_data_rows(details_table):
+    for row_ordinal, raw, _ in _family_rows(details_tables):
         raw_detail_rows += 1
         try:
             order_id = _identifier(
@@ -640,7 +675,7 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
     service_fee_rows = 0
     line_amounts_by_order: dict[str, Decimal] = {}
     service_names = {fold(value) for value in rule_capabilities.service_fee_names}
-    for row_ordinal, raw in iter_data_rows(details_table):
+    for row_ordinal, raw, _ in _family_rows(details_tables):
         if row_ordinal in skipped_ordinals:
             continue
         order_id = str(raw[mapping.details.fields["order_id"]])
@@ -769,13 +804,14 @@ def load_joined_sales(catalog: Catalog, *, mapping: MappingSpec,
         _fail("CHECKSUM_CHANGED", "A source changed while the adapter was reading it")
 
     sources = []
-    for table, source_mapping in zip(
-            selected, (mapping.orders, mapping.details, mapping.products)):
-        sources.append({
-            "source": source_mapping.source,
-            "table": table.name,
-            "sha256": before_hashes[table.path],
-        })
+    for tables, source_mapping in roles:
+        for table in tables:
+            sources.append({
+                "source": source_mapping.source,
+                "table": table.name,
+                "file": table.path.name,
+                "sha256": before_hashes[table.path],
+            })
     evidence = {
         "adapter_version": _ADAPTER_VERSION,
         "mapping": _mapping_payload(mapping),
