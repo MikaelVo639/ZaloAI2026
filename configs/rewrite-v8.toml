@@ -23,4 +23,8 @@ rewrite_lenient = true
 rewrite_retry_rejected = true
 # Two of three restatements must lead to the same plan (third asked only when needed).
 rewrite_votes = 3
+# One plannable restatement answers when the other votes restated nothing (unsure, or words
+# the grammar cannot plan); a rejected or different restatement still blocks. Replaying the
+# TRAIN model-benchmark restatements (LOCAL PROXY): 673 correct, 0 wrong.
+rewrite_single_vote = true
 rewrite_code_fallback = false
