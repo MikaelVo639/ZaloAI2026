@@ -23,6 +23,7 @@ from collections.abc import Callable, Iterable
 
 from datamate.contracts import Catalog, Table
 from datamate.ingestion.catalog import iter_rows
+from datamate.ingestion.readme_sales import matches_source, parse_sections, profile_sections
 from datamate.semantics.text import fold
 
 _STOCK = ("ton", "ton kho", "kho hang", "trong kho", "xuat kho", "nhap kho", "kiem kho",
@@ -111,8 +112,24 @@ def _filled_columns(table: Table, columns: list[str]) -> set[str]:
     return filled
 
 
+# Order labels are named too freely ("Loại bán", "Đối tượng KH", "Nhóm") for a word list to
+# find every column holding them. Their absence is trusted only when every table's columns
+# are described, by the README or by a known sales-software export.
+LABEL_CONCEPTS = frozenset({"sales_channel", "payment_method", "customer_group"})
+
+
+def columns_described(catalog: Catalog) -> bool:
+    documented = parse_sections(catalog.readme)
+    documented += profile_sections(catalog, documented)
+    return all(any(matches_source(section.file, table.path.name)
+                   and section.sheet in (None, table.name) for section in documented)
+               for table in catalog.tables)
+
+
 def recorded(catalog: Catalog, concept: str) -> bool:
     """Whether the business shows any trace of ``concept`` (README, names, filled columns)."""
+    if concept in LABEL_CONCEPTS and not columns_described(catalog):
+        return True
     found = CONCEPTS[concept]
     if any(found(words(line)) for line in catalog.readme.splitlines() if line.strip()):
         return True

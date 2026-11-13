@@ -153,6 +153,22 @@ class AskedAttributeTests(unittest.TestCase):
         catalog = build_catalog(root, "b")
         self.assertTrue(compute.attribute_recorded({}, catalog, "customer_address"))
 
+    def test_order_labels_are_absent_only_when_every_table_is_described(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        shop = root / "b"
+        shop.mkdir()
+        (shop / "README.md").write_text(SALES_README, encoding="utf-8")
+        (shop / "ban_hang.csv").write_text(SALES, encoding="utf-8")
+        for label in ("sales_channel", "payment_method", "customer_group"):
+            with self.subTest(label=label):
+                self.assertFalse(compute.attribute_recorded({}, build_catalog(root, "b"), label))
+        # An undescribed list may hold the label under any header ("Loại bán", "Đối tượng").
+        (shop / "don.csv").write_text("Số CT,Loại bán,Đối tượng\nD1,web,A\n", encoding="utf-8")
+        for label in ("sales_channel", "payment_method", "customer_group"):
+            with self.subTest(label=label, undescribed=True):
+                self.assertTrue(compute.attribute_recorded({}, build_catalog(root, "b"), label))
+
 
 class AgentRouteTests(unittest.TestCase):
     """Through BaselineAgent and its worker, as in a real run."""
