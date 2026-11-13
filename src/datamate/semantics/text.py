@@ -192,10 +192,151 @@ def normalize_question(value: object) -> str:
                   r"|luong|gan|loi|han|nhiu|som|muon|lau) nhut\b",
                   r"\1 nhat", text)
     text = re.sub(r"\bko(?= (?:co|duoc|phai)\b)|\bko$", "khong", text)
+    text = _standard_wording(text)
     for _ in range(3):  # greetings, calls and "cho em hỏi" may follow one another
         text = _ASKING.sub("", _CALLING.sub("", _GREETING.sub("", text)))
     text = _CLOSING.sub("", text)
     return re.sub(r"\bla chi$", "la gi", text)  # "là chi z" -> "là chi" -> "là gì"
+
+
+# ---------------------------------------------------------------- standard wordings
+
+# The rewrite model restates a question in words close to, but not the same as, the
+# standard restatements its prompt teaches (`EXAMPLES` in agent/rewrite.py). Collected from
+# the model's restatements of TRAIN questions (LOCAL PROXY model benchmark): each rule maps
+# one recurring wording onto the standard one, with the same measure, period and condition.
+_P = (r"(?:thang \d{1,2}/\d{4}|quy \d/\d{4}|nam \d{4}|tuan (?:truoc|nay)|thang (?:nay|truoc)"
+      r"|hom (?:nay|qua)|ngay \d{1,2}/\d{1,2}/\d{4}|\d+ ngay gan nhat)")
+_D = r"\d{1,2}/\d{1,2}/\d{4}"
+_ORDER = r"(?:don hang|don|hoa don)"
+# "kèm số tiền còn nợ (từng khách)", "mỗi người còn nợ bao nhiêu": the amounts and nothing
+# more ("… và hạn trả" asks a column the table does not have).
+_DEBT_AMOUNT = (r"(?: la ai)?(?: va| kem(?: theo)?| cung(?: voi)?| moi (?:nguoi|khach))? (?:so tien |so )?"
+                r"(?:(?:ho )?con no|no)(?: (?:cua )?(?:tung khach|ho|tung nguoi))?"
+                r"(?: (?:la )?(?:bao nhieu(?: tien)?|gi|nhu the nao))?$")
+_STANDARD: tuple[tuple[str, str], ...] = (
+    # Same words, other spellings.
+    (r"\btuan qua\b", "tuan truoc"),
+    (r"\bthang hien tai\b", "thang nay"),
+    (r"\b(\d+) ngay gan day\b", r"\1 ngay gan nhat"),
+    (r"\bhet ngay hom nay\b", "het hom nay"),
+    (r"\btang hoac giam\b", "tang hay giam"),
+    (r"\bhan su dung\b", "han dung"),
+    (r"\bden het (" + _D + r")\b", r"den het ngay \1"),
+    (r"\bnv ban gioi nhat\b", "nhan vien ban gioi nhat"),
+    # Revenue "(được) ghi nhận (qua cửa hàng)", "của cửa hàng" before "là".
+    (r"\b(doanh thu\b.*?) (?:duoc )?ghi nhan(?: qua cua hang)?\b", r"\1"),
+    (r"\b(doanh thu\b.*?) cua cua hang(?= la\b)", r"\1"),
+    # Order value: "doanh thu tháng X (có giá trị) trung bình mỗi đơn hàng",
+    # "doanh thu / giá trị trung bình của một đơn hàng trong tháng X".
+    (r"\bdoanh thu (" + _P + r") (?:co )?(?:gia tri )?trung binh (?:tren )?(?:moi|mot) "
+     + _ORDER + r"\b", r"gia tri trung binh mot don \1"),
+    (r"\bdoanh thu (" + _P + r") trung binh bao nhieu tien(?: hang)? (?:tren )?(?:moi|mot) "
+     + _ORDER + r"\b", r"gia tri trung binh mot don \1 la bao nhieu"),
+    (r"\b(?:doanh thu|gia tri) trung binh (?:cua |tren )?(?:moi|mot) " + _ORDER
+     + r" (?:trong )?(" + _P + r")\b", r"gia tri trung binh mot don \1"),
+    (r"\bgia tri trung binh (?:moi|mot) don (" + _P + r") mang ve bao nhieu doanh thu\b",
+     r"gia tri trung binh mot don \1 la bao nhieu"),
+    # Best day.
+    (r"\bngay nao trong (" + _P + r") (?:cua hang )?(?:ban duoc )?doanh thu (?:dat )?cao nhat\b",
+     r"ngay nao trong \1 co doanh thu cao nhat"),
+    (r"\bngay nao trong (" + _P + r") hang hoa ban duoc nhieu tien nhat\b",
+     r"ngay nao trong \1 co doanh thu cao nhat"),
+    # Rankings: supplier, staff, customers, products, gross profit.
+    (r"\b(" + _P + r") nha cung cap nao (?:nhap hang voi|co) tong gia tri (?:nhap hang )?"
+     r"(?:cao|lon) nhat\b", r"\1 cua hang nhap nhieu tien hang nhat tu nha cung cap nao"),
+    (r"\bnhan vien (?:ban hang )?(?:nao )?co doanh thu cao nhat\b", "nhan vien ban gioi nhat"),
+    # Not "mua nhiều lần nhất" without "tính theo số đơn": the shop's rule decides.
+    (r"\bkhach(?: hang)? (?:nao )?(?:da )?(?:mua (?:hang )?(?:tong tien cao nhat|nhieu tien nhat)"
+     r"|chi tieu nhieu nhat)\b", "khach mua nhieu tien nhat"),
+    (r"\bhang hoa nao ban chay nhat\b", "mat hang nao ban chay nhat"),
+    (r"\btop (\d+) san pham ban chay nhat\b", r"\1 mat hang ban chay nhat"),
+    (r"\b(?:mat )?hang nao co (?:tong )?loi nhuan (cao|thap) nhat\b",
+     r"hang nao co tong lai gop \1 nhat"),
+    # Purchases, stock value, deliveries.
+    (r"\bcua hang bo ra tong cong bao nhieu tien nhap hang\b",
+     "tong gia tri cac phieu nhap hang la bao nhieu"),
+    (r"\btong gia tri hang nhap vao (" + _P + r")\b", r"\1 tong gia tri cac phieu nhap hang"),
+    (r"\b(?:tinh toan theo gia von )?(?:tong )?(?:tien hang nam trong kho|tien hang ton kho"
+     r"|so hang (?:con )?(?:trong kho|ton kho)) vao (?:cuoi |het )?ngay (" + _D
+     + r")(?: (?:tinh )?theo gia von)?\b", r"tien hang nam trong kho vao cuoi ngay \1 theo gia von"),
+    (r"\bcua hang (?:da )?giao hang tong cong bao nhieu dot\b",
+     "cua hang giao bao nhieu dot hang cho khach"),
+    (r"\bso luong dot giao hang trong (" + _P + r") la bao nhieu\b",
+     r"\1 cua hang giao bao nhieu dot hang cho khach"),
+    # Unsold items over a span of days.
+    (r"\b(?:trong )?(?:khoang thoi gian |giai doan )?tu (?:ngay )?(" + _D + r") den (?:het )?(?:ngay )?("
+     + _D + r") (?:cua hang )?(?:co )?(?:tong cong )?(?:bao nhieu|may) mat hang (?:bi )?e\b(?: han)?",
+     r"tu ngay \1 den het ngay \2 co may mat hang e han"),
+    # Revenue comparisons and shares.
+    (r"\bdoanh thu (" + _P + r") so voi (" + _P + r") (?:tang hay giam|thay doi) bao nhieu "
+     r"phan tram\b", r"doanh thu \1 thay doi bao nhieu phan tram so voi \2"),
+    (r"\bdoanh thu ca chieu (" + _P + r") (?:thay doi|tang hay giam) bao nhieu phan tram so voi "
+     r"ca sang\b", r"\1 doanh thu ca chieu so voi ca sang chenh bao nhieu phan tram"),
+    (r"\bdoanh thu (" + _P + r") ca chieu (?:thay doi|tang hay giam) bao nhieu phan tram so voi "
+     r"ca sang\b", r"\1 doanh thu ca chieu so voi ca sang chenh bao nhieu phan tram"),
+    (r"\bdoanh thu ca chieu (" + _P + r") so voi ca sang (?:tang hay giam|thay doi) bao nhieu "
+     r"phan tram\b", r"\1 doanh thu ca chieu so voi ca sang chenh bao nhieu phan tram"),
+    (r"\b(?:doanh thu (?:ban |tu viec ban )?)?thuoc (khong )?ke don (?:ban duoc )?chiem bao nhieu "
+     r"phan tram (?:tong )?doanh thu(?: cua (?:nha thuoc|cua hang)| tong the)?(?: trong)? (" + _P + r")\b",
+     r"thuoc \1ke don chiem bao nhieu phan tram doanh thu cua nha thuoc \2"),
+    (r"\bdoanh thu (?:ban |tu viec ban )?thuoc (khong )?ke don (?:trong )?(" + _P
+     + r") chiem bao nhieu phan tram tong doanh thu\b",
+     r"thuoc \1ke don chiem bao nhieu phan tram doanh thu cua nha thuoc \2"),
+    (r"\bdoanh thu (?:nha thuoc )?(?:ban |tu viec ban )?thuoc (khong )?ke don (?:trong )?(" + _P
+     + r")(?: la bao nhieu)?$", r"thuoc \1ke don \2 ban duoc tong cong bao nhieu tien"),
+    (r"\bdoanh thu hang hoa khong ke don (?:trong )?(" + _P + r")(?: la bao nhieu)?$",
+     r"thuoc khong ke don \1 ban duoc tong cong bao nhieu tien"),
+    (r"\bthuoc (khong )?ke don nha thuoc\b", r"thuoc \1ke don"),
+    (r"^(.+?) ban duoc bao nhieu tien trong (" + _P + r")$",
+     r"\1 \2 ban duoc tong cong bao nhieu tien"),
+    (r"^doanh thu tu (thang \d{1,2}/\d{4}) den (thang \d{1,2}/\d{4}) co (?:luon cao hon thang "
+     r"truoc|tang len moi thang|tang lien tuc) khong$",
+     r"tu \1 den \2 doanh thu thang sau co luon cao hon thang truoc khong"),
+    # Net profit after every cost.
+    (r"^lai rong (" + _P + r") sau khi tru het chi phi la bao nhieu$",
+     r"loi nhuan rong \1 la bao nhieu"),
+    (r"^(" + _P + r") con lai rong bao nhieu sau khi tru het chi phi$",
+     r"loi nhuan rong \1 la bao nhieu"),
+    # Counts with a threshold, orders by shift.
+    (r"\bco bao nhieu mat hang duoc mua tu (\d+) don(?: hang)? khac nhau tro len\b",
+     r"co bao nhieu mat hang co mat o tu \1 don hang khac nhau tro len"),
+    (r"\bhay dem so khach da mua tu (\d+) don tro len\b", r"co bao nhieu khach mua tu \1 don tro len"),
+    (r"\bco bao nhieu don hang co gia tri tu ([\d.]+ dong) tro len\b",
+     r"co bao nhieu don co doanh thu tu \1 tro len"),
+    (r"\bso don (ca (?:sang|chieu|toi)) co bao nhieu " + _ORDER + r"\b", r"\1 co bao nhieu don hang"),
+    (r"\bco bao nhieu hoa don bi huy\b", "co bao nhieu don bi huy"),
+    # Cups of one size over every drink.
+    (r"^(" + _P + r") (?:tong so luong ly size (\w+) ban duoc la bao nhieu|tong cong cua hang ban "
+     r"duoc bao nhieu ly size (\w+)) (?:tinh|cong) tat ca cac (?:mat hang|mon)$",
+     r"trong \1 so ly size \2\3 ban duoc la bao nhieu tinh moi loai do uong"),
+    # Stock: "kiểm tra số lượng tồn kho X ..." is "tồn kho X ...".
+    (r"^kiem tra so luong ton kho\b", "ton kho"),
+    (r"^(?:tinh )?den het ngay (" + _D + r") (cua hang co bao nhieu mat hang dang het hang)$",
+     r"cuoi ngay \1 \2"),
+    # Debts: top debtors, age buckets, debts older than N days, money collected.
+    (r"^(?:tinh )?den het ngay (" + _D + r") (?:liet ke )?(\d+) khach(?: hang)? (?:nao )?(?:dang )?"
+     r"(?:co cong no lon nhat|no nhieu nhat)" + _DEBT_AMOUNT,
+     r"tinh den het ngay \1 \2 khach nao dang no nhieu nhat moi nguoi con no bao nhieu"),
+    (r"^(?:top |liet ke |danh sach |bang )?(\d+) khach(?: hang)? (?:co cong no lon nhat|no nhieu nhat)"
+     r" (?:tinh )?den het ngay (" + _D + r")" + _DEBT_AMOUNT,
+     r"tinh den het ngay \2 \1 khach nao dang no nhieu nhat moi nguoi con no bao nhieu"),
+    (r"^(?:tinh )?den het ngay (" + _D + r") (?:so tien con no (?:duoc )?phan loai theo tuoi no"
+     r"|phan tuoi no con lai thanh 3 nhom) 0 7 ngay 8 15 ngay(?: va)? tren 15 ngay"
+     r"(?: (?:la bao nhieu|moi nhom (?:co tong tien )?(?:la )?bao nhieu(?: tien)?))?$",
+     r"tinh den het ngay \1 khach con no bao nhieu theo nhom tuoi no 0 7 ngay 8 15 ngay va tren 15 ngay"),
+    (r"^\b(doanh thu (?:cua hang )?)?(" + _P + r") tu (?:viec )?khach tra no la bao nhieu$",
+     r"\2 cua hang thu duoc bao nhieu tien khach tra no"),
+)
+_STANDARD_RULES = tuple((re.compile(pattern), repl) for pattern, repl in _STANDARD)
+
+
+def _standard_wording(text: str) -> str:
+    for pattern, repl in _STANDARD_RULES:
+        if "theo gia von" in repl and not re.search(r"\bgia von\b", text):
+            continue  # stock at cost only when the question says "giá vốn"
+        text = pattern.sub(repl, text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def normalize_answer(value: str) -> str:

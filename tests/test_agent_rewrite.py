@@ -201,6 +201,7 @@ class RewriteCheckTests(unittest.TestCase):
         for question, rewrite, concept in (
                 ("so tháng này với tháng trước", "Doanh thu tháng này", "compare"),
                 ("lãi tháng này", "Doanh thu tháng này", "profit"),
+                ("lãi gộp tháng 9/2025", "Lợi nhuận ròng tháng 9/2025 là bao nhiêu?", "net"),
                 ("món nào lời nhất", "Món nào bán chạy nhất", "profit"),
                 ("khách nợ bao nhiêu", "Khách mua bao nhiêu", "debt"),
                 ("hàng trả lại tháng này", "Hàng tháng này", "return"),
@@ -225,7 +226,10 @@ class RewriteCheckTests(unittest.TestCase):
                  "counts"),
                 ("đến hết ngày 04/08/2026, có bao nhiêu khách còn nợ cửa hàng",
                  "Đến hết ngày 04/08/2026, cửa hàng còn nợ của khách hàng bao nhiêu?", "counts"),
-                ("tháng 3/2026 bán mấy mặt hàng", "Tháng 3/2026 bán bao nhiêu đơn?", "counts")):
+                ("tháng 3/2026 bán mấy mặt hàng", "Tháng 3/2026 bán bao nhiêu đơn?", "counts"),
+                ("Tháng 7/2026 khách Cao Thu Hạnh ghi nợ thêm bao nhiêu và trả được bao nhiêu?",
+                 "Tháng 7/2026 khách Lê Thị Mai ghi nợ thêm bao nhiêu và trả nợ được bao nhiêu?",
+                 "copied")):
             with self.subTest(rewrite=rewrite):
                 self.assertIn(reason, check_rewrite(question, rewrite) or "")
         for question, rewrite in (

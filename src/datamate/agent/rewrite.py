@@ -262,6 +262,8 @@ _GUARDS: tuple[tuple[str, str, bool, str], ...] = (
      r"\b(?:it nhat|toi thieu)(?= \d)|\bduy nhat\b|\bcap nhat\b"
      r"|\b(?:\d+|hai|ba|bon|nam|sau|bay|tam|chin|muoi) (?:ngay|tuan|thang|nam|don|lan)"
      r" (?:gan|gan day) nhat\b"),
+    # "lãi gộp" restated as "lợi nhuận ròng" (after every cost) is another measure.
+    ("net", r"\brong\b", True, ""),
     ("payment", r"\b(?:tien mat|chuyen khoan|cod|quet the)\b", False, ""),
     ("staff", r"\b(?:nhan vien|nv)\b", False, ""),
     ("customer", r"\b(?:khach|kh)\b", False, ""),
@@ -424,6 +426,12 @@ def _counted(text: str) -> set[str]:
     return {_COUNT_SAME.get(noun, noun) for noun in _COUNT.findall(f" {_plain(text)} ")}
 
 
+# Invented names of the standard restatements. One in a restatement but not in the question
+# was copied from the prompt ("khách Lê Thị Mai" for another customer).
+_EXAMPLE_NAMES = ("le thi mai", "banh quy bo", "keo gung", "tra may tia", "do an vat",
+                  "dai ly", "kem gluconat", "nv007", "nv036")
+
+
 def check_rewrite(question: str, rewrite: str, names: Iterable[str] = ()) -> str | None:
     """Reason the restatement is unsafe, or None. Never repairs, only rejects."""
     if not rewrite or len(rewrite) > MAX_REWRITE_CHARACTERS or "\n" in rewrite:
@@ -444,6 +452,10 @@ def check_rewrite(question: str, rewrite: str, names: Iterable[str] = ()) -> str
         after = re.search(pattern, after_text) is not None
         if (before and not after) or (both and after and not before):
             return f"Rewrite changed the '{concept}' meaning"
+    copied = next((name for name in _EXAMPLE_NAMES
+                   if f" {name} " in _words(rewrite) and f" {name} " not in _words(question)), None)
+    if copied is not None:
+        return f"Rewrite copied the name {copied!r} from the examples"
     if _periods(question) != _periods(rewrite):
         return "Rewrite changed the period of the question"
     counted, recounted = _counted(question), _counted(rewrite)

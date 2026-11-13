@@ -171,6 +171,43 @@ class EverydayWordingTests(unittest.TestCase):
         self.assertIn("so doanh thu", normalize_question("So doanh thu tháng này với tháng trước"))
         self.assertIn("binh quan", normalize_question("giá nhập bình quân một thùng tháng 3"))
 
+    def test_model_restatements_read_as_the_standard_ones(self):
+        # Shapes of the rewrite model's restatements of TRAIN questions (LOCAL PROXY model
+        # benchmark) and the standard restatement of the prompt they mean.
+        for restated, standard in (
+                ("Doanh thu tháng 3/2026 ghi nhận bình quân mỗi đơn hàng là bao nhiêu?",
+                 "Giá trị trung bình một đơn tháng 3/2026 là bao nhiêu?"),
+                ("Giá trị trung bình của một đơn hàng trong tuần qua là bao nhiêu?",
+                 "Giá trị trung bình một đơn tuần trước là bao nhiêu?"),
+                ("Doanh thu được ghi nhận hôm qua của cửa hàng là bao nhiêu?",
+                 "Doanh thu hôm qua là bao nhiêu?"),
+                ("Ngày nào trong tháng 8 năm 2025 doanh thu được ghi nhận cao nhất?",
+                 "Ngày nào trong tháng 8/2025 có doanh thu cao nhất?"),
+                ("Tháng 9/2025, nhà cung cấp nào có tổng giá trị nhập hàng cao nhất?",
+                 "Tháng 9/2025 cửa hàng nhập nhiều tiền hàng nhất từ nhà cung cấp nào?"),
+                ("NV bán giỏi nhất tháng 1/2025 là ai?", "Nhân viên bán giỏi nhất tháng 1/2025 là ai?"),
+                ("Tính đến hết ngày 19/08/2026, 5 khách nợ nhiều nhất là ai, kèm số tiền còn nợ?",
+                 "Tính đến hết ngày 19/08/2026, 5 khách nào đang nợ nhiều nhất, mỗi người còn nợ"
+                 " bao nhiêu?"),
+                ("Thuốc kê đơn chiếm bao nhiêu phần trăm tổng doanh thu trong tháng 9/2025?",
+                 "Thuốc kê đơn chiếm bao nhiêu % doanh thu của nhà thuốc tháng 9/2025?"),
+                ("Doanh thu tháng 8/2026 so với tháng 8/2025 tăng hoặc giảm bao nhiêu phần trăm?",
+                 "Doanh thu tháng 8/2026 thay đổi bao nhiêu % so với tháng 8/2025?"),
+                ("Tổng tiền hàng tồn kho vào cuối ngày 12/06/2026 theo giá vốn là bao nhiêu?",
+                 "Tiền hàng nằm trong kho vào cuối ngày 12/06/2026 theo giá vốn là bao nhiêu?"),
+                ("Trong khoảng thời gian từ 20/06/2026 đến hết 26/06/2026, có bao nhiêu mặt hàng"
+                 " bị ế?", "Từ ngày 20/06/2026 đến hết ngày 26/06/2026, có mấy mặt hàng ế hẳn?"),
+                ("Doanh thu tháng 10/2025 từ khách trả nợ là bao nhiêu?",
+                 "Tháng 10/2025 cửa hàng thu được bao nhiêu tiền khách trả nợ?")):
+            with self.subTest(restated=restated):
+                self.assertEqual(normalize_question(restated), normalize_question(standard))
+        # Kept: the question's own wording, "giá vốn" never added, "lần nhất" keeps its count.
+        self.assertEqual(normalize_question("Tháng 6/2025 ai là khách mua nhiều lần nhất, tính"
+                                            " theo số đơn?"),
+                         "thang 6/2025 ai la khach mua nhieu lan nhat tinh theo so don")
+        self.assertNotIn("gia von", normalize_question("Tổng tiền hàng tồn kho vào cuối ngày"
+                                                       " 12/06/2026 là bao nhiêu?"))
+
     def test_particle_after_la_chi(self):
         self.assertEqual(normalize_question("top 5 hàng chạy nhất là chi nha"),
                          "top 5 hang chay nhat la gi")
