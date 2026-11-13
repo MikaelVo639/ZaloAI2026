@@ -47,6 +47,9 @@ class Config:
     # sales lines (two must agree). code_only skips grammar and rewrite (benchmark only).
     rewrite_code_fallback: bool = False
     rewrite_code_only: bool = False
+    # votes=3: one plannable restatement is enough when every other vote restated nothing
+    # (unsure, or words the grammar cannot plan); a rejected or different one still blocks.
+    rewrite_single_vote: bool = False
 
     def __post_init__(self) -> None:
         if self.backend not in ("baseline", "abstain", "local_plan", "rewrite"):
@@ -71,7 +74,7 @@ class Config:
         if type(self.rewrite_votes) is not int or self.rewrite_votes not in (1, 2, 3):
             raise ValueError("rewrite_votes must be 1, 2 or 3")
         for name in ("rewrite_lenient", "rewrite_retry_rejected", "rewrite_code_fallback",
-                     "rewrite_code_only"):
+                     "rewrite_code_only", "rewrite_single_vote"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be true or false")
         if self.max_input_tokens + self.max_new_tokens > 32768:
@@ -105,7 +108,8 @@ def predict(data_dir: Path, output_dir: Path, config: Config,
                                 retry_rejected=config.rewrite_retry_rejected,
                                 votes=config.rewrite_votes,
                                 code_fallback=config.rewrite_code_fallback,
-                                code_only=config.rewrite_code_only)
+                                code_only=config.rewrite_code_only,
+                                single_vote=config.rewrite_single_vote)
             agent = model_agent(config.model_path, model_load_timeout=config.model_load_timeout,
                                 model_timeout=config.model_timeout,
                                 max_input_tokens=config.max_input_tokens,

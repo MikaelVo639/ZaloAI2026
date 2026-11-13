@@ -464,6 +464,10 @@ def rewrite_names(agent: BaselineAgent, context: BusinessContext) -> tuple[str, 
     return context.cache["rewrite_names"]
 
 
+# Votes that restated nothing: no evidence against the one vote that did.
+_NO_RESTATEMENT = frozenset({"Rewrite model was unsure", "Grammar cannot plan the rewrite"})
+
+
 # Invented names of the standard restatements. One in a restatement but not in the question
 # was copied from the prompt ("khách Lê Thị Mai" for another customer).
 _EXAMPLE_NAMES = ("le thi mai", "banh quy bo", "keo gung", "tra may tia", "do an vat",
@@ -642,10 +646,13 @@ class RewriteAgent(LocalPlanAgent):
     def __init__(self, model_path: str, *, votes: int = 2, examples: int = 6,
                  rewrite_retries: int = 1, lenient: bool = False,
                  retry_rejected: bool = False, code_fallback: bool = False,
-                 code_only: bool = False, **kwargs: Any) -> None:
+                 code_only: bool = False, single_vote: bool = False, **kwargs: Any) -> None:
         super().__init__(model_path, **kwargs)
-        if any(type(flag) is not bool for flag in (lenient, retry_rejected, code_fallback, code_only)):
-            raise ValueError("lenient, retry_rejected, code_fallback and code_only must be true or false")
+        if any(type(flag) is not bool
+               for flag in (lenient, retry_rejected, code_fallback, code_only, single_vote)):
+            raise ValueError("lenient, retry_rejected, code_fallback, code_only and single_vote "
+                             "must be true or false")
+        self.single_vote = single_vote
         self.lenient, self.retry_rejected = lenient, retry_rejected
         self.code_fallback, self.code_only = code_fallback, code_only
         if type(votes) is not int or not 1 <= votes <= 3:
@@ -875,6 +882,12 @@ class RewriteAgent(LocalPlanAgent):
                     return Candidate(reason=failures[0], evidence=evidence)
         if self.votes == 3:
             agreed = [plan for plan in plans if plans.count(plan) >= 2]
+            if not agreed and self.single_vote and len(plans) == 1 and all(
+                    failure in _NO_RESTATEMENT for failure in failures):
+                # One plannable restatement; the other votes restated nothing (the model was
+                # unsure or wrote words the grammar cannot plan), none changed the meaning.
+                agreed = plans
+                evidence["single_vote"] = True
             if not agreed:
                 reason = failures[0] if failures and len(plans) < 2 else (
                     "Rewrites lead to different plans")

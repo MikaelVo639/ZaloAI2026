@@ -114,6 +114,17 @@ def third_vote_breaks_tie_generate(cache, messages, max_input_tokens, max_new_to
     return {"text": "Số đơn tháng này là bao nhiêu?" if _order(messages) == 1 else STANDARD}
 
 
+def only_first_vote_restates_generate(cache, messages, max_input_tokens, max_new_tokens):
+    return {"text": STANDARD if _order(messages) == 0 else UNSURE}
+
+
+def first_vote_restates_second_changes_generate(cache, messages, max_input_tokens,
+                                                max_new_tokens):
+    order = _order(messages)
+    return {"text": STANDARD if order == 0 else
+            "Doanh thu tháng 7/2026 là bao nhiêu?" if order == 1 else UNSURE}
+
+
 def first_vote_unsure_generate(cache, messages, max_input_tokens, max_new_tokens):
     return {"text": UNSURE if _order(messages) == 0 else STANDARD}
 
@@ -539,6 +550,21 @@ class RewriteAgentTests(unittest.TestCase):
         self.assertEqual(echoed.type, "number", echoed.reason)
         with self.assertRaisesRegex(ValueError, "rewrite_votes"):
             Config(rewrite_votes=4)
+
+    def test_one_restatement_is_enough_only_when_the_others_restate_nothing(self):
+        alone = self.agent(only_first_vote_restates_generate, votes=3)
+        self.assertEqual(alone.answer(self.question, self.context).reason,
+                         "Rewrite model was unsure")
+        single = self.agent(only_first_vote_restates_generate, votes=3, single_vote=True)
+        answered = single.answer(self.question, self.context)
+        self.assertEqual(answered.type, "number", answered.reason)
+        self.assertTrue(answered.evidence["single_vote"])
+        # A vote whose restatement the checks reject is evidence against the plan.
+        changed = self.agent(first_vote_restates_second_changes_generate, votes=3,
+                             single_vote=True).answer(self.question, self.context)
+        self.assertEqual(changed.type, "abstain")
+        with self.assertRaisesRegex(ValueError, "rewrite_single_vote"):
+            Config(rewrite_single_vote=1)
 
     def test_variant_options_are_validated_and_off_by_default(self):
         config = Config.load(Path(__file__).resolve().parents[1] / "configs" / "rewrite.toml")
