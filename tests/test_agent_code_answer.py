@@ -11,9 +11,13 @@ from datamate.agent.code_answer import (
     CODE_EXAMPLES,
     build_code_messages,
     check_code,
+    code_doubt,
     extract_code,
     normalize_result,
+    out_of_reach,
+    round_money,
     rule_text,
+    unknown_filter,
 )
 from datamate.agent.rewrite import UNSURE, RewriteAgent
 from datamate.contracts import BusinessContext, Question
@@ -98,8 +102,12 @@ def named_code_generate(cache, messages, max_input_tokens, max_new_tokens):
     return {"text": NAMES % "" if _is_code_prompt(messages) else UNSURE}
 
 
-def invented_name_generate(cache, messages, max_input_tokens, max_new_tokens):
+def decorated_name_generate(cache, messages, max_input_tokens, max_new_tokens):
     return {"text": NAMES % " + ' (SP01)'" if _is_code_prompt(messages) else UNSURE}
+
+
+def invented_name_generate(cache, messages, max_input_tokens, max_new_tokens):
+    return {"text": NAMES % " + ' Plus'" if _is_code_prompt(messages) else UNSURE}
 
 
 def always_buggy_generate(cache, messages, max_input_tokens, max_new_tokens):
@@ -145,6 +153,67 @@ class CodeCheckTests(unittest.TestCase):
             _call(_globals(), "def answer(s, t):\n    return undefined_name", [], None)
         with self.assertRaises(ImportError):
             _globals()["__builtins__"]["__import__"]("os")
+
+    def test_code_must_read_what_the_question_is_about(self):
+        # Shapes of the wrong model calculations on the TRAIN model benchmark (LOCAL PROXY).
+        lines_only = 'def answer(sales, today):\n    return {"type": "number", "answer": len(sales)}'
+        for question, reason in (
+                ("tháng 3/2026 có bao nhiêu bill bị huỷ", "orders"),
+                ("doanh thu bình quân mỗi đơn tháng 1/2026", "orders"),
+                ("tháng này cửa hàng bỏ ra bao nhiêu tiền nhập hàng", "purchases"),
+                ("Hết hôm nay, Gas 12kg còn lại mấy bình trong kho?", "stock"),
+                ("cuoi ngay hom nay con bao nhieu tuyp", "stock"),
+                ("tổng dthu 30 ngày gần nhất", None)):
+            with self.subTest(question=question):
+                doubt = code_doubt(question, lines_only)
+                self.assertIn(reason, doubt or "") if reason else self.assertIsNone(doubt)
+        self.assertIsNone(code_doubt("doanh thu của Tôn lạnh 0.4mm tháng 7/2025", lines_only))
+        self.assertIsNone(code_doubt("doanh thu hàng không kê đơn tháng 2/2025", lines_only))
+        self.assertIn("days ending today", code_doubt(
+            "tổng dthu 30 ngày gần nhất",
+            "def answer(sales, today):\n    start = today - timedelta(days=30)\n    return None"))
+        self.assertIsNone(code_doubt(
+            "tổng dthu 30 ngày gần nhất",
+            "def answer(sales, today):\n    start = today - timedelta(days=29)\n    return None"))
+        self.assertIn("one line's amount", code_doubt("số ngày doanh thu từ 7.900.000", (
+            "def answer(sales, today):\n"
+            "    return len({s['day'] for s in sales if s['amount'] >= 7900000})")))
+        self.assertIn("ranks single lines", code_doubt("ai mua nhiều tiền nhất", (
+            "def answer(sales, today):\n"
+            "    return max(sales, key=lambda s: s['amount'])['customer_name']")))
+        self.assertIsNotNone(out_of_reach("tiền khách trả bớt nợ các đơn mua chịu được bao nhiêu"))
+        self.assertIsNone(out_of_reach("doanh thu tháng này bao nhiêu"))
+
+    def test_filters_must_name_values_in_the_data(self):
+        lines = [{"product_group": "Giảm đau", "product_name": "Gạo ST25", "channel": None}]
+        refused = unknown_filter(
+            'def answer(sales, today):\n'
+            '    return [s for s in sales if s["product_group"] == "Thuốc kê đơn"]', lines)
+        self.assertIn("Thuốc kê đơn", refused or "")
+        self.assertIsNotNone(unknown_filter(
+            'def answer(sales, today):\n'
+            '    return [s for s in sales if s.get("product_group") in ["giảm đau", "kháng sinh"]]',
+            lines))
+        for code in ('def answer(sales, today):\n'
+                     '    return [s for s in sales if fold(s["product_name"]) == fold("gao st25")]',
+                     'def answer(sales, today):\n'
+                     '    return [s for s in sales if "gao" in fold(s["product_name"])]',
+                     'def answer(sales, today):\n'
+                     '    return [s for s in sales if s["status"] == "valid"]'):
+            with self.subTest(code=code):
+                self.assertIsNone(unknown_filter(code, lines))
+
+    def test_money_is_rounded_to_whole_vnd(self):
+        self.assertEqual(round_money("doanh thu bình quân mỗi đơn tháng 3/2026", "number",
+                                     532061.5), 532062)
+        self.assertEqual(round_money("giá nhập bình quân một hộp", "number", 92896.49), 92896)
+        self.assertEqual(round_money("bán được bao nhiêu tiền", "number", 1500.5), 1501)
+        for question, answer in (("trung bình mỗi đơn có mấy dòng hàng", 2.35),
+                                 ("bao nhiêu chai bán ra tháng này", 120.5),
+                                 ("doanh thu tăng bao nhiêu", 12.5)):
+            with self.subTest(question=question):
+                self.assertEqual(round_money(question, "number", answer), answer)
+        self.assertEqual(round_money("tỷ lệ doanh thu", "percent", 12.345), 12.345)
 
     def test_answers_the_question_rules_out(self):
         from datamate.agent.code_answer import implausible
@@ -303,10 +372,14 @@ class CodeAgentTests(unittest.TestCase):
         named = self.agent(named_code_generate, code_fallback=True).answer(
             self.question, self.context)
         self.assertEqual(named.type, "string", named.reason)
+        # A name the code decorated is answered bare; a name it made up is refused.
+        decorated = self.agent(decorated_name_generate, code_fallback=True).answer(
+            self.question, self.context)
+        self.assertEqual((decorated.type, decorated.answer), (named.type, named.answer))
         invented = self.agent(invented_name_generate, code_fallback=True).answer(
             self.question, self.context)
         self.assertIn("not in the data", invented.reason)
-        self.assertIn("(SP01)", invented.reason)
+        self.assertIn("Plus", invented.reason)
 
     def test_code_only_skips_the_grammar(self):
         planned = Question("q", "demo_csv", "Doanh thu tháng này là bao nhiêu?", date(2026, 8, 27))

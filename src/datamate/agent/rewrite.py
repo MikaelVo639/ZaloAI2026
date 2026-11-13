@@ -30,10 +30,13 @@ from datamate.agent.code_answer import (
     CODE_REPAIRS,
     CODE_TIMEOUT_SECONDS,
     build_code_messages,
+    code_doubt,
     extract_code,
     implausible,
     normalize_result,
+    out_of_reach,
     repair_messages,
+    round_money,
 )
 from datamate.agent.local_plan import LocalPlanAgent
 from datamate.agent.rule_spec_model import model_specs
@@ -653,6 +656,9 @@ class RewriteAgent(LocalPlanAgent):
 
     def _code_answer(self, question: Question, context: BusinessContext) -> Candidate:
         """Two independent model-written calculations that must return the same answer."""
+        unreachable = out_of_reach(question.question)
+        if unreachable is not None:
+            return Candidate(reason=unreachable, evidence={"path": "code"})
         failure = self._prepare(context)
         if failure is not None:
             return failure
@@ -689,6 +695,13 @@ class RewriteAgent(LocalPlanAgent):
                 attempt["code"] = code
                 if code is None:
                     return Candidate(reason="Model wrote no answer function", evidence=evidence)
+                doubt = code_doubt(question.question, code)
+                if doubt is not None:
+                    attempt["refused"] = doubt
+                    if repair == CODE_REPAIRS:
+                        return Candidate(reason=doubt, evidence=evidence)
+                    messages = repair_messages(messages, code, doubt)
+                    continue
                 ran = self.worker.run(self.run_code, self.question_timeout, code=code,
                                       today=today, catalog=context.catalog,
                                       calendar=context.split.calendar_path)
@@ -706,6 +719,9 @@ class RewriteAgent(LocalPlanAgent):
                 else:
                     attempt["result"] = ran.value["value"]
                     result = normalize_result(ran.value["value"])
+                    if not isinstance(result, str):
+                        result = (result[0], round_money(question.question, *result))
+                        attempt["answer"] = list(result)
                 if isinstance(result, str):
                     if result == "Code returned no answer" or repair == CODE_REPAIRS:
                         return Candidate(reason=result, evidence=evidence)
@@ -721,8 +737,8 @@ class RewriteAgent(LocalPlanAgent):
         if results[0] != results[1]:
             return Candidate(reason="Model calculations disagree", evidence=evidence)
         kind, value = results[0]
-        evidence.update(code=next(a["code"] for a in evidence["code_votes"] if "result" in a
-                                  and normalize_result(a["result"]) == results[0]), result=value)
+        evidence.update(code=next(a["code"] for a in evidence["code_votes"]
+                                  if a.get("answer") == list(results[0])), result=value)
         return Candidate(type=kind, answer=value, confidence=REWRITE_CONFIDENCE,
                          reason="Model calculation", evidence=evidence)
 

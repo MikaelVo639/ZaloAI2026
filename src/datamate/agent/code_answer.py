@@ -17,10 +17,11 @@ import csv
 import importlib
 import math
 import re
+import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import asdict
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -106,6 +107,22 @@ heapq, bisect and string can be imported; no files, no pandas.
 
 Shop rules (follow them exactly):
 {rules}
+
+How to read the usual questions:
+- "đơn", "bill", "hoá đơn" are orders: count distinct order_id, never lines. An average per
+  order divides by the number of distinct order_id.
+- Thresholds and rankings on money ("ngày có doanh thu từ X", "khách mua nhiều tiền nhất",
+  "đơn trên X") apply to totals: sum amount per day / customer / order first, then compare.
+- "N ngày gần nhất", "N ngày qua" are the N days ending today:
+  today - timedelta(days=N - 1) <= day <= today.
+- Purchases ("nhập hàng", "giá nhập", "nhà cung cấp") come only from the purchase lists,
+  stock ("tồn", "trong kho", "còn lại bao nhiêu") only from the stock list; never from
+  `sales`: return None when that list is not given above. Debts ("nợ", "mua chịu", "trả
+  nợ") are not in these records: return None.
+- Filter only on values listed above or names written in the question; when the question
+  names a kind of product or customer that no listed value matches, return None.
+- Money is a whole number of VND: return round(x) as int. Names are returned bare, without
+  quantities or codes added.
 
 Return {"type": T, "answer": A} with T one of:
 - "number": money rounded to whole VND, counts as int, other numbers rounded to 2 decimals.
@@ -464,7 +481,11 @@ def run_code(cache: dict[str, Any], code: str, today: date,
         for name, rows in extra_tables(cache, catalog, today).items():
             namespace[name] = [dict(row) for row in rows]
     lines = [dict(line) for line in sales_lines(cache, today)]
+    filtered = unknown_filter(code, lines)
+    if filtered is not None:
+        return {"refused": filtered}
     result = _call(namespace, code, lines, today)
+    result = _bare_names(result, cache, today, namespace)
     unknown = _unknown_name(result.get("value"), cache, today, namespace)
     if unknown is not None:
         return {"refused": f"Code answer names a value that is not in the data: {unknown[:60]}"}
@@ -472,6 +493,31 @@ def run_code(cache: dict[str, Any], code: str, today: date,
 
 
 _ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+_DECORATION = re.compile(r"\s*[(\[][^()\[\]]*[)\]]\s*$")
+
+
+def _bare_names(result: dict[str, Any], cache: dict[str, Any], today: date,
+                namespace: dict[str, Any]) -> dict[str, Any]:
+    """Names the code decorated ("Gạo ST25 (98.0)") without the decoration, when the bare
+    name is in the data and the decorated one is not."""
+    value = result.get("value")
+    if not isinstance(value, dict) or value.get("type") not in ("string", "list"):
+        return result
+    answer = value.get("answer")
+    items = [answer] if isinstance(answer, str) else answer if isinstance(answer, list) else []
+    if not any(isinstance(item, str) and _DECORATION.search(item) for item in items):
+        return result
+    probe = {"type": "list", "answer": []}
+    cleaned = []
+    for item in items:
+        bare = _DECORATION.sub("", item) if isinstance(item, str) else item
+        if bare != item and bare and _unknown_name({**probe, "answer": [item]}, cache, today,
+                                                    namespace) is not None \
+                and _unknown_name({**probe, "answer": [bare]}, cache, today, namespace) is None:
+            item = bare
+        cleaned.append(item)
+    answer = cleaned[0] if isinstance(answer, str) else cleaned
+    return {**result, "value": {**value, "answer": answer}}
 
 
 def _unknown_name(value: Any, cache: dict[str, Any], today: date,
@@ -510,7 +556,8 @@ _DATE_CUE = re.compile(r"(?:ngay|hom) nao|ngay bao nhieu")
 _YES_NO_END = re.compile(r"(?:\bkhong|dung khong|phai khong|hay khong|\bko)\s*$")
 _YES_NO_WORD = re.compile(r"\b(?:khong|ko|k|hok|khoong|hong)\b|co phai|phai khong")
 # A negative amount is only asked for as a difference.
-_DIFFERENCE = re.compile(r"chenh lech|tang|giam|lech|hon|kem|lo\b|lai|am\b|so voi|tru")
+# "lãi ròng" may be a loss; a negative gross profit ("lãi gộp") is a cost read wrongly.
+_DIFFERENCE = re.compile(r"chenh lech|tang|giam|lech|hon|kem|lo\b|lai rong|am\b|so voi|tru")
 
 
 def implausible(question: str, kind: str, answer: Any) -> str | None:
@@ -532,6 +579,128 @@ def implausible(question: str, kind: str, answer: Any) -> str | None:
         return "Code answer is zero"
     if kind == "number" and answer < 0 and not _DIFFERENCE.search(folded):
         return "Code answer is negative"
+    return None
+
+
+# Money questions ("doanh thu", "tiền", "giá", "lãi", "vốn"): the rulebook rounds money, and
+# an average of money, to whole VND, half up. Counts and quantities are left as they are.
+_MONEY_CUE = re.compile(r"\b(?:doanh thu|dthu|tien|gia|lai|loi nhuan|von|chi phi|gia tri)\b")
+_HOW_MANY = re.compile(r"\b(?:bao nhieu|bnhiu|bao nhiu|bn|may|so luong) (?!tien\b)[a-z]+")
+
+
+def round_money(question: str, kind: str, answer: Any) -> Any:
+    """``answer`` rounded to whole VND when the question asks an amount of money."""
+    folded = f" {fold(question)} "
+    if (kind != "number" or isinstance(answer, int) or abs(answer) < 100
+            or not _MONEY_CUE.search(folded) or _HOW_MANY.search(folded)
+            and not re.search(r"\bbao nhieu tien\b", folded)):
+        return answer
+    return int(Decimal(str(answer)).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
+# What the question is about, and what code that answers it must read. Written from the
+# wrong model calculations on the TRAIN model benchmark (LOCAL PROXY).
+_ORDERS = re.compile(r"\b(?:bao nhieu|bnhiu|bao nhiu|bn|may|so|moi|mot|tung|tren|\d+)"
+                     r" (?:don|bill|hoa don)\b(?! (?:vi|gia|bac si|thuoc))")
+_PURCHASE = re.compile(r"\bnhap\b|\bnha cung cap\b|\bncc\b")
+# Read with accents when the question has them: "Tôn lạnh" is a product, "tồn" is stock.
+_STOCK = re.compile(r"\btồn\b|\btrong kho\b|\bcòn (?:lại )?(?:bao nhiêu|bnhiu|bao nhiu|bn|mấy)\b")
+_STOCK_FOLDED = re.compile(r"\bton\b|\btrong kho\b|\bcon (?:lai )?(?:bao nhieu|bnhiu|bao nhiu|bn|may)\b")
+_LAST_DAYS = re.compile(r"\b(\d+) ngay (?:gan nhat|gan day|qua|vua qua|truoc)\b")
+_DEBT = re.compile(r"\bno\b|\bmua chiu\b")
+_LINE_THRESHOLD = re.compile(r"\[\s*[\"']amount[\"']\s*\]\s*[<>]=?\s*[\d_.]+"
+                             r"|[\d_.]+\s*[<>]=?\s*\w+\s*\[\s*[\"']amount[\"']\s*\]")
+_LINE_MAX = re.compile(r"\b(?:max|min)\(\s*\w+\s*,\s*key\s*=\s*lambda\s+(\w+)\s*:\s*\1"
+                       r"\s*\[\s*[\"']amount[\"']\s*\]")
+
+
+def out_of_reach(question: str) -> str | None:
+    """Why no code over these records can answer the question, or None."""
+    if _DEBT.search(f" {fold(question)} "):
+        return "Debts are not in the records the code can read"
+    return None
+
+
+def code_doubt(question: str, code: str) -> str | None:
+    """Why this code cannot answer the question, read from the code alone, or None."""
+    folded = f" {fold(question)} "
+    if _ORDERS.search(folded) and "order_id" not in code:
+        return "The question counts orders: use distinct order_id, not lines"
+    if _PURCHASE.search(folded) and not re.search(r"\bpurchase(?:s|_lines)\b", code):
+        return "The question is about purchases: read `purchases` / `purchase_lines`"
+    lowered = unicodedata.normalize("NFC", question).lower()
+    stock = _STOCK.search(lowered) if fold(lowered) != lowered else _STOCK_FOLDED.search(folded)
+    if stock and not re.search(r"\bstock\b", code):
+        return "The question is about stock: read `stock`"
+    for days in _LAST_DAYS.findall(folded):
+        if re.search(rf"timedelta\(\s*(?:days\s*=\s*)?{days}\s*\)", code) and not re.search(
+                rf"\b{days}\s*-\s*1\b|\b{int(days) - 1}\b", code):
+            return (f"\"{days} ngày gần nhất\" are the {days} days ending today: "
+                    f"today - timedelta(days={int(days) - 1}) <= day <= today")
+    if _LINE_THRESHOLD.search(code):
+        return "Code compares one line's amount: sum per day, order or customer first"
+    if _LINE_MAX.search(code):
+        return "Code ranks single lines by amount: sum per customer or product first"
+    return None
+
+
+# Status has a fixed vocabulary ("valid", "cancelled", "returned") that a shop may not use
+# every word of; the other labels are the shop's own.
+_FILTERED = frozenset((*_VALUE_FIELDS, "product_name", "customer_name")) - {"status"}
+
+
+def _field(node: ast.AST) -> str | None:
+    """``s["field"]``, ``s.get("field")`` or ``fold(...)`` of one, for a filtered field."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "fold" \
+            and len(node.args) == 1:
+        return _field(node.args[0])
+    if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+        key = node.slice.value
+    elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+          and node.func.attr == "get" and node.args and isinstance(node.args[0], ast.Constant)):
+        key = node.args[0].value
+    else:
+        return None
+    return key if key in _FILTERED else None
+
+
+def _texts(node: ast.AST) -> list[str] | None:
+    """String constants of a literal, a ``fold("...")`` or a collection of them."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "fold" \
+            and len(node.args) == 1:
+        return _texts(node.args[0])
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        items = [_texts(item) for item in node.elts]
+        return None if any(item is None for item in items) else [t for item in items for t in item]
+    return None
+
+
+def unknown_filter(code: str, lines: Any) -> str | None:
+    """First ``field == "value"`` (or ``!=``, ``in [...]``) the code filters on whose value no
+    line holds: a group, channel or name that is not in the data filters on nothing."""
+    tree = ast.parse(code)
+    seen: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare) or len(node.ops) != 1:
+            continue
+        left, op, right = node.left, node.ops[0], node.comparators[0]
+        if isinstance(op, (ast.Eq, ast.NotEq)):
+            pairs = [(_field(left), _texts(right)), (_field(right), _texts(left))]
+        elif isinstance(op, (ast.In, ast.NotIn)) and isinstance(right, (ast.List, ast.Tuple, ast.Set)):
+            pairs = [(_field(left), _texts(right))]
+        else:
+            continue
+        for field, texts in pairs:
+            if field is None or not texts:
+                continue
+            if field not in seen:
+                seen[field] = {fold(str(line[field])).strip() for line in lines
+                               if line.get(field) is not None}
+            for text in texts:
+                if fold(text).strip() not in seen[field]:
+                    return f"Code filters {field} on a value that is not in the data: {text[:60]}"
     return None
 
 
