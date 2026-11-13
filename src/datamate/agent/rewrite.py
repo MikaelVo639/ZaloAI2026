@@ -27,10 +27,12 @@ from datamate.agent.baseline import _execution_failure
 from datamate.agent.code_answer import (
     CODE_EXAMPLES,
     CODE_MAX_NEW_TOKENS,
+    CODE_REPAIRS,
     CODE_TIMEOUT_SECONDS,
     build_code_messages,
     extract_code,
     normalize_result,
+    repair_messages,
 )
 from datamate.agent.local_plan import LocalPlanAgent
 from datamate.agent.rule_spec_model import model_specs
@@ -597,7 +599,8 @@ class RewriteAgent(LocalPlanAgent):
         if failure is not None:
             return failure
         today = question.as_of_date
-        shape = self.worker.run(self.code_profile, self.question_timeout, today=today)
+        shape = self.worker.run(self.code_profile, self.question_timeout, today=today,
+                                catalog=context.catalog, calendar=context.split.calendar_path)
         if not shape.ok:
             return _execution_failure("Code profile", shape, {})
         evidence: dict[str, Any] = {"model": self._model_info, "path": "code",
@@ -607,38 +610,56 @@ class RewriteAgent(LocalPlanAgent):
         for vote, examples in enumerate((list(CODE_EXAMPLES), list(CODE_EXAMPLES)[::-1]), 1):
             messages = build_code_messages(question.question, today, shape.value,
                                            context.split.rulebook, examples)
-            attempt: dict[str, Any] = {"vote": vote, "prompt_sha256": hashlib.sha256(
-                json.dumps(messages, ensure_ascii=False).encode()).hexdigest()}
-            evidence["code_votes"].append(attempt)
-            generated = self.planner_worker.run(
-                self.generate, CODE_TIMEOUT_SECONDS, messages=messages,
-                max_input_tokens=self.max_input_tokens, max_new_tokens=CODE_MAX_NEW_TOKENS)
-            attempt["execution"] = generated.execution()
-            if not generated.ok:
-                if generated.timed_out or not self.planner_worker.alive:
-                    self._model_error = Candidate(reason="Rewrite model stopped after worker failure",
-                                                  evidence=dict(evidence))
-                return Candidate(reason=f"Code model failed: {generated.error}", evidence=evidence)
-            attempt["model_output"] = generated.value
-            code = extract_code(generated.value.get("text", ""))
-            attempt["code"] = code
-            if code is None:
-                return Candidate(reason="Model wrote no answer function", evidence=evidence)
-            ran = self.worker.run(self.run_code, self.question_timeout, code=code, today=today)
-            attempt["run"] = ran.execution()
-            if not ran.ok:
-                return Candidate(reason=f"Model code failed: {ran.error}"[:300], evidence=evidence)
-            if "refused" in ran.value:
-                return Candidate(reason=ran.value["refused"], evidence=evidence)
-            result = normalize_result(ran.value["value"])
-            attempt["result"] = ran.value["value"]
-            if isinstance(result, str):
-                return Candidate(reason=result, evidence=evidence)
-            results.append(result)
+            for repair in range(CODE_REPAIRS + 1):
+                attempt: dict[str, Any] = {"vote": vote, "repair": repair,
+                                           "prompt_sha256": hashlib.sha256(json.dumps(
+                                               messages, ensure_ascii=False).encode()).hexdigest()}
+                evidence["code_votes"].append(attempt)
+                generated = self.planner_worker.run(
+                    self.generate, CODE_TIMEOUT_SECONDS, messages=messages,
+                    max_input_tokens=self.max_input_tokens, max_new_tokens=CODE_MAX_NEW_TOKENS)
+                attempt["execution"] = generated.execution()
+                if not generated.ok:
+                    if generated.timed_out or not self.planner_worker.alive:
+                        self._model_error = Candidate(
+                            reason="Rewrite model stopped after worker failure",
+                            evidence=dict(evidence))
+                    return Candidate(reason=f"Code model failed: {generated.error}",
+                                     evidence=evidence)
+                attempt["model_output"] = generated.value
+                code = extract_code(generated.value.get("text", ""))
+                attempt["code"] = code
+                if code is None:
+                    return Candidate(reason="Model wrote no answer function", evidence=evidence)
+                ran = self.worker.run(self.run_code, self.question_timeout, code=code,
+                                      today=today, catalog=context.catalog,
+                                      calendar=context.split.calendar_path)
+                attempt["run"] = ran.execution()
+                # A raised error or a refused/unusable result may be repaired once; a
+                # timeout or a deliberate None is final.
+                if not ran.ok:
+                    error = f"Model code failed: {ran.error}"[:300]
+                    if ran.timed_out or repair == CODE_REPAIRS:
+                        return Candidate(reason=error, evidence=evidence)
+                    messages = repair_messages(messages, code, ran.error)
+                    continue
+                if "refused" in ran.value:
+                    result: tuple[str, Any] | str = ran.value["refused"]
+                else:
+                    attempt["result"] = ran.value["value"]
+                    result = normalize_result(ran.value["value"])
+                if isinstance(result, str):
+                    if result == "Code returned no answer" or repair == CODE_REPAIRS:
+                        return Candidate(reason=result, evidence=evidence)
+                    messages = repair_messages(messages, code, result)
+                    continue
+                results.append(result)
+                break
         if results[0] != results[1]:
             return Candidate(reason="Model calculations disagree", evidence=evidence)
         kind, value = results[0]
-        evidence.update(code=evidence["code_votes"][0]["code"], result=value)
+        evidence.update(code=next(a["code"] for a in evidence["code_votes"] if "result" in a
+                                  and normalize_result(a["result"]) == results[0]), result=value)
         return Candidate(type=kind, answer=value, confidence=REWRITE_CONFIDENCE,
                          reason="Model calculation", evidence=evidence)
 

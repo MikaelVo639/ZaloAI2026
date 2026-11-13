@@ -69,6 +69,30 @@ def looping_code_generate(cache, messages, max_input_tokens, max_new_tokens):
     return {"text": "```python\ndef answer(sales, today):\n    while True:\n        pass\n```"}
 
 
+BUGGY = MONTH_REVENUE.replace('s["amount"]', 's["revenue"]')  # KeyError: 'revenue'
+
+
+def repaired_code_generate(cache, messages, max_input_tokens, max_new_tokens):
+    if not _is_code_prompt(messages):
+        return {"text": UNSURE}
+    if "Chạy code bị lỗi" in messages[-1]["content"]:
+        assert "revenue" in messages[-1]["content"], messages[-1]
+        return {"text": MONTH_REVENUE}
+    return {"text": BUGGY}
+
+
+def calendar_code_generate(cache, messages, max_input_tokens, max_new_tokens):
+    if not _is_code_prompt(messages):
+        return {"text": UNSURE}
+    return {"text": "```python\ndef answer(sales, today):\n"
+                    "    day = calendar[today]\n"
+                    "    return {\"type\": \"boolean\", \"answer\": day[\"lunar_month\"] >= 1}\n```"}
+
+
+def always_buggy_generate(cache, messages, max_input_tokens, max_new_tokens):
+    return {"text": BUGGY if _is_code_prompt(messages) else UNSURE}
+
+
 class CodeCheckTests(unittest.TestCase):
     def test_only_definitions_without_imports_or_private_access(self):
         self.assertIsNone(check_code(extract_code(MONTH_REVENUE)))
@@ -120,6 +144,15 @@ class CodeCheckTests(unittest.TestCase):
         self.assertIn("2026-08-27", text)
         self.assertIn("Câu hỏi: dthu thang nay", messages[1]["content"])
         self.assertNotIn("customer_name", messages[0]["content"])
+        self.assertIn("only `sales`", messages[0]["content"])
+        with_tables = build_code_messages("tiền nhập hàng tháng này", date(2026, 8, 27),
+                                          {**profile, "tables": ["purchases", "stock"]}, "", [])
+        self.assertIn("Global list `purchases`", with_tables[0]["content"])
+        self.assertIn("Global list `stock`", with_tables[0]["content"])
+        self.assertNotIn("purchase_lines", with_tables[0]["content"])
+        dated = build_code_messages("tết năm nay bán bao nhiêu", date(2026, 8, 27),
+                                    {**profile, "calendar": ["2024-01-01", "2027-12-31"]}, "", [])
+        self.assertIn("Global dict `calendar`", dated[0]["content"])
 
 
 class CodeAgentTests(unittest.TestCase):
@@ -178,6 +211,24 @@ class CodeAgentTests(unittest.TestCase):
         agent.answer(self.question, self.context)
         type(agent).generate = staticmethod(code_generate)
         self.assertEqual(agent.answer(self.question, self.context).type, "number")
+
+    def test_failing_code_is_repaired_once(self):
+        candidate = self.agent(repaired_code_generate, code_fallback=True).answer(
+            self.question, self.context)
+        self.assertEqual(candidate.type, "number", candidate.reason)
+        self.assertEqual(candidate.answer, self.expected_month_revenue().answer)
+        self.assertEqual([(a["vote"], a["repair"]) for a in candidate.evidence["code_votes"]],
+                         [(1, 0), (1, 1), (2, 0), (2, 1)])
+        self.assertNotIn("revenue\"]", candidate.evidence["code"])
+        failed = self.agent(always_buggy_generate, code_fallback=True).answer(
+            self.question, self.context)
+        self.assertIn("KeyError", failed.reason)
+        self.assertEqual(len(failed.evidence["code_attempt"]["code_votes"]), 2)
+
+    def test_code_reads_the_split_calendar(self):
+        candidate = self.agent(calendar_code_generate, code_fallback=True).answer(
+            self.question, self.context)
+        self.assertEqual(candidate.type, "boolean", candidate.reason)
 
     def test_code_only_skips_the_grammar(self):
         planned = Question("q", "demo_csv", "Doanh thu tháng này là bao nhiêu?", date(2026, 8, 27))

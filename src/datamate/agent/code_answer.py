@@ -13,6 +13,7 @@ return the same answer; anything else is an abstain. The path never answers
 from __future__ import annotations
 
 import ast
+import csv
 import math
 import re
 import statistics
@@ -20,12 +21,21 @@ from collections import Counter, defaultdict
 from dataclasses import asdict
 from datetime import date, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
+from datamate.contracts import Catalog
+from datamate.ingestion.purchases import (
+    PurchaseSourceError,
+    load_purchase_lines,
+    load_purchases,
+)
+from datamate.ingestion.stock import StockSourceError, load_stock
 from datamate.semantics.text import fold
 
 CODE_MAX_NEW_TOKENS = 700
 CODE_TIMEOUT_SECONDS = 120.0  # one generation of up to CODE_MAX_NEW_TOKENS tokens
+CODE_REPAIRS = 1  # code that raised or returned an unusable result is sent back once
 MAX_LIST_ITEMS = 50
 MAX_RULE_ROWS = 8
 ANSWER_TYPES = ("number", "percent", "string", "date", "boolean", "list")
@@ -53,6 +63,23 @@ FIELDS = (
 )
 _VALUE_FIELDS = ("status", "product_group", "customer_group", "channel", "payment_method",
                  "base_unit")
+# Other cleaned records, offered as global lists of dicts when the shop's files have them.
+EXTRA_TABLES: dict[str, tuple[str, tuple[tuple[str, str, str], ...]]] = {
+    "purchases": ("purchase receipts (phiếu nhập hàng) dated up to today", (
+        ("receipt_id", "str", "receipt code"), ("day", "date", "receipt date"),
+        ("total", "float", "receipt total in VND"),
+        ("supplier", "str|None", "supplier name (or code when no name is recorded)"),
+        ("cancelled", "bool", "True for a cancelled receipt; leave those out"))),
+    "purchase_lines": ("lines of the purchase receipts dated up to today", (
+        ("receipt_id", "str", "receipt code"), ("day", "date", "receipt date"),
+        ("product_id", "str|None", "product code"), ("product_name", "str|None", "product name"),
+        ("unit", "str", "purchase unit of the line"), ("quantity", "float", "quantity in that unit"),
+        ("unit_price", "float", "price of one purchase unit in VND"),
+        ("cancelled", "bool", "True when the receipt is cancelled"))),
+    "stock": ("stock at the end of today, one row per product", (
+        ("product_id", "str|None", "product code"), ("product_name", "str|None", "product name"),
+        ("base_unit", "str|None", "base unit"), ("quantity", "float", "quantity in the base unit"))),
+}
 
 CODE_SYSTEM = """You answer one Vietnamese question about a shop by writing Python.
 Write exactly one function and nothing else:
@@ -64,7 +91,7 @@ def answer(sales, today):
 `sales` is a list of dicts, one per order line, already cleaned. Lines dated after today
 are already removed. Fields (any may be None when the shop does not record it):
 {fields}
-`today` (datetime.date) is the day the question is asked: "hôm nay", "tháng này",
+{extra}`today` (datetime.date) is the day the question is asked: "hôm nay", "tháng này",
 "tuần trước" are relative to it. The data starts on {first_day}.
 Values seen in the data: {values}
 Already available (never import anything): date, timedelta, Counter, defaultdict, math,
@@ -157,14 +184,36 @@ def build_code_messages(question: str, today: date, profile: dict[str, Any], rul
                        if name in profile["fields"])
     values = "; ".join(f"{name}: {', '.join(map(str, items))}"
                        for name, items in profile["values"].items() if items) or "none"
+    extra = ""
+    for name in profile.get("tables", ()):
+        meaning, columns = EXTRA_TABLES[name]
+        extra += (f"Global list `{name}` ({meaning}):\n"
+                  + "\n".join(f"  {c} ({kind}): {m}" for c, kind, m in columns) + "\n")
+    if not extra:
+        extra = "No purchase or stock records are available, only `sales`.\n"
+    if profile.get("calendar"):
+        first, last = profile["calendar"]
+        extra += ("Global dict `calendar` (the shop's lunar calendar, " f"{first} to {last}): "
+                  "datetime.date -> {lunar_day, lunar_month, lunar_year, lunar_leap (bool), "
+                  "holiday (str, may be empty)}. Use it for Tết and lunar dates.\n")
     system = CODE_SYSTEM
-    for key, value in (("{fields}", fields), ("{first_day}", profile["first_day"]),
+    for key, value in (("{fields}", fields), ("{extra}", extra),
+                       ("{first_day}", profile["first_day"]),
                        ("{values}", values), ("{rules}", rule_text(rulebook, question))):
         system = system.replace(key, value)
     shots = "\n\n".join(f"Câu hỏi: {q}\n```python\n{code}\n```" for q, code in examples)
     user = (f"{shots}\n\nHôm nay của các ví dụ là một ngày bất kỳ. Câu hỏi thật (hôm nay là "
             f"{today.isoformat()}):\nCâu hỏi: {question}")
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def repair_messages(messages: list[dict[str, str]], code: str, error: str
+                    ) -> list[dict[str, str]]:
+    """Ask once more after the code failed, with the error it raised."""
+    return [*messages, {"role": "assistant", "content": f"```python\n{code}\n```"},
+            {"role": "user", "content": (
+                f"Chạy code bị lỗi: {error[:300]}. Sửa lại hàm answer cho đúng câu hỏi (lưu ý "
+                "trường có thể là None). Chỉ trả code trong một khối ```python.")}]
 
 
 def extract_code(text: str) -> str | None:
@@ -230,7 +279,63 @@ def sales_lines(cache: dict[str, Any], today: date) -> list[dict[str, Any]]:
     return cache["code_lines"]
 
 
-def profile(cache: dict[str, Any], today: date) -> dict[str, Any]:
+def _rows(records: Any, columns: tuple[tuple[str, str, str], ...]) -> tuple[dict, ...]:
+    rows = []
+    for record in records:
+        row = asdict(record)
+        rows.append({name: float(row[name]) if isinstance(row.get(name), Decimal) else row.get(name)
+                     for name, _, _ in columns})
+    return tuple(rows)
+
+
+def extra_tables(cache: dict[str, Any], catalog: Catalog, today: date) -> dict[str, tuple]:
+    """Purchases, purchase lines and today's stock, when their sources load (cached)."""
+    key = (cache.get("sales_key"), catalog.readme, today)
+    if cache.get("code_tables_key") == key:
+        return cache["code_tables"]
+    tables: dict[str, tuple] = {}
+    try:
+        book = load_purchases(catalog)
+        tables["purchases"] = _rows((r for r in book.receipts if r.day <= today),
+                                    EXTRA_TABLES["purchases"][1])
+    except (PurchaseSourceError, ValueError, OSError):
+        pass
+    try:
+        lines = load_purchase_lines(catalog)
+        tables["purchase_lines"] = _rows((line for line in lines.lines if line.day <= today),
+                                         EXTRA_TABLES["purchase_lines"][1])
+    except (PurchaseSourceError, ValueError, OSError):
+        pass
+    try:
+        snapshot = load_stock(catalog, as_of=today)
+        if snapshot.day == today:  # never an end-of-data stock for another day
+            tables["stock"] = _rows(snapshot.items, EXTRA_TABLES["stock"][1])
+    except (StockSourceError, ValueError, OSError):
+        pass
+    cache["code_tables_key"], cache["code_tables"] = key, {k: v for k, v in tables.items() if v}
+    return cache["code_tables"]
+
+
+def lunar_calendar(cache: dict[str, Any], path: Path) -> dict[date, dict[str, Any]]:
+    """The split's calendar.csv: solar date -> lunar day/month/year, leap flag, holiday."""
+    if cache.get("code_calendar_path") != str(path):
+        days: dict[date, dict[str, Any]] = {}
+        with Path(path).open(encoding="utf-8-sig", newline="") as stream:
+            for row in csv.DictReader(stream):
+                solar = row.get("date") or row.get("solar_date")
+                if not solar:
+                    raise KeyError("calendar has no date column")
+                days[date.fromisoformat(solar.strip())] = {
+                    "lunar_day": int(row["lunar_day"]), "lunar_month": int(row["lunar_month"]),
+                    "lunar_year": int(row["lunar_year"]),
+                    "lunar_leap": (row.get("lunar_leap") or "").strip().lower() == "true",
+                    "holiday": (row.get("holiday") or "").strip()}
+        cache["code_calendar_path"], cache["code_calendar"] = str(path), days
+    return cache["code_calendar"]
+
+
+def profile(cache: dict[str, Any], today: date, catalog: Catalog | None = None,
+            calendar: Path | None = None) -> dict[str, Any]:
     """Recorded fields, first day and short lists of label values, for the prompt."""
     lines = sales_lines(cache, today)
     fields = [name for name, _, _ in FIELDS
@@ -242,7 +347,15 @@ def profile(cache: dict[str, Any], today: date) -> dict[str, Any]:
             seen = Counter(line[name] for line in lines if line[name] is not None)
             values[name] = [value for value, _ in seen.most_common(25)]
     days = [line["day"] for line in lines]
-    return {"fields": fields, "values": values,
+    tables = extra_tables(cache, catalog, today) if catalog is not None else {}
+    span = None
+    if calendar is not None:
+        try:
+            known = lunar_calendar(cache, calendar)
+            span = [min(known).isoformat(), max(known).isoformat()] if known else None
+        except (OSError, KeyError, ValueError):
+            span = None
+    return {"fields": fields, "values": values, "tables": sorted(tables), "calendar": span,
             "first_day": min(days).isoformat() if days else "unknown", "lines": len(lines)}
 
 
@@ -258,8 +371,9 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def run_code(cache: dict[str, Any], code: str, today: date) -> Any:
-    """Worker task: run ``answer(sales, today)`` on a fresh copy of the lines."""
+def run_code(cache: dict[str, Any], code: str, today: date,
+             catalog: Catalog | None = None, calendar: Path | None = None) -> Any:
+    """Worker task: run ``answer(sales, today)`` on fresh copies of the records."""
     refused = check_code(code)
     if refused:
         return {"refused": refused}
@@ -268,6 +382,14 @@ def run_code(cache: dict[str, Any], code: str, today: date) -> Any:
         "Counter": Counter, "defaultdict": defaultdict, "math": math,
         "statistics": statistics, "fold": fold}
     exec(compile(code, "<model-code>", "exec"), namespace)  # noqa: S102 - checked above
+    if calendar is not None:
+        try:
+            namespace["calendar"] = {d: dict(v) for d, v in lunar_calendar(cache, calendar).items()}
+        except (OSError, KeyError, ValueError):
+            pass
+    if catalog is not None:
+        for name, rows in extra_tables(cache, catalog, today).items():
+            namespace[name] = [dict(row) for row in rows]
     lines = [dict(line) for line in sales_lines(cache, today)]
     return {"value": _plain(namespace["answer"](lines, today))}
 
