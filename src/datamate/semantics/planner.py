@@ -228,6 +228,8 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
         return _purchase(text, today, rules)
     if _AVG_PURCHASE_CUE.search(text):
         return _avg_purchase(text, today, rules, names)
+    if _NET_PURCHASE_CUE.search(text):
+        return _net_purchase(text, today, rules, names)
     if _PRICE_UP.search(text):
         return _price_effect(text, today, rules, names, price_increases or {}, price_source)
     if rules.daily_sale_price:
@@ -1175,7 +1177,11 @@ _TOP_SUPPLIER = re.compile(
 
 def _purchase(text: str, today: date, rules: Rules) -> Plan | None:
     """"Tổng tiền nhập hàng tháng M", "nhà cung cấp nào … nhiều tiền nhất" (rulebook §5)."""
-    total, top = _PURCHASE_TOTAL.search(text), _TOP_SUPPLIER.search(text)
+    top = _TOP_SUPPLIER.search(text)
+    # "tổng tiền nhập hàng" inside "nhà cung cấp nào có tổng tiền nhập hàng lớn nhất" is the
+    # supplier ranking's measure, not a second question.
+    total = next((m for m in _PURCHASE_TOTAL.finditer(text)
+                  if not (top and top.start() <= m.start() and m.end() <= top.end())), None)
     if bool(total) == bool(top):
         return None
     intent, feature, match = (("purchase_total", "purchase_total", total) if total
@@ -1234,6 +1240,39 @@ def _avg_purchase(text: str, today: date, rules: Rules, names: Iterable[str]) ->
                 _rows(rules, "product_names", "avg_purchase_price"),
                 filters=(Filter("product", product, rules.row("product_names") or ""),),
                 unit=match.group("unit"))
+
+
+# "Số nhập trừ số bán", "chênh lệch nhập trừ bán" of one product over a period (§5).
+_NET_PURCHASE_CUE = re.compile(r"\b(?:so )?nhap tru (?:so )?ban\b")
+_NET_PURCHASE = re.compile(
+    rf"^(?:so )?nhap tru (?:so )?ban (?:cua )?(?P<rest>.*?) "
+    rf"(?:(?:thi )?(?:duoc|dc|la) )?{_AMOUNT} (?P<unit>[a-z]+)$")
+
+
+def _net_purchase(text: str, today: date, rules: Rules, names: Iterable[str]) -> Plan | None:
+    """"Số nhập trừ số bán của <hàng> <kỳ> là bao nhiêu <đơn vị>" (rulebook §5)."""
+    if not rules.net_purchase or not rules.product_names or not rules.revenue:
+        return None
+    text, product = _product(text, names)
+    if not product or product is _AMBIGUOUS:
+        return None
+    text = re.sub(r"\s+", " ", text).strip()
+    # A period written first ("tháng 3/2025, số nhập trừ số bán …") moves after the cue.
+    lead = re.match(r"^(.*?)\b((?:so )?nhap tru .*)$", text)
+    head, body = (lead[1], lead[2]) if lead else ("", text)
+    head = re.sub(r"\b(?:lay|chenh lech|chenh)\s*$", "", head.strip())
+    match = _NET_PURCHASE.fullmatch(body)
+    if match is None or match["unit"] in _NOT_UNITS:
+        return None
+    resolved = _period(f"{head} {match['rest']}", today, rules)
+    if resolved is None:
+        return None
+    start, end, leftover = resolved
+    if _FILLERS.sub(" ", leftover).strip() or end > today:
+        return None
+    return Plan("net_purchase", start, end, 1, _rows(rules, "product_names", "net_purchase"),
+                filters=(Filter("product", product, rules.row("product_names") or ""),),
+                unit=match["unit"])
 
 
 _PRICE_VALUE = r"(?:\d{1,3}(?: \d{3})+|\d+)"

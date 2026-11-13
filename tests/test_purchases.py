@@ -105,6 +105,13 @@ class PurchaseTests(unittest.TestCase):
                 self.assertEqual(candidate.answer, expected)
                 self.assertIs(check_executed(candidate, result), candidate)
 
+    def test_supplier_ranking_by_its_total_is_not_a_total_question(self):
+        result = plan("Nhà cung cấp nào có tổng tiền nhập hàng lớn nhất tháng 6/2026?")
+        self.assertEqual((result.intent, result.start, result.end),
+                         ("top_supplier", date(2026, 6, 1), date(2026, 6, 30)))
+        self.assertEqual(plan("Tổng tiền nhập hàng tháng 6/2026 là bao nhiêu?").intent,
+                         "purchase_total")
+
     def test_supplier_codes_cannot_name_the_supplier(self):
         catalog = self.catalog(LIST_README, "phieu.csv", LIST_ROWS)
         result = plan("Tháng 6/2026 tiền nhập hàng từ nhà cung cấp nào cao nhất?")

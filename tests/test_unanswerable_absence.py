@@ -119,14 +119,18 @@ class AskedAttributeTests(unittest.TestCase):
             "nhân viên nào phục vụ tận tâm nhất": "staff_quality",
             "tháng 4/2026 có mấy đơn bị huỷ vì hết hàng": "order_reason",
             "siro ho trẻ em uống mỗi lần bao nhiêu ml": "dosage",
+            "Doanh thu các đơn trả bằng ví điện tử tháng 6/2026 là bao nhiêu?": "payment_method",
+            "Tháng này doanh thu các đơn bán qua điện thoại chiếm bao nhiêu %?": "sales_channel",
+            "Doanh thu từ khách nhóm thân thiết tháng này là bao nhiêu?": "customer_group",
         }
         for text, expected in cases.items():
             with self.subTest(text=text):
                 self.assertEqual(asked_attribute(text), expected)
 
     def test_planner_questions_are_not_attribute_questions(self):
-        for text in ("Doanh thu các đơn trả bằng ví điện tử tháng 6/2026 là bao nhiêu?",
-                     "khách Lan tháng 8/2025 nợ thêm bao nhiêu, trả được bao nhiêu đó",
+        # Payment, channel and customer-group questions are planned when the shop records
+        # those labels; only an unplanned one is checked against the data for any trace.
+        for text in ("khách Lan tháng 8/2025 nợ thêm bao nhiêu, trả được bao nhiêu đó",
                      "Tháng 3/2026 có bao nhiêu đơn bị huỷ?",
                      "Năm 2025 doanh thu là bao nhiêu?",
                      "Đường cát trắng tháng này bán được bao nhiêu kg?"):

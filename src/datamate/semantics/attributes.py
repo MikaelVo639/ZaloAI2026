@@ -26,6 +26,12 @@ _PATTERNS = (
     ("order_reason", r"\b(?:huy|tra hang|tra lai|doi tra|tra)\b(?: (?!bang\b)[a-z]+){0,2}"
                      r" (?:vi|ly do)\b(?! dien tu)|\bly do (?:huy|tra|doi tra)\b"),
     ("dosage", r"\b(?:uong|dung) moi lan\b|\blieu (?:dung|luong|uong)\b|\bmoi lan (?:uong|dung)\b"),
+    # Revenue split by a label the shop may not record at all (rulebook §1, §7).
+    ("sales_channel", r"\b(?:cac )?don (?:ban )?(?:qua|tai|tren) (?:dien thoai|quay|zalo|facebook"
+                      r"|fb|shopee|lazada|tiktok|website|web|san|app|online)\b|\bkenh ban\b"),
+    ("payment_method", r"\b(?:tra|thanh toan) bang (?:tien mat|chuyen khoan|the|vi dien tu|cod"
+                       r"|momo|qr)\b|\b(?:hinh thuc|phuong thuc) thanh toan\b"),
+    ("customer_group", r"\bkhach(?: hang)? nhom\b|\bnhom khach\b"),
 )
 
 

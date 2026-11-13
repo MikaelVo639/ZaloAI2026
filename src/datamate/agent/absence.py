@@ -38,6 +38,15 @@ _ADDRESS = ("dia chi", "duong", "phuong xa", "xa phuong", "huyen", "quan huyen",
 _FEEDBACK = ("danh gia", "khen", "phan hoi", "hai long", "cham diem", "xep loai", "review",
              "feedback", "rating")
 _REASON = ("ly do", "nguyen nhan", "ghi chu", "noi dung", "mo ta", "reason", "note")
+# Labels of an order: any trace of the field keeps the abstain ("Kênh bán", "PhuongThucTT",
+# "LoaiKhachHang", a README line naming them).
+_CHANNEL = ("kenh", "kenh ban", "channel", "nguon", "nguon don", "ban qua", "tai quay", "zalo",
+            "facebook", "shopee", "lazada", "tiktok", "website", "online", "source")
+_PAYMENT = ("thanh toan", "phuong thuc", "hinh thuc", "hinh thuc tt", "pttt", "httt", "tien mat",
+            "chuyen khoan", "cod", "quet the", "vi dien tu", "momo", "vnpay", "payment", "pay")
+_CUSTOMER_GROUP = ("nhom khach", "loai khach", "hang khach", "phan loai khach", "hang thanh vien",
+                   "thanh vien", "customer group", "customer type", "segment", "tier", "vip",
+                   "than thiet")
 _DOSAGE = ("lieu dung", "lieu luong", "lieu uong", "cach dung", "huong dan", "chi dinh",
            "dosage", "usage")  # not "lieu": "dữ liệu"
 
@@ -60,13 +69,16 @@ CONCEPTS: dict[str, Callable[[str], bool]] = {
     "staff_quality": lambda text: _has(text, _FEEDBACK),
     "order_reason": lambda text: _has(text, _REASON),
     "dosage": lambda text: _has(text, _DOSAGE),
+    "sales_channel": lambda text: _has(text, _CHANNEL),
+    "payment_method": lambda text: _has(text, _PAYMENT),
+    "customer_group": lambda text: _has(text, _CUSTOMER_GROUP),
 }
 
 INTENT_CONCEPT = {
     "stock": "stock", "stock_split": "stock", "stock_value": "stock",
     "out_of_stock_count": "stock",
     "purchase_total": "purchase", "top_supplier": "purchase",
-    "avg_purchase_price": "cost",
+    "avg_purchase_price": "cost", "net_purchase": "purchase",
     "gross_profit": "cost", "top_gross_profit": "cost", "net_profit": "cost",
     "earliest_expiry": "expiry", "expiring_lot_count": "expiry", "expiring_lot_cost": "expiry",
     "expiring_product_count": "expiry", "expiring_products": "expiry",
@@ -86,7 +98,7 @@ def words(text: str) -> str:
 
 
 _ALL_WORDS = frozenset((*_STOCK, *_PURCHASE, *_MONEY, *_COST, *_EXPIRY, *_GENDER, *_ADDRESS,
-                        *_FEEDBACK, *_REASON, *_DOSAGE))
+                        *_FEEDBACK, *_REASON, *_DOSAGE, *_CHANNEL, *_PAYMENT, *_CUSTOMER_GROUP))
 
 
 def _filled_columns(table: Table, columns: list[str]) -> set[str]:

@@ -26,6 +26,10 @@ class LunarPeriodTests(unittest.TestCase):
                 return plan_tet(question, rules, book, calendar)
 
             plan = resolve(17)
+            for opening in ("Cho hỏi ", "check giùm "):
+                question = Question("q", "b", f"{opening}dịp Tết âm lịch 2028 có doanh thu hơn hay"
+                                    " kém 17 ngày trước Tết bao nhiêu %?", date(2028, 3, 1))
+                self.assertEqual(plan_tet(question, rules, rulebook, calendar), plan)
             self.assertEqual((plan.start, plan.end), (date(2028, 1, 15), date(2028, 1, 31)))
             self.assertEqual((plan.compare_start, plan.compare_end),
                              (date(2027, 12, 29), date(2028, 1, 14)))

@@ -62,6 +62,7 @@ class Rules:
     top_supplier: bool = False          # nhà cung cấp nhập nhiều nhất = tiền nhập cao nhất
     daily_sale_price: bool = False
     avg_purchase_price: bool = False    # giá nhập bình quân trong tháng: theo số lượng nhập
+    net_purchase: bool = False          # nhập trừ bán: phần bán = đơn tính doanh thu, cùng đơn vị
     price_effect: bool = False          # hiệu ứng tăng giá: N ngày kể từ D với N ngày trước D
     price_effect_lookup: bool = False   # look up the first increase to the requested price
     ingredient_revenue: bool = False   # exact active ingredient, combinations are separate
@@ -347,6 +348,9 @@ def read_rules(rulebook: str) -> Rules:
             "avg_purchase_price", _find(rows, "gia nhap binh quan", "trong thang"),
             "theo so luong nhap", "khong phai trung binh cong", "theo don vi nhap",
             "ngay phieu trong thang", "bo phieu huy"),
+        net_purchase=enable(
+            "net_purchase", _find(rows, "nhap tru ban"),
+            "phan ban la so luong cua don tinh vao doanh thu", "quy ve cung don vi voi phan nhap"),
         size_by_name=enable("size_by_name", _find(rows, "size m", "size l"), "ten ket thuc bang",
                             "khong phan biet hoa thuong"),
         best_staff=enable("best_staff", _find(rows, "nhan vien ban gioi nhat"), "theo doanh thu",

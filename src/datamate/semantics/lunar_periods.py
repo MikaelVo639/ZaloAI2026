@@ -13,6 +13,9 @@ from datamate.semantics.text import normalize_question
 _TET = r"(?:dip |mua )?tet(?: am lich)? (?:nam )?"
 _TOP_SELLING = r"(?:ban chay|ban duoc nhieu|ban duoc nhiu|ban nhieu|ban nhiu|chay) nhat"
 _CHANGE = rf"(?:thay doi|tang hay giam) {_AMOUNT} phan tram"
+# "cho hỏi", "check giùm (mình)" before the question; the patterns below read whole questions.
+_OPENING = re.compile(r"^(?:(?:cho (?:(?:em|e|minh|toi|tui|chi|anh|con) )?hoi"
+                      r"|(?:check|xem|coi) (?:giup|gium)(?: (?:em|minh|toi|tui|anh|chi))?) )+")
 
 
 def _tet_windows(calendar: Path, years: set[int]) -> dict[int, tuple[date, date]]:
@@ -37,7 +40,7 @@ def tet_rule(rulebook: str) -> str:
 
 
 def plan_tet(question: Question, rules: Rules, rulebook: str, calendar: Path) -> Plan | None:
-    text = normalize_question(question.question)
+    text = _OPENING.sub("", normalize_question(question.question))
     if not re.search(r"\btet\b", text):
         return None
     row = tet_rule(rulebook)

@@ -23,6 +23,7 @@ GRAMMAR_WORDS = frozenset("""
     sang chieu tra bot chiu them thieu nha vao
     len nhi thuoc
     bang dien thoai
+    nhap lai
 """.split())
 # Whole-token abbreviations and misspellings seen in everyday questions.
 ABBREVIATIONS = {

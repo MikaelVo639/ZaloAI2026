@@ -385,11 +385,12 @@ INTENTS = (frozenset({"revenue", "order_count", "top_products", "average_order",
                      "cancel_count", "cancel_rate", "best_day",
                      "top_customers", "count_where", "quantity", "top_staff", "stock", "stock_split",
                      "purchase_total", "top_supplier", "avg_purchase_price", "daily_sale_price",
+                     "net_purchase",
                      "rule_rank"})
            | C01_INTENTS | DEBT_INTENTS | INDEPENDENT_INTENTS | SALES_MEASURE_INTENTS)
 # Plan filters this backend applies, and the intents each one may be combined with.
 FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock", "stock_split",
-                                     "avg_purchase_price", "earliest_expiry"}),
+                                     "avg_purchase_price", "net_purchase", "earliest_expiry"}),
               "shift": frozenset({"revenue", "order_count"}),
               "staff": frozenset({"revenue", "order_count"}),
               "size": frozenset({"quantity"}),
@@ -533,13 +534,17 @@ def unsupported(plan: Plan) -> str:
             return "Order thresholds must be finite nonnegative integers"
     elif plan.intent == "count_where":
         return "Customer count needs a threshold"
-    if (plan.intent in ("quantity", "stock", "stock_split", "avg_purchase_price")) != bool(plan.unit):
+    if (plan.intent in ("quantity", "stock", "stock_split", "avg_purchase_price", "net_purchase")
+            ) != bool(plan.unit):
         return "Quantity needs the unit asked for"
     if plan.intent == "avg_purchase_price" and (
             len(plan.filters) != 1 or plan.filters[0].field != "product" or plan.start.day != 1
             or plan.end != date(plan.start.year, plan.start.month,
                                 monthrange(plan.start.year, plan.start.month)[1])):
         return "Average purchase price is one product over one full month"
+    if plan.intent == "net_purchase" and (
+            len(plan.filters) != 1 or plan.filters[0].field != "product"):
+        return "Purchases minus sales are of one product"
     if plan.intent in ("stock", "stock_split") and (
             plan.start != plan.end or len(plan.filters) != 1 or plan.filters[0].field != "product"
             or plan.top_k != 1):
@@ -1140,10 +1145,7 @@ def average_purchase_price(lines: list[PurchaseLine], start: date, end: date) ->
     return sum((line.quantity * line.unit_price for line in selected), Decimal(0)) / quantity
 
 
-def _answer_avg_purchase(cache: dict[str, Any], catalog: Catalog, plan: Plan,
-                         rulebook: str) -> Candidate:
-    evidence: dict[str, Any] = {"intent": plan.intent, "start": plan.start.isoformat(),
-                                "end": plan.end.isoformat(), "rules": plan.evidence}
+def _purchase_book(cache: dict[str, Any], catalog: Catalog):
     key = (_catalog_key(catalog), catalog.readme)
     if cache.get("purchase_lines_key") != key:
         try:
@@ -1151,7 +1153,87 @@ def _answer_avg_purchase(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         except PurchaseSourceError as exc:
             cache["purchase_lines"] = exc
         cache["purchase_lines_key"] = key
-    book = cache["purchase_lines"]
+    return cache["purchase_lines"]
+
+
+def net_purchase(bought: list[tuple[Decimal, Decimal]], sold_base: Decimal,
+                 factor: Decimal | None) -> Decimal:
+    """Purchased minus sold (§5): ``bought`` holds (quantity, base units per purchase unit);
+    the result is in base units, or in the purchase unit when ``factor`` is given."""
+    purchased = sum((quantity * per_unit for quantity, per_unit in bought), Decimal(0))
+    difference = purchased - sold_base
+    return difference / factor if factor else difference
+
+
+def _answer_net_purchase(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                         rulebook: str) -> Candidate:
+    evidence: dict[str, Any] = {"intent": plan.intent, "start": plan.start.isoformat(),
+                                "end": plan.end.isoformat(), "rules": plan.evidence}
+    book = _purchase_book(cache, catalog)
+    if isinstance(book, PurchaseSourceError):
+        return Candidate(reason=str(book), evidence=evidence)
+    if not prepare_sales(cache, catalog, rulebook)["ok"]:
+        return Candidate(reason="Sales records do not load", evidence=evidence)
+    first = min(line.day for line in book.lines)
+    last = _coverage_day(catalog.readme) or max(line.day for line in book.lines)
+    evidence.update(purchase_source=book.source,
+                    coverage={"first_day": first.isoformat(), "last_day": last.isoformat()})
+    if plan.start < first or plan.end > last:
+        return Candidate(reason="Period outside the purchase records", evidence=evidence)
+    name = plan.filters[0].value
+    rows = select_product(cache["sales"][0], name)
+    codes = {s.product_id for s in rows if s.product_id}
+    lines = [line for line in purchase_lines_of(book.lines, name, codes)
+             if plan.start <= line.day <= plan.end and not line.cancelled]
+    sold = [s for s in rows if plan.start <= s.day <= plan.end and s.status == "valid"]
+    bases = {fold(s.base_unit) for s in rows if s.base_unit}
+    evidence.update(product_codes=sorted(codes), purchase_lines=len(lines), sold_lines=len(sold),
+                    purchase_units=sorted({fold(line.unit) for line in lines}),
+                    base_units=sorted(bases))
+    if not rows or len(bases) != 1 or any(s.quantity_base is None for s in sold):
+        return Candidate(reason="No single base unit and quantity for the product",
+                         evidence=evidence)
+    base = bases.pop()
+    keys = codes | {fold(s.product_name) for s in rows if s.product_name}
+    try:
+        conversions = load_conversions(catalog)
+    except StockSourceError:
+        conversions = ()
+
+    def per_unit(unit: str) -> Decimal | None:
+        if unit == base:
+            return Decimal(1)
+        # An empty conversion base unit is the product's own base unit (as for stock).
+        factors = {c.factor for c in conversions if c.big_unit == unit
+                   and (c.base_unit or base) == base and c.key in keys}
+        return factors.pop() if len(factors) == 1 else None
+
+    bought = [(line.quantity, per_unit(fold(line.unit))) for line in lines]
+    if any(factor is None for _, factor in bought):
+        return Candidate(reason="A purchase unit has no unique conversion to the base unit",
+                         evidence=evidence)
+    asked = fold(plan.unit)
+    if asked == base:
+        factor = None
+    elif lines and {fold(line.unit) for line in lines} == {asked}:
+        factor = per_unit(asked)
+    else:
+        return Candidate(reason="The unit asked is neither the base nor the purchase unit",
+                         evidence=evidence)
+    sold_base = sum((s.quantity_base for s in sold), Decimal(0))
+    value = net_purchase(bought, sold_base, factor)
+    result = int(value) if value == value.to_integral() else float(round(value, 2))
+    evidence.update(code=_code(f"net_purchase({[(str(q), str(f)) for q, f in bought]!r}, "
+                               f"Decimal({str(sold_base)!r}), {factor and str(factor)!r})",
+                               net_purchase), result=result)
+    return Candidate("number", result, 1.0, "", evidence)
+
+
+def _answer_avg_purchase(cache: dict[str, Any], catalog: Catalog, plan: Plan,
+                         rulebook: str) -> Candidate:
+    evidence: dict[str, Any] = {"intent": plan.intent, "start": plan.start.isoformat(),
+                                "end": plan.end.isoformat(), "rules": plan.evidence}
+    book = _purchase_book(cache, catalog)
     if isinstance(book, PurchaseSourceError):
         return Candidate(reason=str(book), evidence=evidence)
     first = min(line.day for line in book.lines)
@@ -1582,6 +1664,8 @@ def _answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return _answer_rule_rank(cache, catalog, plan, rulebook, specs)
     if plan.intent == "avg_purchase_price":
         return _answer_avg_purchase(cache, catalog, plan, rulebook)
+    if plan.intent == "net_purchase":
+        return _answer_net_purchase(cache, catalog, plan, rulebook)
     c01_rules = ()
     if plan.intent in C01_INTENTS:
         c01_rules = _c01_rules(plan, rulebook)

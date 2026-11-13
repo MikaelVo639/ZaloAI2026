@@ -244,6 +244,11 @@ class EverydayWordingTests(unittest.TestCase):
             with self.subTest(restated=restated):
                 self.assertEqual(normalize_question(restated), normalize_question(standard))
 
+    def test_telex_words(self):
+        self.assertIn("tong tien nhap hang",
+                      normalize_question("nhà cung cấp nào có tổng tiền nhaapj hàng lớn nhất"))
+        self.assertIn("con lai may", normalize_question("hết hôm nay gạch còn laij mấy viên"))
+
     def test_particle_after_la_chi(self):
         self.assertEqual(normalize_question("top 5 hàng chạy nhất là chi nha"),
                          "top 5 hang chay nhat la gi")
