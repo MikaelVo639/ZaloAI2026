@@ -31,6 +31,7 @@ from datamate.agent.code_answer import (
     CODE_TIMEOUT_SECONDS,
     build_code_messages,
     extract_code,
+    implausible,
     normalize_result,
     repair_messages,
 )
@@ -653,6 +654,11 @@ class RewriteAgent(LocalPlanAgent):
                         return Candidate(reason=result, evidence=evidence)
                     messages = repair_messages(messages, code, result)
                     continue
+                # A type the question rules out, a zero or an unasked negative is final:
+                # the code answered another question, and a repair would only guess.
+                doubt = implausible(question.question, *result)
+                if doubt is not None:
+                    return Candidate(reason=doubt, evidence=evidence)
                 results.append(result)
                 break
         if results[0] != results[1]:

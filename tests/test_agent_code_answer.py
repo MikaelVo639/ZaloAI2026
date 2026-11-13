@@ -89,6 +89,19 @@ def calendar_code_generate(cache, messages, max_input_tokens, max_new_tokens):
                     "    return {\"type\": \"boolean\", \"answer\": day[\"lunar_month\"] >= 1}\n```"}
 
 
+NAMES = ("```python\ndef answer(sales, today):\n"
+         "    names = sorted({s['product_name'] for s in sales if s['product_name']})\n"
+         "    return {'type': 'string', 'answer': names[0]%s}\n```")
+
+
+def named_code_generate(cache, messages, max_input_tokens, max_new_tokens):
+    return {"text": NAMES % "" if _is_code_prompt(messages) else UNSURE}
+
+
+def invented_name_generate(cache, messages, max_input_tokens, max_new_tokens):
+    return {"text": NAMES % " + ' (SP01)'" if _is_code_prompt(messages) else UNSURE}
+
+
 def always_buggy_generate(cache, messages, max_input_tokens, max_new_tokens):
     return {"text": BUGGY if _is_code_prompt(messages) else UNSURE}
 
@@ -97,15 +110,64 @@ class CodeCheckTests(unittest.TestCase):
     def test_only_definitions_without_imports_or_private_access(self):
         self.assertIsNone(check_code(extract_code(MONTH_REVENUE)))
         for code, reason in (
-                ("import os\ndef answer(s, t):\n    return 1", "Import"),
+                ("import os\ndef answer(s, t):\n    return 1", "not allowed: os"),
+                ("from os import path\ndef answer(s, t):\n    return 1", "not allowed: os"),
+                ("from collections import _x\ndef answer(s, t):\n    return 1", "not allowed"),
                 ("def answer(s, t):\n    return open('x')", "open"),
                 ("def answer(s, t):\n    return ().__class__", "private"),
                 ("def answer(s, t):\n    return __builtins__", "__builtins__"),
-                ("x = 1\ndef answer(s, t):\n    return x", "outside functions"),
+                ("x = f()\ndef answer(s, t):\n    return x", "outside functions"),
+                ("print(1)\ndef answer(s, t):\n    return 1", "outside functions"),
                 ("def other(s, t):\n    return 1", "no answer function"),
                 ("def answer(s, t) return", "parse")):
             with self.subTest(code=code):
                 self.assertIn(reason, check_code(code))
+
+    def test_standard_imports_constants_and_print_are_accepted(self):
+        from datamate.agent.code_answer import _call, _globals
+        code = ("import datetime\nfrom collections import OrderedDict\nimport calendar as cal\n"
+                "LIMIT = 2\n"
+                "def answer(s, t):\n    print('debug')\n"
+                "    days = cal.monthrange(t.year, t.month)[1]\n"
+                "    first = datetime.date(t.year, t.month, 1)\n"
+                "    return {'type': 'number', 'answer': days + first.day + LIMIT}")
+        self.assertIsNone(check_code(code))
+        self.assertEqual(_call(_globals(), code, [], date(2026, 2, 10)),
+                         {"value": {"type": "number", "answer": 31}})
+
+    def test_module_views_hide_modules_and_missing_tables_give_no_answer(self):
+        from datamate.agent.code_answer import _call, _globals
+        namespace = _globals()
+        self.assertFalse(hasattr(namespace["statistics"], "sys"))
+        code = "def answer(s, t):\n    return {'type': 'number', 'answer': len(purchases)}"
+        self.assertEqual(_call(namespace, code, [], date(2026, 2, 10))["value"], None)
+        with self.assertRaises(NameError):
+            _call(_globals(), "def answer(s, t):\n    return undefined_name", [], None)
+        with self.assertRaises(ImportError):
+            _globals()["__builtins__"]["__import__"]("os")
+
+    def test_answers_the_question_rules_out(self):
+        from datamate.agent.code_answer import implausible
+        for question, kind, answer, reason in (
+                ("Nhóm bánh chiếm bao nhiêu % doanh thu?", "number", 12.5, "percent"),
+                ("Tỷ lệ đơn bị huỷ tháng này?", "number", 3, "percent"),
+                ("Tháng này bán được bao nhiêu tuýp kem 5% tuýp 5g?", "percent", 12, "percent"),
+                ("Ngày nào bán nhiều nhất?", "string", "Thứ bảy", "date"),
+                ("Tháng này doanh thu có cao hơn tháng trước không?", "number", 5, "yes/no"),
+                ("Doanh thu tháng này bao nhiêu?", "boolean", True, "yes/no"),
+                ("Doanh thu tháng này bao nhiêu?", "number", 0, "zero"),
+                ("Nhóm bánh chiếm bao nhiêu % doanh thu?", "percent", 0.0, "zero"),
+                ("Doanh thu tháng này bao nhiêu?", "number", -5000, "negative")):
+            with self.subTest(question=question, kind=kind):
+                self.assertIn(reason, implausible(question, kind, answer))
+        for question, kind, answer in (
+                ("Tháng này bán được bao nhiêu tuýp kem 5% tuýp 5g?", "number", 12),
+                ("Doanh thu tháng này tăng giảm bao nhiêu % so với tháng trước?", "percent", -4.5),
+                ("Tháng này lãi ròng bao nhiêu?", "number", -62000),
+                ("Doanh thu 3 tháng qua có tăng liên tục hok", "boolean", False),
+                ("Tháng nào doanh thu cao nhất?", "date", "2026-03-01")):
+            with self.subTest(question=question):
+                self.assertIsNone(implausible(question, kind, answer))
 
     def test_extract_code_needs_the_answer_function(self):
         self.assertIn("def answer(", extract_code(MONTH_REVENUE))
@@ -198,7 +260,7 @@ class CodeAgentTests(unittest.TestCase):
     def test_disagreeing_empty_unsafe_or_looping_code_abstains(self):
         for generate, reason in ((disagreeing_code_generate, "disagree"),
                                  (none_code_generate, "no answer"),
-                                 (unsafe_code_generate, "Import"),
+                                 (unsafe_code_generate, "not allowed: os"),
                                  (looping_code_generate, "Timed out")):
             with self.subTest(generate=generate.__name__):
                 candidate = self.agent(generate, code_fallback=True).answer(
@@ -226,9 +288,25 @@ class CodeAgentTests(unittest.TestCase):
         self.assertEqual(len(failed.evidence["code_attempt"]["code_votes"]), 2)
 
     def test_code_reads_the_split_calendar(self):
+        asked = Question("q", "demo_csv", "Hôm nay có rơi vào tháng Giêng âm lịch không?",
+                         self.question.as_of_date)
         candidate = self.agent(calendar_code_generate, code_fallback=True).answer(
-            self.question, self.context)
+            asked, self.context)
         self.assertEqual(candidate.type, "boolean", candidate.reason)
+        # The same code answers a revenue question with True/False: refused, not repaired.
+        refused = self.agent(calendar_code_generate, code_fallback=True).answer(
+            self.question, self.context)
+        self.assertIn("does not fit the question", refused.reason)
+        self.assertEqual(len(refused.evidence["code_attempt"]["code_votes"]), 1)
+
+    def test_names_must_come_from_the_data(self):
+        named = self.agent(named_code_generate, code_fallback=True).answer(
+            self.question, self.context)
+        self.assertEqual(named.type, "string", named.reason)
+        invented = self.agent(invented_name_generate, code_fallback=True).answer(
+            self.question, self.context)
+        self.assertIn("not in the data", invented.reason)
+        self.assertIn("(SP01)", invented.reason)
 
     def test_code_only_skips_the_grammar(self):
         planned = Question("q", "demo_csv", "Doanh thu tháng này là bao nhiêu?", date(2026, 8, 27))

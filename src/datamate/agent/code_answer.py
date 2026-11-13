@@ -14,14 +14,15 @@ from __future__ import annotations
 
 import ast
 import csv
+import importlib
 import math
 import re
-import statistics
 from collections import Counter, defaultdict
 from dataclasses import asdict
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 from datamate.contracts import Catalog
@@ -81,6 +82,10 @@ EXTRA_TABLES: dict[str, tuple[str, tuple[tuple[str, str, str], ...]]] = {
         ("base_unit", "str|None", "base unit"), ("quantity", "float", "quantity in the base unit"))),
 }
 
+# Globals that exist only when the shop has the records; code reading a missing one gets
+# "no answer" instead of a repair round.
+OPTIONAL_GLOBALS = ("purchases", "purchase_lines", "stock", "calendar")
+
 CODE_SYSTEM = """You answer one Vietnamese question about a shop by writing Python.
 Write exactly one function and nothing else:
 
@@ -94,8 +99,10 @@ are already removed. Fields (any may be None when the shop does not record it):
 {extra}`today` (datetime.date) is the day the question is asked: "hôm nay", "tháng này",
 "tuần trước" are relative to it. The data starts on {first_day}.
 Values seen in the data: {values}
-Already available (never import anything): date, timedelta, Counter, defaultdict, math,
-statistics, fold (fold(text) lowercases and removes Vietnamese accents, for matching names).
+Already available: date, timedelta, datetime, Counter, defaultdict, math, statistics, re,
+itertools, fold (fold(text) lowercases and removes Vietnamese accents, for matching names).
+Only datetime, math, statistics, collections, itertools, functools, re, decimal, calendar,
+heapq, bisect and string can be imported; no files, no pandas.
 
 Shop rules (follow them exactly):
 {rules}
@@ -195,7 +202,8 @@ def build_code_messages(question: str, today: date, profile: dict[str, Any], rul
         first, last = profile["calendar"]
         extra += ("Global dict `calendar` (the shop's lunar calendar, " f"{first} to {last}): "
                   "datetime.date -> {lunar_day, lunar_month, lunar_year, lunar_leap (bool), "
-                  "holiday (str, may be empty)}. Use it for Tết and lunar dates.\n")
+                  "holiday (str, may be empty)}. Use it for Tết and lunar dates (to use the "
+                  "calendar module as well, write `import calendar as cal`).\n")
     system = CODE_SYSTEM
     for key, value in (("{fields}", fields), ("{extra}", extra),
                        ("{first_day}", profile["first_day"]),
@@ -229,16 +237,58 @@ _FORBIDDEN_NAMES = frozenset("""
     breakpoint exit quit help memoryview type object super classmethod staticmethod property
     dir id hash iter aiter anext __builtins__ __loader__ __spec__
 """.split())
-_SAFE_BUILTINS = {name: __builtins__[name] if isinstance(__builtins__, dict)
-                  else getattr(__builtins__, name) for name in """
-    abs all any bool dict divmod enumerate filter float format frozenset int isinstance len
-    list map max min next pow range reversed round set slice sorted str sum tuple zip
-    ValueError KeyError ZeroDivisionError TypeError IndexError StopIteration Exception
-""".split()}
+_BUILTIN_NAMES = """
+    abs all any bool callable chr dict divmod enumerate filter float format frozenset int
+    isinstance issubclass len list map max min next ord pow range repr reversed round set slice
+    sorted str sum tuple zip
+    ArithmeticError AttributeError Exception IndexError KeyError LookupError NameError
+    NotImplementedError OverflowError RuntimeError StopIteration TypeError ValueError
+    ZeroDivisionError
+""".split()
+# Standard modules the code may import or use by name. The code sees a view holding only
+# their public, non-module attributes (statistics.sys, calendar.sys stay out of reach).
+_MODULES = ("datetime", "math", "statistics", "collections", "itertools", "functools", "re",
+            "decimal", "calendar", "heapq", "bisect", "string")
+
+
+def _module_view(name: str) -> SimpleNamespace:
+    module = importlib.import_module(name)
+    return SimpleNamespace(**{key: value for key, value in vars(module).items()
+                              if not key.startswith("_")
+                              and not isinstance(value, ModuleType)})
+
+
+_VIEWS = {name: _module_view(name) for name in _MODULES}
+
+
+def _safe_import(name: str, globals: Any = None, locals: Any = None,  # noqa: A002
+                 fromlist: Any = (), level: int = 0) -> SimpleNamespace:
+    if level or name not in _VIEWS:
+        raise ImportError(f"only these modules can be imported: {', '.join(_MODULES)}")
+    return _VIEWS[name]
+
+
+def _print(*args: Any, **kwargs: Any) -> None:
+    """print() is accepted and ignored: the answer is the returned dict."""
+
+
+_SAFE_BUILTINS: dict[str, Any] = {
+    name: __builtins__[name] if isinstance(__builtins__, dict) else getattr(__builtins__, name)
+    for name in _BUILTIN_NAMES}
+_SAFE_BUILTINS.update(__import__=_safe_import, print=_print)
+
+
+def _globals() -> dict[str, Any]:
+    """Names every calculation starts with (the prompt lists them)."""
+    return {"__builtins__": _SAFE_BUILTINS, "date": date, "timedelta": timedelta,
+            "datetime": _VIEWS["datetime"], "Counter": Counter, "defaultdict": defaultdict,
+            "math": _VIEWS["math"], "statistics": _VIEWS["statistics"], "re": _VIEWS["re"],
+            "itertools": _VIEWS["itertools"], "fold": fold}
 
 
 def check_code(code: str) -> str | None:
-    """Reason the code is refused, or None. No imports, no dunder access, no I/O names."""
+    """Reason the code is refused, or None. Imports only of the allowed standard modules,
+    no dunder access, no I/O names; at top level only definitions, imports and constants."""
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
@@ -247,17 +297,32 @@ def check_code(code: str) -> str | None:
     if not any(f.name == "answer" for f in functions):
         return "Code has no answer function"
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal,
-                             ast.AsyncFunctionDef, ast.Await, ast.ClassDef, ast.Delete)):
+        if isinstance(node, ast.Import):
+            refused = [a.name for a in node.names if a.name not in _VIEWS]
+            if refused:
+                return f"Code imports a module that is not allowed: {refused[0]}"
+        elif isinstance(node, ast.ImportFrom):
+            if node.level or node.module not in _VIEWS or any(
+                    a.name == "*" or a.name.startswith("_") for a in node.names):
+                return f"Code imports a module that is not allowed: {node.module}"
+        elif isinstance(node, (ast.Global, ast.Nonlocal, ast.AsyncFunctionDef, ast.Await,
+                               ast.ClassDef, ast.Delete)):
             return f"Code uses a forbidden statement: {type(node).__name__}"
         if isinstance(node, ast.Attribute) and node.attr.startswith("_"):
             return "Code reads a private attribute"
         if isinstance(node, ast.Name) and (node.id in _FORBIDDEN_NAMES or node.id.startswith("__")):
             return f"Code uses a forbidden name: {node.id}"
-    for node in tree.body:  # only definitions at top level: nothing runs on load
-        if not isinstance(node, ast.FunctionDef) and not (
-                isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)):
-            return "Code runs statements outside functions"
+    for node in tree.body:  # nothing but definitions, imports and constants runs on load
+        if isinstance(node, (ast.FunctionDef, ast.Import, ast.ImportFrom)):
+            continue
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            continue
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and not any(
+                isinstance(child, (ast.Call, ast.Lambda, ast.ListComp, ast.SetComp,
+                                   ast.DictComp, ast.GeneratorExp))
+                for child in ast.walk(node)):
+            continue
+        return "Code runs statements outside functions"
     return None
 
 
@@ -371,17 +436,25 @@ def _plain(value: Any) -> Any:
     return value
 
 
+def _call(namespace: dict[str, Any], code: str, *args: Any) -> dict[str, Any]:
+    """Run the checked code. Reading a table or the calendar this shop does not have is a
+    deliberate "no answer", not an error to repair."""
+    exec(compile(code, "<model-code>", "exec"), namespace)  # noqa: S102 - checked first
+    try:
+        return {"value": _plain(namespace["answer"](*args))}
+    except NameError as exc:
+        if exc.name in OPTIONAL_GLOBALS:
+            return {"value": None, "missing": exc.name}
+        raise
+
+
 def run_code(cache: dict[str, Any], code: str, today: date,
              catalog: Catalog | None = None, calendar: Path | None = None) -> Any:
     """Worker task: run ``answer(sales, today)`` on fresh copies of the records."""
     refused = check_code(code)
     if refused:
         return {"refused": refused}
-    namespace: dict[str, Any] = {
-        "__builtins__": _SAFE_BUILTINS, "date": date, "timedelta": timedelta,
-        "Counter": Counter, "defaultdict": defaultdict, "math": math,
-        "statistics": statistics, "fold": fold}
-    exec(compile(code, "<model-code>", "exec"), namespace)  # noqa: S102 - checked above
+    namespace = _globals()
     if calendar is not None:
         try:
             namespace["calendar"] = {d: dict(v) for d, v in lunar_calendar(cache, calendar).items()}
@@ -391,10 +464,76 @@ def run_code(cache: dict[str, Any], code: str, today: date,
         for name, rows in extra_tables(cache, catalog, today).items():
             namespace[name] = [dict(row) for row in rows]
     lines = [dict(line) for line in sales_lines(cache, today)]
-    return {"value": _plain(namespace["answer"](lines, today))}
+    result = _call(namespace, code, lines, today)
+    unknown = _unknown_name(result.get("value"), cache, today, namespace)
+    if unknown is not None:
+        return {"refused": f"Code answer names a value that is not in the data: {unknown[:60]}"}
+    return result
+
+
+_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _unknown_name(value: Any, cache: dict[str, Any], today: date,
+                  namespace: dict[str, Any]) -> str | None:
+    """First name in a string or list answer that no record the code read holds. A name
+    the code made up, or decorated ("Lê Văn Tùng (KH01)"), is not one the data can have."""
+    if not isinstance(value, dict) or value.get("type") not in ("string", "list"):
+        return None
+    answer = value.get("answer")
+    names = [answer] if isinstance(answer, str) else (
+        [item for item in answer if isinstance(item, str)] if isinstance(answer, list) else [])
+    names = [name.strip() for name in names if not _ISO_DAY.fullmatch(name.strip())]
+    if not names:
+        return None
+    known = {text.strip() for line in sales_lines(cache, today) for text in line.values()
+             if isinstance(text, str)}
+    for rows in (namespace.get(name) for name in EXTRA_TABLES):
+        for row in rows or ():
+            known.update(text.strip() for text in row.values() if isinstance(text, str))
+    for day in (namespace.get("calendar") or {}).values():
+        if isinstance(day, dict) and isinstance(day.get("holiday"), str):
+            known.add(day["holiday"].strip())
+    return next((name for name in names if name not in known), None)
 
 
 # ---------------------------------------------------------------- answers
+
+# How the question fixes the answer type, measured on the TRAIN answers (3,000 questions):
+# "%" (not the "5%" of a product name), "phần trăm", "tỷ lệ" -> percent, and every percent
+# answer carries it; "ngày nào", "hôm nào" -> date 127 of 129; a closing "... không?" -> boolean 18 of 19,
+# and every boolean question has a yes/no word. Model code that returns another type
+# answered a different question.
+_PERCENT_CUE = re.compile(r"phan tra|ty le|ti le")
+_PERCENT_SIGN = re.compile(r"(?<![\d.,])(?<![\d.,]\s)%")  # "bao nhiêu %", not "kem 5%"
+_DATE_CUE = re.compile(r"(?:ngay|hom) nao|ngay bao nhieu")
+_YES_NO_END = re.compile(r"(?:\bkhong|dung khong|phai khong|hay khong|\bko)\s*$")
+_YES_NO_WORD = re.compile(r"\b(?:khong|ko|k|hok|khoong|hong)\b|co phai|phai khong")
+# A negative amount is only asked for as a difference.
+_DIFFERENCE = re.compile(r"chenh lech|tang|giam|lech|hon|kem|lo\b|lai|am\b|so voi|tru")
+
+
+def implausible(question: str, kind: str, answer: Any) -> str | None:
+    """Why a model-computed answer cannot answer this question, or None.
+
+    Zero is a train answer 2 times in 1,884 numbers and 2 in 578 percents; model code
+    that filters on a misspelt name or a wrong field returns exactly that zero."""
+    folded = fold(question).strip(" ?.!")
+    percent = bool(_PERCENT_SIGN.search(question) or _PERCENT_CUE.search(folded))
+    if percent != (kind == "percent"):
+        return "Code answer type does not fit the question (percent)"
+    if _DATE_CUE.search(folded) and kind != "date":
+        return "Code answer type does not fit the question (date)"
+    if bool(_YES_NO_END.search(folded)) and kind != "boolean":
+        return "Code answer type does not fit the question (yes/no)"
+    if kind == "boolean" and not _YES_NO_WORD.search(folded):
+        return "Code answer type does not fit the question (yes/no)"
+    if kind in ("number", "percent") and answer == 0:
+        return "Code answer is zero"
+    if kind == "number" and answer < 0 and not _DIFFERENCE.search(folded):
+        return "Code answer is negative"
+    return None
+
 
 def normalize_result(value: Any) -> tuple[str, Any] | str:
     """(type, answer) in submission form, or the reason it is unusable."""
