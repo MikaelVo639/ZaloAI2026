@@ -170,6 +170,40 @@ def build(data_dir: Path, original: Path, output: Path, limit: int = 480, *,
     return report
 
 
+def code_sample(data_dir: Path, output: Path, limit: int = 160) -> dict:
+    """TRAIN questions in their original wording, spread over answer types and businesses
+    (tables excluded), to score the model calculation alone. Deterministic."""
+    if limit <= 0:
+        raise ValueError("Sample limit must be positive")
+    split = load_split(data_dir)
+    if output.resolve().is_relative_to(split.root):
+        raise ValueError("Benchmark output must be outside the source split")
+    if output.exists():
+        raise ValueError(f"Refusing to overwrite {output}")
+    refs = index_records(read_jsonl(split.root / "answers.jsonl"))
+    questions = index_records(read_jsonl(split.root / "questions.jsonl"))
+    buckets: dict[tuple[str, str], list[Question]] = defaultdict(list)
+    for question in split.questions:
+        kind = refs[question.id]["type"]
+        if kind != "table":
+            buckets[(kind, question.business_id)].append(question)
+    chosen = [question for _, question in _spread(buckets)][:limit]
+    selected_split = output / "split"
+    data = selected_split / "data"
+    data.mkdir(parents=True)
+    for file in ("rulebook.md", "calendar.csv"):
+        shutil.copy2(split.root / file, selected_split / file)
+    for business in sorted({question.business_id for question in chosen}):
+        _link_tree(split.root / "data" / business, data / business)
+    write_jsonl(selected_split / "questions.jsonl", (questions[q.id] for q in chosen))
+    write_jsonl(output / "answers.jsonl", (refs[q.id] for q in chosen))
+    report = {"scorer": "LOCAL PROXY", "questions": len(chosen),
+              "by_type": dict(Counter(refs[q.id]["type"] for q in chosen)),
+              "by_business": dict(Counter(q.business_id for q in chosen))}
+    _write_report(output / "build.json", report)
+    return report
+
+
 def score(bench: Path, config: Config, output: Path) -> dict:
     if output.exists():
         raise ValueError(f"Refusing to overwrite {output}")
@@ -195,14 +229,23 @@ def main() -> int:
     builder.add_argument("--original", type=Path, default=Path("outputs/runs/train-ref/submission.jsonl"))
     builder.add_argument("--limit", type=int, default=480)
     builder.add_argument("--workers", type=int, default=4, help="parallel business scans")
+    sampler = commands.add_parser("code-sample",
+                                  help="original TRAIN questions for the model calculation alone")
+    sampler.add_argument("--data-dir", type=Path, required=True)
+    sampler.add_argument("--output-dir", type=Path, required=True)
+    sampler.add_argument("--limit", type=int, default=160)
     scorer = commands.add_parser("score", help="run inference, then score against TRAIN labels")
     scorer.add_argument("--bench", type=Path, required=True)
     scorer.add_argument("--config", type=Path, required=True)
     scorer.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
-    report = (build(args.data_dir, args.original, args.output_dir, args.limit, workers=args.workers)
-              if args.command == "build"
-              else score(args.bench, Config.load(args.config), args.output_dir))
+    if args.command == "build":
+        report = build(args.data_dir, args.original, args.output_dir, args.limit,
+                       workers=args.workers)
+    elif args.command == "code-sample":
+        report = code_sample(args.data_dir, args.output_dir, args.limit)
+    else:
+        report = score(args.bench, Config.load(args.config), args.output_dir)
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 

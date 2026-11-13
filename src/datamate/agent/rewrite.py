@@ -22,6 +22,16 @@ from collections import Counter
 from collections.abc import Iterable
 from typing import Any
 
+from datamate.agent import code_answer
+from datamate.agent.baseline import _execution_failure
+from datamate.agent.code_answer import (
+    CODE_EXAMPLES,
+    CODE_MAX_NEW_TOKENS,
+    CODE_TIMEOUT_SECONDS,
+    build_code_messages,
+    extract_code,
+    normalize_result,
+)
 from datamate.agent.local_plan import LocalPlanAgent
 from datamate.agent.rule_spec_model import model_specs
 from datamate.contracts import BusinessContext, Candidate, Plan, Question
@@ -460,16 +470,24 @@ def parse_rewrite(text: str) -> str | None:
     return line
 
 
+# Rewrite failures after which the model calculation is tried (never model or data failures).
+_CODE_AFTER = ("Rewrite model was unsure", "Grammar cannot plan the rewrite",
+               "Rewrites lead to different plans", "Rewrite changed", "Rewrite added or dropped",
+               "Rewrite is empty")
+
+
 class RewriteAgent(LocalPlanAgent):
     """Grammar first; on failure, plan model restatements with the same grammar."""
 
     def __init__(self, model_path: str, *, votes: int = 2, examples: int = 6,
                  rewrite_retries: int = 1, lenient: bool = False,
-                 retry_rejected: bool = False, **kwargs: Any) -> None:
+                 retry_rejected: bool = False, code_fallback: bool = False,
+                 code_only: bool = False, **kwargs: Any) -> None:
         super().__init__(model_path, **kwargs)
-        if type(lenient) is not bool or type(retry_rejected) is not bool:
-            raise ValueError("lenient and retry_rejected must be true or false")
+        if any(type(flag) is not bool for flag in (lenient, retry_rejected, code_fallback, code_only)):
+            raise ValueError("lenient, retry_rejected, code_fallback and code_only must be true or false")
         self.lenient, self.retry_rejected = lenient, retry_rejected
+        self.code_fallback, self.code_only = code_fallback, code_only
         if type(votes) is not int or not 1 <= votes <= 3:
             raise ValueError("votes must be 1, 2 or 3 (two of three must agree)")
         if type(examples) is not int or not 1 <= examples <= len(EXAMPLES):
@@ -546,7 +564,13 @@ class RewriteAgent(LocalPlanAgent):
             messages = _retry_messages(messages, rewrite, remaining)
         return "Grammar cannot plan the rewrite"
 
+    # Worker tasks of the model calculation (module-level for the spawn worker).
+    run_code = staticmethod(code_answer.run_code)
+    code_profile = staticmethod(code_answer.profile)
+
     def answer(self, question: Question, context: BusinessContext) -> Candidate:
+        if self.code_only:  # diagnostic: the model calculation alone
+            return self._ensure_model() or self._code_answer(question, context)
         plan = self._plan(question, context)
         if plan is not None:
             return self._answer_plan(plan, context, as_of_date=question.as_of_date)
@@ -556,6 +580,69 @@ class RewriteAgent(LocalPlanAgent):
         unavailable = self._ensure_model()
         if unavailable is not None:
             return unavailable
+        candidate = self._rewrite_answer(question, context)
+        if (self.code_fallback and candidate.type == "abstain"
+                and candidate.reason.startswith(_CODE_AFTER)):
+            computed = self._code_answer(question, context)
+            if computed.type != "abstain":
+                computed.evidence["rewrites"] = candidate.evidence.get("rewrites", [])
+                return computed
+            candidate.evidence["code_attempt"] = computed.evidence
+            candidate.reason = f"{candidate.reason}; code: {computed.reason}"
+        return candidate
+
+    def _code_answer(self, question: Question, context: BusinessContext) -> Candidate:
+        """Two independent model-written calculations that must return the same answer."""
+        failure = self._prepare(context)
+        if failure is not None:
+            return failure
+        today = question.as_of_date
+        shape = self.worker.run(self.code_profile, self.question_timeout, today=today)
+        if not shape.ok:
+            return _execution_failure("Code profile", shape, {})
+        evidence: dict[str, Any] = {"model": self._model_info, "path": "code",
+                                    "planner_confidence": REWRITE_CONFIDENCE,
+                                    "code_votes": []}
+        results = []
+        for vote, examples in enumerate((list(CODE_EXAMPLES), list(CODE_EXAMPLES)[::-1]), 1):
+            messages = build_code_messages(question.question, today, shape.value,
+                                           context.split.rulebook, examples)
+            attempt: dict[str, Any] = {"vote": vote, "prompt_sha256": hashlib.sha256(
+                json.dumps(messages, ensure_ascii=False).encode()).hexdigest()}
+            evidence["code_votes"].append(attempt)
+            generated = self.planner_worker.run(
+                self.generate, CODE_TIMEOUT_SECONDS, messages=messages,
+                max_input_tokens=self.max_input_tokens, max_new_tokens=CODE_MAX_NEW_TOKENS)
+            attempt["execution"] = generated.execution()
+            if not generated.ok:
+                if generated.timed_out or not self.planner_worker.alive:
+                    self._model_error = Candidate(reason="Rewrite model stopped after worker failure",
+                                                  evidence=dict(evidence))
+                return Candidate(reason=f"Code model failed: {generated.error}", evidence=evidence)
+            attempt["model_output"] = generated.value
+            code = extract_code(generated.value.get("text", ""))
+            attempt["code"] = code
+            if code is None:
+                return Candidate(reason="Model wrote no answer function", evidence=evidence)
+            ran = self.worker.run(self.run_code, self.question_timeout, code=code, today=today)
+            attempt["run"] = ran.execution()
+            if not ran.ok:
+                return Candidate(reason=f"Model code failed: {ran.error}"[:300], evidence=evidence)
+            if "refused" in ran.value:
+                return Candidate(reason=ran.value["refused"], evidence=evidence)
+            result = normalize_result(ran.value["value"])
+            attempt["result"] = ran.value["value"]
+            if isinstance(result, str):
+                return Candidate(reason=result, evidence=evidence)
+            results.append(result)
+        if results[0] != results[1]:
+            return Candidate(reason="Model calculations disagree", evidence=evidence)
+        kind, value = results[0]
+        evidence.update(code=evidence["code_votes"][0]["code"], result=value)
+        return Candidate(type=kind, answer=value, confidence=REWRITE_CONFIDENCE,
+                         reason="Model calculation", evidence=evidence)
+
+    def _rewrite_answer(self, question: Question, context: BusinessContext) -> Candidate:
         product_names = self._product_names(context)
         vocabulary = self._vocabulary(context)
         names = [*product_names, *(label for labels in vocabulary.values() for label in labels)]

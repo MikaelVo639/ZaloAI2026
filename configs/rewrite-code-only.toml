@@ -1,0 +1,26 @@
+# TRAIN benchmark only: the model calculation alone (no grammar, no rewrite), to measure
+# how often its answers are right. Never use it for a submission.
+backend = "rewrite"
+# Fixed diagnostic score for rewrite answers, NOT a calibrated probability.
+min_confidence = 0.5
+max_seconds = 20000
+model_path = "models/qwen2.5-coder-7b-instruct"
+question_timeout = 30
+ingestion_timeout = 300
+model_load_timeout = 600
+model_timeout = 30
+# Every example is in the prompt (about 5k tokens), so the input budget is larger.
+max_input_tokens = 8192
+max_new_tokens = 128
+rewrite_retries = 1
+rewrite_examples = 78
+# Answer KHONG_RO only when a condition would be lost, not when no example is alike.
+rewrite_lenient = true
+# Spend the retry on a restatement the safety checks rejected, too.
+rewrite_retry_rejected = true
+# Two of three restatements must lead to the same plan (third asked only when needed).
+rewrite_votes = 3
+# When no restatement can be planned, the model writes a Python calculation over the
+# cleaned sales lines; two independent calculations must return the same answer.
+rewrite_code_fallback = true
+rewrite_code_only = true

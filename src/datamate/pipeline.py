@@ -43,6 +43,10 @@ class Config:
     # 2: both restatements must lead to the same plan; 3: two of three must (the third is
     # asked only when the first two differ or fail).
     rewrite_votes: int = 2
+    # When no restatement can be planned, the model writes a calculation over the cleaned
+    # sales lines (two must agree). code_only skips grammar and rewrite (benchmark only).
+    rewrite_code_fallback: bool = False
+    rewrite_code_only: bool = False
 
     def __post_init__(self) -> None:
         if self.backend not in ("baseline", "abstain", "local_plan", "rewrite"):
@@ -66,7 +70,8 @@ class Config:
             raise ValueError("rewrite_examples must be between 1 and the number of examples")
         if type(self.rewrite_votes) is not int or self.rewrite_votes not in (1, 2, 3):
             raise ValueError("rewrite_votes must be 1, 2 or 3")
-        for name in ("rewrite_lenient", "rewrite_retry_rejected"):
+        for name in ("rewrite_lenient", "rewrite_retry_rejected", "rewrite_code_fallback",
+                     "rewrite_code_only"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be true or false")
         if self.max_input_tokens + self.max_new_tokens > 32768:
@@ -98,7 +103,9 @@ def predict(data_dir: Path, output_dir: Path, config: Config,
                                 examples=config.rewrite_examples,
                                 lenient=config.rewrite_lenient,
                                 retry_rejected=config.rewrite_retry_rejected,
-                                votes=config.rewrite_votes)
+                                votes=config.rewrite_votes,
+                                code_fallback=config.rewrite_code_fallback,
+                                code_only=config.rewrite_code_only)
             agent = model_agent(config.model_path, model_load_timeout=config.model_load_timeout,
                                 model_timeout=config.model_timeout,
                                 max_input_tokens=config.max_input_tokens,

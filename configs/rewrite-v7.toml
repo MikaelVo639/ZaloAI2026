@@ -22,3 +22,6 @@ rewrite_lenient = true
 rewrite_retry_rejected = true
 # Two of three restatements must lead to the same plan (third asked only when needed).
 rewrite_votes = 3
+# When no restatement can be planned, the model writes a Python calculation over the
+# cleaned sales lines; two independent calculations must return the same answer.
+rewrite_code_fallback = true
