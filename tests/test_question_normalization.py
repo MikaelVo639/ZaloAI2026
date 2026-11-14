@@ -208,7 +208,13 @@ class EverydayWordingTests(unittest.TestCase):
                 ("Số đơn bán tại ca sáng tháng 8/2025 là bao nhiêu?",
                  "Số đơn bán trong ca sáng tháng 8/2025 là bao nhiêu?"),
                 ("Trung bình mỗi đơn hàng tháng 5/2025 bán được bao nhiêu tiền?",
-                 "Giá trị trung bình một đơn tháng 5/2025 là bao nhiêu?")):
+                 "Giá trị trung bình một đơn tháng 5/2025 là bao nhiêu?"),
+                ("Tháng 5/2025, doanh thu của đơn hàng bán bởi nhân viên mã NV002 là bao nhiêu?",
+                 "Tháng 5/2025, doanh thu của nhân viên mã NV002 là bao nhiêu?"),
+                ("Doanh thu bán hàng của nhân viên mã NV001 trong tháng 4/2025 là bao nhiêu?",
+                 "Doanh thu của nhân viên mã NV001 trong tháng 4/2025 là bao nhiêu?"),
+                ("Ngày nào trong tháng 1/2026 bán hàng có doanh thu cao nhất?",
+                 "Ngày nào trong tháng 1/2026 có doanh thu cao nhất?")):
             with self.subTest(restated=restated):
                 self.assertEqual(normalize_question(restated), normalize_question(standard))
         # Kept: the question's own wording, "giá vốn" never added, "lần nhất" keeps its count.

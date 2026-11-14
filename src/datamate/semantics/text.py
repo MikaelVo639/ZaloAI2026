@@ -413,6 +413,11 @@ _STANDARD: tuple[tuple[str, str], ...] = (
     (r"\b(?:dat hoac vuot|bang hoac vuot|lon hon hoac bang) ((?:\d{1,3}(?: \d{3})+|\d+)"
      r"(?: (?:trieu|tr|k|nghin|ngan|ty|cu))?(?: dong)?)(?! tro len)\b", r"tu \1 tro len"),
     (r"\btai (ca (?:sang|chieu|toi))\b", r"trong \1"),
+    # "doanh thu của đơn hàng bán bởi nhân viên X" is the staff member's revenue; "doanh thu
+    # bán hàng", "ngày … bán hàng có doanh thu cao nhất" is the revenue (rulebook §1).
+    (r"\bdoanh thu (?:cua )?(?:cac )?" + _ORDER + r" ban boi (nhan vien)\b", r"doanh thu cua \1"),
+    (r"\bdoanh thu ban hang\b", "doanh thu"),
+    (r"\bban hang (co doanh thu)\b", r"\1"),
     (r"\btrung binh (?:moi|mot) " + _ORDER + r" (" + _P + r") (?:ban duoc|mang ve|thu ve) "
      r"(bao nhieu|bao nhiu|bnhiu|bn) tien\b", r"gia tri trung binh mot don \1 la \2"),
     (r"\b(ca (?:sang|chieu)) co bao nhieu hoa don$", r"\1 co bao nhieu don"),
