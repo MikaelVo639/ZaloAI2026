@@ -133,5 +133,20 @@ class LedgerTests(_Shop):
         self.assertEqual(evidence["order_ids"], "from_file")
 
 
+class NameSpellingTests(_Shop):
+    def test_spellings_of_one_name_are_one_product(self):
+        readme = LEDGER.replace("hàng bán, có thể ghi tắt (bảng tra ở file tat.csv)",
+                                "tên hàng").replace(
+            "ghi chú của đơn; đơn huỷ hoặc trả lại được ghi ở đây", "trạng thái đơn")
+        rows = [HEADER]
+        for i, name in enumerate(["Trà xanh", "TRÀ XANH", "Trà  xanh", "Trà xanh", "Tra xanh",
+                                  "Bánh mì", "Bánh mì"] * 4):
+            rows.append([f"{1 + i % 28:02d}/01/2026", str(i), name, "2", "15000", "30000",
+                         "Hoàn thành"])
+        sales, evidence, _ = load_readme_sales(self.shop(readme, {"so.csv": rows}), RULEBOOK)
+        self.assertEqual({s.product_id for s in sales}, {"Trà xanh", "Bánh mì"})
+        self.assertEqual(evidence["name_spellings_merged"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()

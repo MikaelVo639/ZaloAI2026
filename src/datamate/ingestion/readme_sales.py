@@ -1380,6 +1380,17 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
     unit_sources = Counter()
     base_units: dict[str, set[str]] = defaultdict(set)
     fee_rows = 0
+    # Rulebook §8 "Tên gọi": names of one thing are one thing. Without product codes, every
+    # spelling of a name that differs only in case, spacing or accents ("Bia Tiger Lon",
+    # "Bia  Tiger lon") is one product, identified by its most frequent spelling.
+    spellings: dict[str, Counter[str]] = defaultdict(Counter)
+    if not products_by_id:
+        for line in lines:
+            if _blank(line.get("product_id")) and not _blank(line.get("product_name")):
+                name = str(line["product_name"]).strip()
+                spellings[_name_key(name)][name] += 1
+    canonical = {key: counts.most_common(1)[0][0] for key, counts in spellings.items()}
+    merged_spellings = sum(len(counts) - 1 for counts in spellings.values())
     for line in lines:
         key = line["_order"]
         try:
@@ -1400,7 +1411,8 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
                         else str(line["product_name"]).strip()) or (product or {}).get("name")
         product_id_is_name = product_id is None and product_name is not None and not products_by_id
         if product_id_is_name:
-            product_id = product_name  # no product codes in this shop: the name identifies
+            # no product codes in this shop: the name identifies (one id per spelling group)
+            product_id = canonical.get(_name_key(product_name), product_name)
         quantity_base, source = _base_quantity(line, product, conversions, conversion_complete)
         unit_sources[source] += 1
         unit_key = product_id or product_name
@@ -1452,6 +1464,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         "base_units": {"resolved": len(resolved_units),
                        "conflicting": sum(len(v) > 1 for v in base_units.values())},
         "service_fee_rows": fee_rows,
+        "name_spellings_merged": merged_spellings,
         "amount_reconciliation": totals,
         "order_ids": "from_file" if has_order_ids else "one_record_per_row",
         "rules": list(rules.evidence),
