@@ -52,7 +52,7 @@ class AbsenceTests(unittest.TestCase):
     def test_sales_only_shop_records_no_stock_purchase_cost_or_expiry(self):
         catalog = self.shop()
         for intent, concept in (("stock", "stock"), ("purchase_total", "purchase"),
-                                ("avg_purchase_price", "cost"), ("gross_profit", "cost"),
+                                ("avg_purchase_price", "purchase_price"), ("gross_profit", "cost"),
                                 ("expiring_products", "expiry")):
             with self.subTest(intent=intent):
                 self.assertEqual(missing_concept(catalog, intent), concept)
@@ -78,6 +78,14 @@ class AbsenceTests(unittest.TestCase):
         self.assertEqual(missing_concept(catalog, "avg_purchase_price"), "")
         catalog = self.shop(**{"phieu_nhap.csv": "Số phiếu,Số lượng\nP1,5\n"})
         self.assertEqual(missing_concept(catalog, "gross_profit"), "cost")
+
+    def test_catalogue_cost_is_not_a_purchase_price(self):
+        catalog = self.shop(**{"hang.csv": "Tên hàng,Giá vốn\nBia lon,8000\n"})
+        self.assertEqual(missing_concept(catalog, "gross_profit"), "")
+        self.assertEqual(missing_concept(catalog, "avg_purchase_price"), "purchase_price")
+        catalog = self.shop(business="lots", **{"lo.csv": "Mã phiếu nhập,SL nhập\nP1,5\n"})
+        self.assertEqual(missing_concept(catalog, "avg_purchase_price"), "purchase_price")
+        self.assertEqual(missing_concept(catalog, "net_purchase"), "")
 
     def test_answer_plan_needs_the_rulebook_absence_row(self):
         catalog = self.shop()

@@ -60,10 +60,19 @@ def _cost(text: str) -> bool:
     return _has(text, _COST) or (_has(text, _PURCHASE) and _has(text, _MONEY))
 
 
+_PURCHASE_PRICE = ("gia nhap", "tien nhap", "don gia nhap", "purchase price")
+
+
+def _purchase_price(text: str) -> bool:
+    """A price paid to suppliers. A catalogue "giá vốn" (cost) is not one."""
+    return _has(text, _PURCHASE_PRICE) or (_has(text, _PURCHASE) and _has(text, _MONEY))
+
+
 CONCEPTS: dict[str, Callable[[str], bool]] = {
     "stock": lambda text: _has(text, _STOCK),
     "purchase": lambda text: _has(text, _PURCHASE),
     "cost": _cost,
+    "purchase_price": _purchase_price,
     "expiry": lambda text: _has(text, _EXPIRY),
     "customer_gender": lambda text: _has(text, _GENDER),
     "customer_address": lambda text: _has(text, _ADDRESS),
@@ -79,7 +88,8 @@ INTENT_CONCEPT = {
     "stock": "stock", "stock_split": "stock", "stock_value": "stock",
     "out_of_stock_count": "stock",
     "purchase_total": "purchase", "top_supplier": "purchase",
-    "avg_purchase_price": "cost", "net_purchase": "purchase",
+    # The price paid to suppliers: a catalogue "giá vốn" (cost) is not a purchase price.
+    "avg_purchase_price": "purchase_price", "net_purchase": "purchase",
     "gross_profit": "cost", "top_gross_profit": "cost", "net_profit": "cost",
     "earliest_expiry": "expiry", "expiring_lot_count": "expiry", "expiring_lot_cost": "expiry",
     "expiring_product_count": "expiry", "expiring_products": "expiry",
