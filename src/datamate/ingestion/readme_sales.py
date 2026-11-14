@@ -44,7 +44,9 @@ from datamate.ingestion.sales import (
 from datamate.ingestion.header_schema import (
     header_columns,
     looks_like_sales_lines,
+    other_list_name,
     sales_list_name,
+    table_role,
 )
 from datamate.ingestion.source_names import filename_key, is_family, matches_source
 from datamate.ingestion.status import StatusError, by_elimination, status_policy
@@ -344,19 +346,22 @@ _ARITHMETIC_ROWS = 2000
 
 
 def header_sections(catalog: Catalog, documented: list[Section]) -> list[Section]:
-    """Sales line lists the README leaves undescribed, described from their headers.
+    """Sales lists the README leaves undescribed, described from their headers.
 
-    Only a list whose file or sheet name says "sales" (header_schema.sales_list_name), whose
-    headers name every needed field exactly once (header_columns), and whose rows check out
-    (_amounts_check_out) is described; the guessed "amount" is then the line amount after
-    discount, as the loader reads it. All or nothing: when one sales-named list cannot be
-    described, none is, since a missing month would silently shrink every total.
+    First a single line list: only a list whose file or sheet name says "sales"
+    (header_schema.sales_list_name), whose headers name every needed field exactly once
+    (header_columns), and whose rows check out (_amounts_check_out) is described; the
+    guessed "amount" is then the line amount after discount, as the loader reads it. All or
+    nothing: when one sales-named list cannot be described, none is, since a missing month
+    would silently shrink every total. Failing that, an order list joined to a line list
+    (_joined_header_sections).
     """
     undocumented = [t for t in catalog.tables
                     if not any(matches_source(s.file, t.path.name) and s.sheet in (None, t.name)
                                for s in documented)]
+    headers = _table_headers(undocumented)
     sections = []
-    for table, header in _table_headers(undocumented):
+    for table, header in headers:
         if not (sales_list_name(table.path.name, table.name)
                 and looks_like_sales_lines(sorted(header))):
             continue
@@ -364,8 +369,47 @@ def header_sections(catalog: Catalog, documented: list[Section]) -> list[Section
         section = None if columns is None else Section(table.path.name, table.name, columns,
                                                        origin="header")
         if section is None or not _amounts_check_out(table, section):
-            return []
+            sections = []
+            break
         sections.append(section)
+    documented_orders = any("order_id" in s.fields and s.fields.keys() & {"date", "status"}
+                            and "quantity" not in s.fields for s in documented)
+    return sections or _joined_header_sections(headers, documented_orders)
+
+
+def _joined_header_sections(headers: list[tuple[Table, set[str]]],
+                            documented_orders: bool = False) -> list[Section]:
+    """An order list and a line list joined by the order id, as POS exports keep them,
+    described from their headers (header_schema.table_role), with an optional product and
+    customer list.
+
+    Every table of one role must read the same columns (a list split over several files);
+    exactly one shape per role, every line list must pass _amounts_check_out, and lists
+    named as imports, stock, prices... are never used. The order list may instead be one the
+    README documents (``documented_orders``). The loader then refuses lines whose order is
+    missing from the order list, so a wrong pairing abstains.
+    """
+    by_role: dict[str, list[tuple[Table, Section]]] = defaultdict(list)
+    for table, header in headers:
+        if other_list_name(table.path.name, table.name):
+            continue
+        guess = table_role(sorted(header))
+        if guess is not None:
+            role, columns = guess
+            by_role[role].append((table, Section(table.path.name, table.name, columns,
+                                                 origin="header")))
+    sections: list[Section] = []
+    for role in ("lines", "orders", "products", "customers"):
+        found = by_role.get(role, [])
+        if role == "orders" and documented_orders:
+            continue
+        if len({tuple(sorted(section.columns.items())) for _, section in found}) != 1:
+            if role in ("lines", "orders"):
+                return []
+            continue
+        if role == "lines" and not all(_amounts_check_out(t, s) for t, s in found):
+            return []
+        sections.extend(section for _, section in found)
     return sections
 
 

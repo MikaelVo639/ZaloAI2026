@@ -8,6 +8,7 @@ from datamate.ingestion.header_schema import (
     header_field,
     looks_like_sales_lines,
     sales_list_name,
+    table_role,
 )
 from datamate.ingestion.readme_sales import ReadmeSalesError, load_readme_sales
 from test_ingestion_readme_sales import RULEBOOK, _Shop
@@ -91,6 +92,96 @@ class HeaderSectionTests(_Shop):
         catalog = self.shop(readme, {"ban_hang.xlsx": {"T01": rows(), "T02": other}})
         with self.assertRaises(ReadmeSalesError):
             load_readme_sales(catalog, RULEBOOK)
+
+
+ORDERS = ["Mã hóa đơn", "Thời gian", "Trạng thái", "Mã KH", "Tổng tiền hàng", "Giảm giá"]
+LINES = ["Mã hóa đơn", "STT", "Mã hàng", "Tên hàng", "Số lượng", "Đơn giá", "Giảm giá",
+         "Thành tiền"]
+PRODUCTS = ["Mã hàng", "Tên hàng", "ĐVT", "Nhóm hàng(3 Cấp)", "Giá bán"]
+
+
+class TableRoleTests(unittest.TestCase):
+    def test_database_style_and_export_words(self):
+        for header, field in (("SLQuyDoi", "quantity_base"), ("MaHoaDon", "order_id"),
+                              ("TinhTrang", "status"), ("GiaDonVi", "unit_price"),
+                              ("TriGia", "amount"), ("TenGoi", "product_name"), ("ĐVT", "unit"),
+                              ("Slg", "quantity"), ("Giá niêm yết", "unit_price"),
+                              ("Khuyến mãi", "discount"), ("IDCuaHang", None), ("HSD", None)):
+            with self.subTest(header=header):
+                self.assertEqual(header_field(header), field)
+
+    def test_roles_of_a_joined_export(self):
+        role, columns = table_role(ORDERS)
+        self.assertEqual(role, "orders")
+        self.assertEqual(set(columns), {"Mã hóa đơn", "Thời gian", "Trạng thái", "Mã KH"})
+        role, columns = table_role(LINES)
+        self.assertEqual((role, columns["Thành tiền"]), ("lines", "thành tiền sau giảm"))
+        role, columns = table_role(PRODUCTS)
+        self.assertEqual(role, "products")
+        self.assertEqual(columns, {"Mã hàng": "mã hàng", "Tên hàng": "tên",
+                                   "ĐVT": "đơn vị cơ bản", "Nhóm hàng(3 Cấp)": "nhóm hàng"})
+        role, columns = table_role(["Mã khách hàng", "Tên khách hàng", "Nhóm khách hàng",
+                                    "Loại hình khách"])
+        self.assertEqual(columns["Nhóm khách hàng"], "nhóm khách")
+
+    def test_no_role_for_purchases_stock_or_ambiguous_tables(self):
+        self.assertIsNone(table_role(["Mã phiếu nhập", "Mã hàng", "Số lượng", "Đơn giá",
+                                      "Thành tiền", "Mã hóa đơn"]))
+        self.assertIsNone(table_role(["Mã hóa đơn", "Ngày", "Trạng thái", "Mã NCC"]))
+        self.assertIsNone(table_role(["Mã hàng", "Tên hàng", "Tồn cuối kỳ", "ĐVT"]))
+        self.assertIsNone(table_role([*LINES, "Tổng tiền"]))  # two amount columns
+        self.assertIsNone(table_role(["Mã khách hàng", "Tên khách hàng", "Loại hình khách"]))
+        _, columns = table_role(["Số HĐ", "Ngày", "Trạng thái", "Số khách"])
+        self.assertNotIn("Số khách", columns)  # a head count, not a customer code
+
+
+def joined_files(orphan=False):
+    orders = [ORDERS]
+    lines = [LINES]
+    for i in range(24):
+        orders.append([f"HD{i}", f"{1 + i % 28:02d}/01/2026", "Hoàn thành", "", "30000", "0"])
+        lines.append([f"HD{i}", "1", "SP1", "Trà", "2", "15000", "0", "30000"])
+    if orphan:
+        lines.append(["HD99", "1", "SP1", "Trà", "2", "15000", "0", "30000"])
+    receipts = [["Mã nhập hàng", "Thời gian", "Trạng thái", "Mã NCC"],
+                ["N1", "02/01/2026", "Đã nhập", "NCC1"]]
+    return {"hoa_don.csv": orders, "chi_tiet.csv": lines, "phieu.csv": receipts,
+            "san_pham.csv": [PRODUCTS, ["SP1", "Trà xanh", "chai", "Đồ uống", "15000"]]}
+
+
+class JoinedHeaderSectionTests(_Shop):
+    README = README.replace("- `ban_hang.csv` (csv)\n- `nhap_hang.csv` (csv)",
+                            "- `hoa_don.csv` (csv)\n- `chi_tiet.csv` (csv)\n"
+                            "- `phieu.csv` (csv)\n- `san_pham.csv` (csv)")
+
+    def test_orders_and_lines_are_joined_from_their_headers(self):
+        sales, evidence, _ = load_readme_sales(self.shop(self.README, joined_files()), RULEBOOK)
+        self.assertEqual(sum(s.amount for s in sales), Decimal(24 * 30000))
+        self.assertEqual(evidence["tables"], ["chi_tiet.csv::chi_tiet", "hoa_don.csv::hoa_don",
+                                              "san_pham.csv::san_pham"])
+        self.assertEqual({s.product_name for s in sales}, {"Trà"})
+        self.assertNotIn("product_identity", evidence)
+
+    def test_a_line_without_its_order_abstains(self):
+        catalog = self.shop(self.README, joined_files(orphan=True))
+        with self.assertRaises(ReadmeSalesError) as caught:
+            load_readme_sales(catalog, RULEBOOK)
+        self.assertEqual(caught.exception.code, "ORPHAN_FK")
+
+    def test_lines_join_an_order_list_the_readme_documents(self):
+        readme = self.README.replace("## Quy ước", "## Cột trong `hoa_don.csv`\n"
+                                     "- **Mã hóa đơn**: mã đơn\n- **Thời gian**: ngày bán\n"
+                                     "- **Trạng thái**: trạng thái đơn\n\n## Quy ước")
+        sales, evidence, _ = load_readme_sales(self.shop(readme, joined_files()), RULEBOOK)
+        self.assertEqual(sum(s.amount for s in sales), Decimal(24 * 30000))
+        self.assertIn("hoa_don.csv::hoa_don", evidence["tables"])
+
+    def test_two_order_list_shapes_abstain(self):
+        files = joined_files()
+        files["hoa_don_cu.csv"] = [ORDERS[:3], ["HD0", "01/01/2026", "Hoàn thành"]]
+        with self.assertRaises(ReadmeSalesError) as caught:
+            load_readme_sales(self.shop(self.README, files), RULEBOOK)
+        self.assertEqual(caught.exception.code, "README_COLUMNS_MISSING")
 
 
 if __name__ == "__main__":

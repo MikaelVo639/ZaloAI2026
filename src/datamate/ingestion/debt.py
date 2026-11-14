@@ -24,11 +24,13 @@ from datamate.ingestion.readme_sales import (
     Section,
     _header_names,
     _matching_tables,
+    _table_headers,
     _records,
     parse_amount,
     parse_day,
     parse_sections,
 )
+from datamate.ingestion.header_schema import header_field, table_role
 from datamate.ingestion.sales import is_total_label
 from datamate.ingestion.source_names import filename_key, matches_source
 from datamate.ingestion.status import eliminated_labels, normalize_label, order_state
@@ -251,6 +253,80 @@ def _profile_sections(catalog: Catalog, documented: list[Section],
         ):
             mixed = found
     return mixed
+
+
+_PAYMENT_DAY = re.compile(r"^(?:thoi gian|ngay|thoi diem|ngay gio)(?: thu(?: tien)?)?$")
+
+
+def _documents_debt_money(catalog: Catalog, sections: list[Section],
+                          references: dict[str, str]) -> bool:
+    """Whether a described list holds an order total or a payment amount."""
+    for section in sections:
+        try:
+            fields = _section_fields(_with_referenced_columns(catalog, section, references),
+                                     references)
+        except DebtSourceError:
+            return True  # a documented source the ledger must report on its own
+        if fields.keys() & {"order_total", "payment_amount"}:
+            return True
+    return False
+
+
+def _header_debt_sections(catalog: Catalog, documented: list[Section],
+                          references: dict[str, str]) -> list[Section]:
+    """Order and payment lists the README leaves undescribed, when its ``Công nợ``
+    convention names their money columns.
+
+    The order list is one header_schema.table_role reads as "orders" and that holds the
+    column the convention calls the order total; the payment list holds the column it calls
+    the payment amount, one order id column and one payment-time column. Both or nothing,
+    one table shape per role; the ledger checks still apply to the rows.
+    """
+    undocumented = [t for t in catalog.tables
+                    if not any(matches_source(s.file, t.path.name) and s.sheet in (None, t.name)
+                               for s in documented)]
+    found: dict[str, list[Section]] = defaultdict(list)
+    tables: list[tuple[Table, set[str], dict[str, str]]] = []
+    for table, header in _table_headers(undocumented):
+        probe = Section(table.path.name, table.name, {})
+        referenced: dict[str, list[str]] = defaultdict(list)
+        for column in header:
+            semantic = _referenced_field(references, probe, column)
+            if semantic:
+                referenced[semantic].append(column)
+        if not any(len(columns) > 1 for columns in referenced.values()):
+            tables.append((table, header, {semantic: columns[0]
+                                           for semantic, columns in referenced.items()}))
+    for table, header, named in tables:
+        guess = table_role(sorted(header))
+        if guess and guess[0] == "orders" and "order_total" in named:
+            columns = dict(guess[1])
+            columns.update({column: "" for column in named.values()})
+            found["orders"].append(Section(table.path.name, table.name, columns,
+                                           origin="header"))
+    order_ids = {column for section in found["orders"]
+                 for column, meaning in section.columns.items() if meaning == "mã đơn"}
+    for table, header, named in tables:
+        if set(named) != {"payment_amount"}:
+            continue
+        ids = [column for column in header if header_field(column) == "order_id"]
+        if len(ids) > 1:  # "Mã phiếu" beside "Mã hóa đơn": the column the orders use
+            ids = [column for column in ids if column in order_ids]
+        days = [column for column in header if _PAYMENT_DAY.match(fold(column))
+                or _PAYMENT_DAY.match(fold(re.sub(r"(?<=[a-z])(?=[A-Z])", " ", column)))]
+        if len(ids) == 1 and len(days) == 1:
+            found["payments"].append(Section(
+                table.path.name, table.name,
+                {ids[0]: "mã đơn", days[0]: "thời điểm thu", named["payment_amount"]: ""},
+                origin="header"))
+    if not (found["orders"] and found["payments"]):
+        return []
+    sections = []
+    for role in ("orders", "payments"):
+        if len({tuple(sorted(s.columns.items())) for s in found[role]}) != 1:
+            return []
+        sections.extend(found[role])
+    return sections
 
 
 def _debt_references(readme: str) -> tuple[dict[str, str], tuple[str, ...]]:
@@ -802,6 +878,8 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
     references, readme_lines = _debt_references(catalog.readme)
     sections = parse_sections(catalog.readme)
     sections += _profile_sections(catalog, sections, references)
+    if references and not _documents_debt_money(catalog, sections, references):
+        sections += _header_debt_sections(catalog, sections, references)
     if not listed_payments and not _has_debt_hint(catalog, sections, references, readme_lines):
         complete, unresolved = _source_completeness(catalog, sections, files)
         if complete:

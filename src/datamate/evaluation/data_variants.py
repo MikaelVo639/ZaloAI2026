@@ -19,6 +19,9 @@ businesses it changed; ``<name>.answers.jsonl`` beside it holds their train refe
 - ``cost_convention_only``: document the POS sales columns while leaving the selling cost
   column described only by the README convention.
 - ``catalogue_stock_column``: add an empty, documented stock balance column to CSV catalogues.
+- ``unknown_export``: a shop whose sales come from a POS / sales-software export no longer
+  says so ("máy POS", "phần mềm bán hàng", a ``pos.*`` file name), as an export from software
+  the known export profiles do not cover: its columns are known only by their headers.
 
 Never point this at a public or private split.
 """
@@ -49,7 +52,8 @@ from datamate.ingestion.sales import column_mapping
 from datamate.ingestion.source_names import filename_key, matches_source
 
 VARIANTS = ("monthly_files", "duplicate_orders", "summary_rows", "no_column_docs",
-            "status_labels", "repeated_headers", "cost_convention_only", "catalogue_stock_column")
+            "status_labels", "repeated_headers", "cost_convention_only", "catalogue_stock_column",
+            "unknown_export")
 STATUS_LABELS = {"tra hang": "Khách trả", "dang giao": "Đang ship"}
 DUPLICATE_EVERY = 25
 FAMILY_NOTE = "Các file `{template}` là dữ liệu chia theo tháng, mỗi tháng một file, cùng cột."
@@ -385,11 +389,36 @@ def catalogue_stock_column(source: Path, destination: Path) -> bool:
     return True
 
 
+_EXPORT_WORDS = ((re.compile(r"\bmáy POS\b"), "máy tính tiền"), (re.compile(r"\bPOS\b"), "máy"),
+                 (re.compile(r"phần mềm bán hàng", re.IGNORECASE), "ứng dụng cửa hàng"))
+
+
+def unknown_export(source: Path, destination: Path) -> bool:
+    """Write ``destination`` as ``source`` with no word saying the files are a POS export;
+    False when the source shop has no export-profile sales list."""
+    catalog = build_catalog(source.parent, source.name)
+    if not profile_sections(catalog, parse_sections(catalog.readme)):
+        return False
+    readme = (source / "README.md").read_text(encoding="utf-8-sig")
+    for pattern, words in _EXPORT_WORDS:
+        readme = pattern.sub(words, readme)
+    renamed = {path.name: re.sub(r"^pos(?=\.)", "cua_hang", path.name)
+               for path in source.iterdir() if re.match(r"pos\.", path.name)}
+    for old, new in renamed.items():
+        readme = readme.replace(f"`{old}`", f"`{new}`")
+    _link_tree(source, destination)
+    for old, new in renamed.items():
+        (destination / old).rename(destination / new)
+    (destination / "README.md").unlink()
+    (destination / "README.md").write_text(readme, encoding="utf-8")
+    return True
+
+
 _BUILDERS = {"monthly_files": monthly_files, "duplicate_orders": duplicate_orders,
              "summary_rows": summary_rows, "no_column_docs": no_column_docs,
              "status_labels": status_labels, "repeated_headers": repeated_headers,
              "cost_convention_only": cost_convention_only,
-             "catalogue_stock_column": catalogue_stock_column}
+             "catalogue_stock_column": catalogue_stock_column, "unknown_export": unknown_export}
 
 
 def build_variant(train: Path, output: Path, name: str) -> dict[str, Any]:

@@ -874,3 +874,37 @@ File máy POS xuất ra.
 
 if __name__ == "__main__":
     unittest.main()
+
+
+HEADER_README = README.split("## Cột trong")[0] + "## Quy ước" + README.split("## Quy ước")[1]
+HEADER_ORDERS = [["Mã hóa đơn", "Thời gian", "Trạng thái", "Tổng thu", "Phương thức TT",
+                  "Kênh bán", "Mã KH", "Khách hàng"],
+                 ["D1", "01/01/2026", "Xong", "100000", "Ghi nợ", "Store", "K1", "An"],
+                 ["D2", "02/01/2026", "Xong", "50000", "Ghi nợ", "Store", "K2", "Bình"]]
+HEADER_PAYMENTS = [["Mã phiếu", "Mã hóa đơn", "Thời gian", "Tiền thu"],
+                   ["PT1", "D1", "05/01/2026", "40000"]]
+
+
+class HeaderDebtTests(_Shop):
+    """README without column sections: the Công nợ convention names the money columns."""
+
+    def test_order_and_payment_lists_are_read_from_their_headers(self):
+        ledger = load_debt_ledger(self.catalog(readme=HEADER_README, orders=HEADER_ORDERS,
+                                               payments=HEADER_PAYMENTS, customers=False),
+                                  RULEBOOK)
+        self.assertEqual([o.total for o in ledger.orders], [Decimal(100000), Decimal(50000)])
+        self.assertEqual([(p.order_id, p.amount) for p in ledger.payments],
+                         [("D1", Decimal(40000))])
+
+    def test_two_payment_time_columns_leave_the_payments_unread(self):
+        payments = [[*HEADER_PAYMENTS[0], "Ngày thu"], [*HEADER_PAYMENTS[1], "05/01/2026"]]
+        with self.assertRaises(DebtSourceError):
+            load_debt_ledger(self.catalog(readme=HEADER_README, orders=HEADER_ORDERS,
+                                          payments=payments, customers=False), RULEBOOK)
+
+    def test_without_the_convention_nothing_is_guessed(self):
+        readme = "\n".join(line for line in HEADER_README.splitlines()
+                           if "Công nợ" not in line)
+        with self.assertRaises(DebtSourceError):
+            load_debt_ledger(self.catalog(readme=readme, orders=HEADER_ORDERS,
+                                          payments=HEADER_PAYMENTS, customers=False), RULEBOOK)
