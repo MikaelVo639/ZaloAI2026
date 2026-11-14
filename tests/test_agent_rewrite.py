@@ -208,6 +208,37 @@ class RewriteCheckTests(unittest.TestCase):
         self.assertIsNone(check_rewrite("dthu thang nay so vs thang truoc",
                                         "Doanh thu tháng này so với tháng trước"))
 
+    def test_lai_meaning_again_is_not_profit(self):
+        for question in ("Mình đang tổng kết lại sổ, cần biết doanh thu tháng 6/2025 là bao nhiêu?",
+                         "minh dang tong ket lai so, can biet doanh thu thang 6/2025",
+                         "đếm lại giúp mình doanh thu tháng 6/2025"):
+            with self.subTest(question=question):
+                self.assertIsNone(check_rewrite(question, "Doanh thu tháng 6/2025 là bao nhiêu?"))
+        for question in ("lãi tháng 6/2025", "lai thang 6/2025", "tháng 6/2025 lời bao nhiêu"):
+            with self.subTest(question=question):
+                self.assertIn("profit", check_rewrite(question, "Doanh thu tháng 6/2025") or "")
+
+    def test_a_closing_yes_no_khong_is_not_a_negation(self):
+        # "có … không?" asks yes or no; dropping it keeps the meaning.
+        for question, rewrite in (
+                ("Tháng 5/2025, doanh thu trung bình một đơn có tính ra được không? "
+                 "Nếu được thì cụ thể là bao nhiêu?",
+                 "Doanh thu trung bình một đơn tháng 5/2025 là bao nhiêu?"),
+                ("Hôm qua cửa hàng có đơn hàng nào không, có thì là bao nhiêu?",
+                 "Hôm qua cửa hàng có bao nhiêu đơn hàng?"),
+                ("thang nay co don nao bi huy khong", "Tháng này có bao nhiêu đơn bị huỷ?")):
+            with self.subTest(question=question):
+                self.assertIsNone(check_rewrite(question, rewrite))
+        # A negation inside the span, or one the restatement invents, still counts.
+        for question, rewrite in (
+                ("có mặt hàng nào không bán được không",
+                 "Có bao nhiêu mặt hàng bán được?"),
+                ("thuốc không cần đơn bác sĩ có bán được không",
+                 "Thuốc cần đơn bác sĩ bán được bao nhiêu?"),
+                ("tháng này có đơn nào bị huỷ không", "Số đơn không huỷ tháng này")):
+            with self.subTest(question=question):
+                self.assertIn("negation", check_rewrite(question, rewrite) or "")
+
     def test_amounts_quarters_and_count_words_keep_their_numbers(self):
         for question, rewrite in (
                 ("đơn trên 1tr5 tháng 2/2026", "Đơn trên 1.500.000 đồng tháng 2/2026"),

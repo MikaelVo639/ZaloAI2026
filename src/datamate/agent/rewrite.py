@@ -253,7 +253,11 @@ def _glued(m: re.Match[str]) -> str:
 # The last item is removed before the check: phrases that share the folded word but not the
 # meaning ("số ngày" is not "so với", "còn lại" is not "lãi", "ít nhất 3 đơn" is a threshold).
 _GUARDS: tuple[tuple[str, str, bool, str], ...] = (
-    ("negation", r"\b(?:khong|ko|chua|chang)\b", True, ""),
+    # "có … không?" closing a question (alone or before "nếu có thì …") asks yes or no; it is
+    # not a negation. A negation inside the span ("có món nào không bán được không") stays.
+    ("negation", r"\b(?:khong|ko|chua|chang)\b", True,
+     r"\bco(?: (?!(?:khong|ko|chua|chang)\b)[a-z0-9/.,%-]+){1,14}? (?:khong|ko)"
+     r"(?= (?:neu|co thi|vay|a|ha|nhi|ta|the|z)\b| *$)"),
     ("cancel", r"\bhuy\b", True, ""),
     ("return", r"\btra (?:hang|lai)\b|\bhoan\b", True,
      r"\bhoan (?:thanh|tat|toan|chinh)\b"),
@@ -281,7 +285,8 @@ _GUARDS: tuple[tuple[str, str, bool, str], ...] = (
     ("debt", r"\bno\b", False, ""),
     ("group", r"\bnhom\b", False, ""),
     ("profit", r"\b(?:loi|lai)\b", False,
-     r"\b(?:con|tra|hoan|doi|ban|mua|nhap|xem|tinh|kiem|quay|ghi|giu|de|gui|lam|cap) lai\b"
+     r"\b(?:con|tra|hoan|doi|ban|mua|nhap|xem|tinh|kiem|quay|ghi|giu|de|gui|lam|cap|ket|dem"
+     r"|cong|hoi|coi|nhin|soat|doc|chot) lai\b"
      r"|\blai (?:lan|nua|tu dau)\b|\btra loi\b|\b(?:hang|bi|san pham|mon) loi\b"),
 )
 _COMPARE = re.compile(
