@@ -23,9 +23,10 @@ class ModelBenchmarkTests(unittest.TestCase):
             predict(train, ref, Config())
             prediction_file = ref / "submission.jsonl"
             left, right = root / "left", root / "right"
-            # The grammar now reads every demo variant (small-talk openings are cut), so the
-            # selection is exercised with the cut turned off; workers=1 keeps the patch.
-            with patch("datamate.agent.baseline.opening_cuts", return_value=[]):
+            # Test selection independently of later improvements in the grammar.
+            with patch("scripts.model_benchmark.MODEL_PERTURBATIONS", ("verbose_chat",)), patch(
+                "datamate.agent.baseline.opening_cuts", return_value=[]
+            ):
                 report = build(train, prediction_file, left, limit=8)
                 self.assertEqual(build(train, prediction_file, right, limit=8), report)
             self.assertEqual(report["questions"], 8)
@@ -40,10 +41,22 @@ class ModelBenchmarkTests(unittest.TestCase):
             self.assertEqual(results["wrong_ids"], [])
             with self.assertRaisesRegex(ValueError, "overwrite"):
                 build(train, prediction_file, left, limit=8)
-            # Parallel scanning gives the same result as one worker.
-            for workers in (1, 2):
-                with self.subTest(workers=workers), self.assertRaisesRegex(ValueError, "No correct"):
-                    build(train, prediction_file, root / f"none-{workers}", limit=8, workers=workers)
+            # Report-style wording still needs the rewrite path with the current grammar.
+            bench = root / "current"
+            current = build(train, prediction_file, bench, limit=8)
+            self.assertGreater(current["questions"], 0)
+            self.assertEqual(current["perturbations"]["report_wording"]["selected"],
+                             current["questions"])
+            parallel = root / "parallel"
+            self.assertEqual(current, build(train, prediction_file, parallel, limit=8, workers=2))
+            self.assertEqual((bench / "cases.jsonl").read_bytes(),
+                             (parallel / "cases.jsonl").read_bytes())
+            control = score(bench, Config(), root / "control")
+            self.assertEqual((control["correct"], control["wrong"], control["abstain"]),
+                             (0, 0, current["questions"]))
+            expected = {"abstain": current["questions"]}
+            self.assertEqual(control["by_path"], {"deterministic": expected})
+            self.assertEqual(control["by_variant"], {"report_wording": expected})
 
     def test_selection_reaches_rare_intents_before_repeating_common_ones(self):
         questions = [Question(str(n), f"shop-{n}", "sample", date(2026, 2, 3))

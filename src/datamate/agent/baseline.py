@@ -23,6 +23,7 @@ from datamate.semantics.text import fold, opening_cuts
 
 QUESTION_TIMEOUT_SECONDS = 30.0
 INGESTION_TIMEOUT_SECONDS = 300.0
+IGNORED_OPENING_EVIDENCE = "Opening left out: "
 
 
 class AbstainAgent:
@@ -93,7 +94,7 @@ class BaselineAgent:
             plan = self._plan_text(replace(question, question=rest), context)
             if plan is not None:
                 opening = question.question[:question.question.rindex(rest)].strip()
-                return replace(plan, evidence=(*plan.evidence, f"Opening left out: {opening}"))
+                return replace(plan, evidence=(*plan.evidence, IGNORED_OPENING_EVIDENCE + opening))
         return None
 
     def _plan_text(self, question: Question, context: BusinessContext) -> Plan | None:

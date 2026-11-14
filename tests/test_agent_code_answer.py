@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 from datamate.agent.baseline import BaselineAgent
@@ -85,9 +86,18 @@ def repaired_code_generate(cache, messages, max_input_tokens, max_new_tokens):
     return {"text": BUGGY}
 
 
+def code_with_format_repair(cache, messages, max_input_tokens, max_new_tokens):
+    if not _is_code_prompt(messages):
+        return {"text": UNSURE}
+    assert "2026-08-01 đến hết 2026-08-27" in messages[1]["content"]
+    return {"text": MONTH_REVENUE if len(messages) > 2 else "Hàm Python ở đây."}
+
+
 def calendar_code_generate(cache, messages, max_input_tokens, max_new_tokens):
     if not _is_code_prompt(messages):
         return {"text": UNSURE}
+    if "âm lịch" in messages[1]["content"]:
+        assert "Kỳ dương lịch đã xác định" not in messages[1]["content"]
     return {"text": "```python\ndef answer(sales, today):\n"
                     "    day = calendar[today]\n"
                     "    return {\"type\": \"boolean\", \"answer\": day[\"lunar_month\"] >= 1}\n```"}
@@ -153,6 +163,9 @@ class CodeCheckTests(unittest.TestCase):
             _call(_globals(), "def answer(s, t):\n    return undefined_name", [], None)
         with self.assertRaises(ImportError):
             _globals()["__builtins__"]["__import__"]("os")
+        with self.assertRaises(ImportError):
+            _call(_globals(), "from string import Formatter\ndef answer(s, t):\n    return None",
+                  [], date(2026, 2, 10))
 
     def test_code_must_read_what_the_question_is_about(self):
         # Shapes of the wrong model calculations on the TRAIN model benchmark (LOCAL PROXY).
@@ -220,6 +233,7 @@ class CodeCheckTests(unittest.TestCase):
         for question, kind, answer, reason in (
                 ("Nhóm bánh chiếm bao nhiêu % doanh thu?", "number", 12.5, "percent"),
                 ("Tỷ lệ đơn bị huỷ tháng này?", "number", 3, "percent"),
+                ("Tỷ trọng của các đơn đã hủy tháng trước là bao nhiêu?", "number", 3, "percent"),
                 ("Tháng này bán được bao nhiêu tuýp kem 5% tuýp 5g?", "percent", 12, "percent"),
                 ("Ngày nào bán nhiều nhất?", "string", "Thứ bảy", "date"),
                 ("Tháng này doanh thu có cao hơn tháng trước không?", "number", 5, "yes/no"),
@@ -231,6 +245,7 @@ class CodeCheckTests(unittest.TestCase):
                 self.assertIn(reason, implausible(question, kind, answer))
         for question, kind, answer in (
                 ("Tháng này bán được bao nhiêu tuýp kem 5% tuýp 5g?", "number", 12),
+                ("Tỷ trọng của các đơn đã hủy tháng trước là bao nhiêu?", "percent", 3),
                 ("Doanh thu tháng này tăng giảm bao nhiêu % so với tháng trước?", "percent", -4.5),
                 ("Tháng này lãi ròng bao nhiêu?", "number", -62000),
                 ("Doanh thu 3 tháng qua có tăng liên tục hok", "boolean", False),
@@ -257,6 +272,17 @@ class CodeCheckTests(unittest.TestCase):
                     {"type": "string", "answer": " "}, {"type": "number", "answer": 1, "x": 2}):
             with self.subTest(bad=bad):
                 self.assertIsInstance(normalize_result(bad), str)
+
+    def test_model_values_are_rounded_once_with_exact_ties(self):
+        for kind, raw, question, expected in (
+            ("number", Decimal("1500.495"), "Doanh thu hôm qua", 1500),
+            ("number", Decimal("10.5"), "Giá nhập một hộp", 11),
+            ("percent", Decimal("12.345"), "Tỷ lệ huỷ đơn", 12.35),
+            ("percent", Decimal("-12.345"), "Doanh thu thay đổi bao nhiêu %", -12.35),
+        ):
+            with self.subTest(kind=kind, raw=raw):
+                self.assertEqual(normalize_result({"type": kind, "answer": raw}, question=question),
+                                 (kind, expected))
 
     def test_rules_keep_general_rows_and_rows_sharing_words(self):
         rulebook = ("## 1. Đơn\n| Luật | Mặc định |\n|---|---|\n| Đơn tính doanh thu | không huỷ |\n"
@@ -356,12 +382,26 @@ class CodeAgentTests(unittest.TestCase):
         self.assertIn("KeyError", failed.reason)
         self.assertEqual(len(failed.evidence["code_attempt"]["code_votes"]), 2)
 
+    def test_fallback_uses_rulebook_period_and_can_repair_output_format(self):
+        question = Question("q-form", "demo_csv", "Trị số tiền bán hôm tháng này là bao nhiêu?",
+                            self.question.as_of_date)
+        candidate = self.agent(code_with_format_repair, code_fallback=True).answer(
+            question, self.context)
+        self.assertEqual((candidate.type, candidate.answer), ("number", 130000), candidate.reason)
+        self.assertEqual(candidate.evidence["resolved_period"], ["2026-08-01", "2026-08-27"])
+        self.assertEqual(len(candidate.evidence["code_votes"]), 4)
+
     def test_code_reads_the_split_calendar(self):
         asked = Question("q", "demo_csv", "Hôm nay có rơi vào tháng Giêng âm lịch không?",
                          self.question.as_of_date)
         candidate = self.agent(calendar_code_generate, code_fallback=True).answer(
             asked, self.context)
         self.assertEqual(candidate.type, "boolean", candidate.reason)
+        lunar = Question("q-lunar", "demo_csv", "Ngày 05/08/2026 âm lịch có phải ngày lễ không?",
+                         self.question.as_of_date)
+        candidate = self.agent(calendar_code_generate, code_fallback=True).answer(lunar, self.context)
+        self.assertEqual(candidate.type, "boolean", candidate.reason)
+        self.assertNotIn("resolved_period", candidate.evidence)
         # The same code answers a revenue question with True/False: refused, not repaired.
         refused = self.agent(calendar_code_generate, code_fallback=True).answer(
             self.question, self.context)

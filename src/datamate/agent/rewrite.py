@@ -1,10 +1,10 @@
 """Experimental model rewrite: restate a question the grammar cannot plan, then plan it.
 
-The model never plans, computes or answers. It only restates an everyday question in the
-standard wording of ``EXAMPLES``. The deterministic grammar then plans the restatement under
-the current split's rulebook, and the existing executor computes the answer. A rewrite is
-used only when it keeps every number, catalogue name and meaning-bearing word of the
-question, and when every independent rewrite leads to the same Plan.
+The model restates an everyday question in the standard wording of ``EXAMPLES``. The
+deterministic grammar plans the restatement under the current split's rulebook, and
+the existing executor computes the answer. A rewrite must preserve the question's
+numbers, names and conditions. An optional fallback executes two model calculations
+and compares their results when the rewrite path cannot plan the question.
 
 ``EXAMPLES`` are written by the team for this module. They are not train, public or private
 questions; each standard wording is checked against the grammar by
@@ -20,11 +20,12 @@ import re
 import unicodedata
 from collections import Counter
 from collections.abc import Iterable
+from dataclasses import replace
 from functools import lru_cache
 from typing import Any
 
 from datamate.agent import code_answer, compute
-from datamate.agent.baseline import BaselineAgent, _execution_failure
+from datamate.agent.baseline import IGNORED_OPENING_EVIDENCE, BaselineAgent, _execution_failure
 from datamate.agent.code_answer import (
     CODE_EXAMPLES,
     CODE_MAX_NEW_TOKENS,
@@ -37,9 +38,8 @@ from datamate.agent.code_answer import (
     normalize_result,
     out_of_reach,
     repair_messages,
-    round_money,
 )
-from datamate.agent.local_plan import LocalPlanAgent
+from datamate.agent.local_plan import LocalPlanAgent, resolved_period
 from datamate.agent.rule_spec_model import model_specs
 from datamate.contracts import BusinessContext, Candidate, Plan, Question
 from datamate.semantics.planner import unread_words
@@ -638,6 +638,7 @@ def parse_rewrite(text: str) -> str | None:
 _CODE_AFTER = ("Rewrite model was unsure", "Grammar cannot plan the rewrite",
                "Rewrites lead to different plans", "Rewrite changed", "Rewrite added or dropped",
                "Rewrite is empty")
+_CODE_PERIOD_AMBIGUITY = re.compile(r"\b(?:am lich|tet|ram|so voi|so vs|cung ky|lan luot)\b")
 
 
 class RewriteAgent(LocalPlanAgent):
@@ -774,10 +775,15 @@ class RewriteAgent(LocalPlanAgent):
         evidence: dict[str, Any] = {"model": self._model_info, "path": "code",
                                     "planner_confidence": REWRITE_CONFIDENCE,
                                     "code_votes": []}
+        period = None
+        if not _CODE_PERIOD_AMBIGUITY.search(normalize_question(question.question)):
+            period = resolved_period(question, context.split.rulebook)
+        if period is not None:
+            evidence["resolved_period"] = [day.isoformat() for day in period]
         results = []
         for vote, examples in enumerate((list(CODE_EXAMPLES), list(CODE_EXAMPLES)[::-1]), 1):
             messages = build_code_messages(question.question, today, shape.value,
-                                           context.split.rulebook, examples)
+                                           context.split.rulebook, examples, period=period)
             for repair in range(CODE_REPAIRS + 1):
                 attempt: dict[str, Any] = {"vote": vote, "repair": repair,
                                            "prompt_sha256": hashlib.sha256(json.dumps(
@@ -788,17 +794,22 @@ class RewriteAgent(LocalPlanAgent):
                     max_input_tokens=self.max_input_tokens, max_new_tokens=CODE_MAX_NEW_TOKENS)
                 attempt["execution"] = generated.execution()
                 if not generated.ok:
-                    if generated.timed_out or not self.planner_worker.alive:
-                        self._model_error = Candidate(
-                            reason="Rewrite model stopped after worker failure",
-                            evidence=dict(evidence))
+                    # A code generation can be longer than a rewrite. After a worker
+                    # timeout the next question can load the model in a fresh worker.
                     return Candidate(reason=f"Code model failed: {generated.error}",
                                      evidence=evidence)
                 attempt["model_output"] = generated.value
                 code = extract_code(generated.value.get("text", ""))
                 attempt["code"] = code
                 if code is None:
-                    return Candidate(reason="Model wrote no answer function", evidence=evidence)
+                    reason = "Model wrote no answer function"
+                    # A deliberate abstention is final. A malformed answer can be reformatted.
+                    raw = generated.value.get("text", "")
+                    if repair == CODE_REPAIRS or raw.strip().strip("`").strip() in ("", UNSURE, "None"):
+                        return Candidate(reason=reason, evidence=evidence)
+                    attempt["refused"] = reason
+                    messages = repair_messages(messages, raw, reason)
+                    continue
                 doubt = code_doubt(question.question, code)
                 if doubt is not None:
                     attempt["refused"] = doubt
@@ -822,9 +833,8 @@ class RewriteAgent(LocalPlanAgent):
                     result: tuple[str, Any] | str = ran.value["refused"]
                 else:
                     attempt["result"] = ran.value["value"]
-                    result = normalize_result(ran.value["value"])
+                    result = normalize_result(ran.value["value"], question=question.question)
                     if not isinstance(result, str):
-                        result = (result[0], round_money(question.question, *result))
                         attempt["answer"] = list(result)
                 if isinstance(result, str):
                     if result == "Code returned no answer" or repair == CODE_REPAIRS:
@@ -863,6 +873,7 @@ class RewriteAgent(LocalPlanAgent):
                                     "planner_confidence": REWRITE_CONFIDENCE,
                                     "rewrites": []}
         plans: list[Plan] = []
+        plan_keys: list[Plan] = []
         failures: list[str] = []
         for vote, messages in enumerate(prompts, 1):
             outcome = self._vote(vote, messages, question, context, asked, names,
@@ -874,14 +885,18 @@ class RewriteAgent(LocalPlanAgent):
                 if self.votes < 3:
                     return Candidate(reason=outcome, evidence=evidence)
             else:
+                # Keep rule evidence in the comparison. The discarded greeting is only a log note.
+                plan_keys.append(replace(outcome, evidence=tuple(
+                    row for row in outcome.evidence if not row.startswith(IGNORED_OPENING_EVIDENCE)
+                )))
                 plans.append(outcome)
             if self.votes == 3 and vote == 2:
-                if len(plans) == 2 and plans[0] == plans[1]:
+                if len(plan_keys) == 2 and plan_keys[0] == plan_keys[1]:
                     break  # agreed: no third vote
                 if not plans:
                     return Candidate(reason=failures[0], evidence=evidence)
         if self.votes == 3:
-            agreed = [plan for plan in plans if plans.count(plan) >= 2]
+            agreed = [plan for plan, key in zip(plans, plan_keys) if plan_keys.count(key) >= 2]
             if not agreed and self.single_vote and len(plans) == 1 and all(
                     failure in _NO_RESTATEMENT for failure in failures):
                 # One plannable restatement; the other votes restated nothing (the model was
@@ -893,7 +908,7 @@ class RewriteAgent(LocalPlanAgent):
                     "Rewrites lead to different plans")
                 return Candidate(reason=reason, evidence=evidence)
             plans = [agreed[0]]
-        elif any(plan != plans[0] for plan in plans[1:]):
+        elif any(key != plan_keys[0] for key in plan_keys[1:]):
             return Candidate(reason="Rewrites lead to different plans", evidence=evidence)
         candidate = self._answer_plan(plans[0], context, as_of_date=question.as_of_date)
         candidate.evidence = {**evidence, **candidate.evidence}

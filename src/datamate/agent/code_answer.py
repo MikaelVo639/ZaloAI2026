@@ -21,7 +21,7 @@ import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import asdict
 from datetime import date, timedelta
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -121,12 +121,13 @@ How to read the usual questions:
   nợ") are not in these records: return None.
 - Filter only on values listed above or names written in the question; when the question
   names a kind of product or customer that no listed value matches, return None.
-- Money is a whole number of VND: return round(x) as int. Names are returned bare, without
-  quantities or codes added.
+- Names are returned bare, without quantities or codes added. For money and percentages,
+  return the unrounded numeric value so the caller can round once. Use Decimal for calculations
+  sensitive to a half-VND or two-decimal boundary (convert floats with Decimal(str(value))).
 
 Return {"type": T, "answer": A} with T one of:
-- "number": money rounded to whole VND, counts as int, other numbers rounded to 2 decimals.
-- "percent": the percentage rounded to 2 decimals (12.5% -> 12.5).
+- "number": money in VND, counts as int, other measurements as numeric values.
+- "percent": the percentage (12.5% -> 12.5).
 - "date": "YYYY-MM-DD".  "string": one name exactly as written in the data.
 - "list": names or numbers in the order the question asks.  "boolean": True or False.
 Return None when the data lacks a field the question needs, when the asked period is not
@@ -165,7 +166,7 @@ CODE_EXAMPLES: tuple[tuple[str, str], ...] = (
     evening = sum(s["amount"] for s in month if 18 * 60 <= s["minute"] < 21 * 60)
     if not total:
         return None
-    return {"type": "percent", "answer": round(evening * 100 / total, 2)}'''),
+    return {"type": "percent", "answer": evening * 100 / total}'''),
     ("Tháng 2/2026 khách Lê Văn Tùng mua mấy đơn?",
      '''def answer(sales, today):
     orders = {s["order_id"] for s in sales if s["status"] == "valid"
@@ -203,7 +204,8 @@ def rule_text(rulebook: str, question: str, limit: int = MAX_RULE_ROWS) -> str:
 
 
 def build_code_messages(question: str, today: date, profile: dict[str, Any], rulebook: str,
-                        examples: list[tuple[str, str]]) -> list[dict[str, str]]:
+                        examples: list[tuple[str, str]], *,
+                        period: tuple[date, date] | None = None) -> list[dict[str, str]]:
     fields = "\n".join(f"  {name} ({kind}): {meaning}" for name, kind, meaning in FIELDS
                        if name in profile["fields"])
     values = "; ".join(f"{name}: {', '.join(map(str, items))}"
@@ -229,6 +231,10 @@ def build_code_messages(question: str, today: date, profile: dict[str, Any], rul
     shots = "\n\n".join(f"Câu hỏi: {q}\n```python\n{code}\n```" for q, code in examples)
     user = (f"{shots}\n\nHôm nay của các ví dụ là một ngày bất kỳ. Câu hỏi thật (hôm nay là "
             f"{today.isoformat()}):\nCâu hỏi: {question}")
+    if period is not None:
+        start, end = period
+        user += (f"\nKỳ dương lịch đã xác định theo luật của bộ dữ liệu: từ "
+                 f"{start.isoformat()} đến hết {end.isoformat()}. Giữ mọi điều kiện của câu hỏi.")
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
@@ -244,7 +250,7 @@ def repair_messages(messages: list[dict[str, str]], code: str, error: str
 def extract_code(text: str) -> str | None:
     match = re.search(r"```(?:python)?\s*\n(.*?)```", text, re.S)
     code = (match.group(1) if match else text).strip()
-    return code if "def answer(" in code else None
+    return code if re.search(r"^def answer\s*\(", code, re.M) else None
 
 
 # ---------------------------------------------------------------- sandbox
@@ -270,8 +276,11 @@ _MODULES = ("datetime", "math", "statistics", "collections", "itertools", "funct
 
 def _module_view(name: str) -> SimpleNamespace:
     module = importlib.import_module(name)
+    # Formatter.get_field can walk private attributes from a string and return
+    # the object itself, bypassing the checks on Python attribute expressions.
+    excluded = {"Formatter"} if name == "string" else set()
     return SimpleNamespace(**{key: value for key, value in vars(module).items()
-                              if not key.startswith("_")
+                              if not key.startswith("_") and key not in excluded
                               and not isinstance(value, ModuleType)})
 
 
@@ -444,8 +453,6 @@ def profile(cache: dict[str, Any], today: date, catalog: Catalog | None = None,
 def _plain(value: Any) -> Any:
     if isinstance(value, date):
         return value.isoformat()
-    if isinstance(value, Decimal):
-        return float(value)
     if isinstance(value, (list, tuple)):
         return [_plain(item) for item in value]
     if isinstance(value, dict):
@@ -484,7 +491,8 @@ def run_code(cache: dict[str, Any], code: str, today: date,
     filtered = unknown_filter(code, lines)
     if filtered is not None:
         return {"refused": filtered}
-    result = _call(namespace, code, lines, today)
+    with localcontext():
+        result = _call(namespace, code, lines, today)
     result = _bare_names(result, cache, today, namespace)
     unknown = _unknown_name(result.get("value"), cache, today, namespace)
     if unknown is not None:
@@ -550,7 +558,7 @@ def _unknown_name(value: Any, cache: dict[str, Any], today: date,
 # answer carries it; "ngày nào", "hôm nào" -> date 127 of 129; a closing "... không?" -> boolean 18 of 19,
 # and every boolean question has a yes/no word. Model code that returns another type
 # answered a different question.
-_PERCENT_CUE = re.compile(r"phan tra|ty le|ti le")
+_PERCENT_CUE = re.compile(r"\b(?:phan tram|t[yi] le|t[yi] trong)\b")
 _PERCENT_SIGN = re.compile(r"(?<![\d.,])(?<![\d.,]\s)%")  # "bao nhiêu %", not "kem 5%"
 _DATE_CUE = re.compile(r"(?:ngay|hom) nao|ngay bao nhieu")
 _YES_NO_END = re.compile(r"(?:\bkhong|dung khong|phai khong|hay khong|\bko)\s*$")
@@ -588,14 +596,22 @@ _MONEY_CUE = re.compile(r"\b(?:doanh thu|dthu|tien|gia|lai|loi nhuan|von|chi phi
 _HOW_MANY = re.compile(r"\b(?:bao nhieu|bnhiu|bao nhiu|bn|may|so luong) (?!tien\b)[a-z]+")
 
 
+def _half_up(value: float | Decimal, places: int) -> Decimal:
+    amount = Decimal(str(value))
+    with localcontext() as context:
+        context.prec = max(context.prec, amount.adjusted() + places + 2)
+        return amount.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+
+
 def round_money(question: str, kind: str, answer: Any) -> Any:
     """``answer`` rounded to whole VND when the question asks an amount of money."""
     folded = f" {fold(question)} "
-    if (kind != "number" or isinstance(answer, int) or abs(answer) < 100
+    if (kind != "number" or isinstance(answer, int)
+            or (_DIFFERENCE.search(folded) and not re.search(r"\b(?:tien|dong|vnd)\b", folded))
             or not _MONEY_CUE.search(folded) or _HOW_MANY.search(folded)
             and not re.search(r"\bbao nhieu tien\b", folded)):
         return answer
-    return int(Decimal(str(answer)).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    return int(_half_up(answer, 0))
 
 
 # What the question is about, and what code that answers it must read. Written from the
@@ -704,7 +720,7 @@ def unknown_filter(code: str, lines: Any) -> str | None:
     return None
 
 
-def normalize_result(value: Any) -> tuple[str, Any] | str:
+def normalize_result(value: Any, *, question: str = "") -> tuple[str, Any] | str:
     """(type, answer) in submission form, or the reason it is unusable."""
     if value is None:
         return "Code returned no answer"
@@ -714,14 +730,18 @@ def normalize_result(value: Any) -> tuple[str, Any] | str:
     if kind not in ANSWER_TYPES or answer is None:
         return f"Code result type is not supported: {kind!r}"
 
-    def number(item: Any) -> int | float | None:
-        if isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(item):
+    def number(item: Any, *, money: bool = False) -> int | float | None:
+        if type(item) is int:
+            return item
+        if not isinstance(item, (float, Decimal)) or not Decimal(str(item)).is_finite():
             return None
-        rounded = round(float(item), 2)
-        return int(rounded) if rounded == int(rounded) else rounded
+        if money:
+            item = round_money(question, "number", item)
+        rounded = _half_up(item, 2)
+        return int(rounded) if rounded == int(rounded) else float(rounded)
 
     if kind in ("number", "percent"):
-        converted = number(answer)
+        converted = number(answer, money=kind == "number")
         return (kind, converted) if converted is not None else "Code number is not finite"
     if kind == "boolean":
         return (kind, answer) if isinstance(answer, bool) else "Code boolean is not True/False"

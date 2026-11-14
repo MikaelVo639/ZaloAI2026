@@ -134,6 +134,11 @@ def three_way_generate(cache, messages, max_input_tokens, max_new_tokens):
                      "Giá trị trung bình một đơn tháng này là bao nhiêu?"][_order(messages)]}
 
 
+def different_openings_generate(cache, messages, max_input_tokens, max_new_tokens):
+    opening = ("Nhờ mình xem giúp. ", "Mình cần đối chiếu. ", "Nhờ hỗ trợ nhé. ")
+    return {"text": opening[_order(messages)] + STANDARD}
+
+
 def echo_generate(cache, messages, max_input_tokens, max_new_tokens):
     return {"text": f"Câu hỏi: quán mình tháng này thu về nhiêu tiền\nViết lại: {STANDARD}"}
 
@@ -550,6 +555,18 @@ class RewriteAgentTests(unittest.TestCase):
         self.assertEqual(echoed.type, "number", echoed.reason)
         with self.assertRaisesRegex(ValueError, "rewrite_votes"):
             Config(rewrite_votes=4)
+
+    def test_votes_agree_when_only_the_ignored_opening_differs(self):
+        expected = self.baseline_answer(STANDARD)
+        for votes in (2, 3):
+            with self.subTest(votes=votes):
+                candidate = self.agent(different_openings_generate, votes=votes).answer(
+                    self.question, self.context)
+                self.assertEqual((candidate.type, candidate.answer), (expected.type, expected.answer),
+                                 candidate.reason)
+                self.assertEqual(len(candidate.evidence["rewrites"]), 2)
+                self.assertTrue(any(row.startswith("Opening left out:")
+                                    for row in candidate.evidence["rules"]))
 
     def test_one_restatement_is_enough_only_when_the_others_restate_nothing(self):
         alone = self.agent(only_first_vote_restates_generate, votes=3)

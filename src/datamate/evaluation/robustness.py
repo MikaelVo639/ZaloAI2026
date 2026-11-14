@@ -19,7 +19,9 @@ import unicodedata
 from pathlib import Path
 from typing import Callable
 
-MODEL_PERTURBATIONS = ("clause_order", "paraphrase", "verbose_chat", "combo")
+MODEL_PERTURBATIONS = (
+    "clause_order", "paraphrase", "verbose_chat", "combo", "metric_wording", "report_wording",
+)
 
 PERTURBATIONS = ("unaccented", "month_abbreviation", "particle", "synonym", "transposition",
                  "short_year", "chat_style", "store_word", "greeting", "chat_typos", *MODEL_PERTURBATIONS)
@@ -256,6 +258,48 @@ def _combo(text: str, key: str) -> str:
     return _verbose_chat(_particle(changed, key) or changed, key + ":combo")
 
 
+# Replace one measure phrase while retaining the original scope, period and filters.
+_METRIC_WORDINGS = (
+    (r"\bdoanh thu\b", "giá trị doanh thu ghi nhận"),
+    (r"\bcó (bao nhiêu|mấy) (đơn(?: hàng)?)\b", r"ghi nhận \1 \2"),
+    (r"\b(?:giá trị|doanh thu) (?:trung bình|bình quân) (một|mỗi) (đơn(?: hàng)?)\b",
+     r"giá trị bình quân tính trên \1 \2"),
+    (r"\bt[ỉỷ] lệ (?:(?:hủy|huỷ) đơn|đơn (?:hủy|huỷ))\b", "phần trăm đơn bị hủy"),
+    (r"\b(mặt hàng|sản phẩm) bán chạy nhất\b", r"\1 có số lượng bán ra cao nhất"),
+    (r"\bsố (đơn(?: hàng)?) (?:bị |đã )?(hủy|huỷ)\b", r"lượng \1 có trạng thái \2"),
+    (r"\btiền khách trả nợ\b", "khoản tiền thu từ việc khách trả nợ"),
+)
+
+
+_REPORT_WORDINGS = (
+    (r"\bdoanh thu\b", "trị số doanh thu thể hiện trên sổ"),
+    (r"\bcó (bao nhiêu|mấy) (đơn(?: hàng)?)\b", r"đếm ra được \1 \2"),
+    (r"\b(?:giá trị|doanh thu) (?:trung bình|bình quân) (một|mỗi) (đơn(?: hàng)?)\b",
+     r"giá trị của \1 \2 nếu lấy trung bình cộng"),
+    (r"\bt[ỉỷ] lệ (?:(?:hủy|huỷ) đơn|đơn (?:hủy|huỷ))\b", "tỷ trọng của các đơn đã hủy"),
+    (r"\b(mặt hàng|sản phẩm) bán chạy nhất\b", r"\1 đứng đầu theo số lượng bán"),
+    (r"\bsố (đơn(?: hàng)?) (?:bị |đã )?(hủy|huỷ)\b", r"số lượng \1 được đánh dấu \2"),
+    (r"\btiền khách trả nợ\b", "tiền thu được do khách thanh toán phần nợ"),
+)
+
+
+def _replace_measure(text: str, key: str, wordings: tuple[tuple[str, str], ...]) -> str | None:
+    variants = []
+    for pattern, replacement in wordings:
+        changed, count = re.subn(pattern, replacement, text, count=1, flags=re.I)
+        if count:
+            variants.append(changed)
+    return _choice(key, tuple(variants)) if variants else None
+
+
+def _metric_wording(text: str, key: str) -> str | None:
+    return _replace_measure(text, key, _METRIC_WORDINGS)
+
+
+def _report_wording(text: str, key: str) -> str | None:
+    return _replace_measure(text, key, _REPORT_WORDINGS)
+
+
 _FUNCTIONS: dict[str, Callable[[str, str], str | None]] = {
     "unaccented": _unaccented,
     "month_abbreviation": _month_abbreviation,
@@ -271,6 +315,8 @@ _FUNCTIONS: dict[str, Callable[[str, str], str | None]] = {
     "paraphrase": _paraphrase,
     "verbose_chat": _verbose_chat,
     "combo": _combo,
+    "metric_wording": _metric_wording,
+    "report_wording": _report_wording,
 }
 
 

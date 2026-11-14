@@ -214,8 +214,43 @@ def score(bench: Path, config: Config, output: Path) -> dict:
     validate_submission(predictions, set(index_records(references)), require_complete=True)
     metrics = evaluate(predictions, references)
     report = {k: metrics[k] for k in ("scorer", "n", "correct", "wrong", "abstain", "pa")}
+    outcomes = {row["id"]: row["outcome"] for row in metrics["outcomes"]}
+    model_rules = {row["nguon"] for audit in run["rule_spec_model"] for row in audit["rows"]
+                   if row["decision"] == "on"}
+    by_path: dict[str, Counter] = defaultdict(Counter)
+    abstain_reasons: Counter[str] = Counter()
+    code_fallback: Counter[str] = Counter()
+    for path in (output / "logs").glob("*.json"):
+        log = json.loads(path.read_text(encoding="utf-8"))
+        evidence = log["evidence"]
+        if "model_load_execution" in evidence or log["reason"].startswith("Rewrite model stopped"):
+            route = "model_unavailable"
+        elif evidence.get("path") == "code":
+            route = "model_code"
+        elif evidence.get("rewrites"):
+            route = "model_rewrite"
+        elif evidence.get("intent") == "rule_rank" and model_rules.intersection(
+            evidence.get("rules", ())
+        ):
+            route = "model_rule"
+        else:
+            route = "deterministic" if config.backend in ("baseline", "rewrite") else config.backend
+        outcome = outcomes[log["id"]]
+        by_path[route][outcome] += 1
+        if config.rewrite_code_fallback and not config.rewrite_code_only and (
+            route == "model_code" or "code_attempt" in evidence
+        ):
+            code_fallback[outcome] += 1
+        if outcome == "abstain":
+            abstain_reasons[log["reason"] or log["error"] or "Unspecified"] += 1
+    by_variant: dict[str, Counter] = defaultdict(Counter)
+    if (bench / "cases.jsonl").is_file():
+        for case in read_jsonl(bench / "cases.jsonl"):
+            by_variant[case["variant"]][outcomes[case["id"]]] += 1
     report.update(label="LOCAL PROXY", backend=config.backend, elapsed_seconds=run["elapsed_seconds"],
-                  wrong_ids=[row["id"] for row in metrics["outcomes"] if row["outcome"] == "wrong"])
+                  wrong_ids=[identifier for identifier, outcome in outcomes.items() if outcome == "wrong"],
+                  by_path=by_path, by_variant=by_variant, abstain_reasons=abstain_reasons,
+                  code_fallback=code_fallback)
     _write_report(output / "score.json", report)
     return report
 

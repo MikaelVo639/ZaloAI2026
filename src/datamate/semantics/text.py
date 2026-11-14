@@ -145,7 +145,7 @@ def normalize_question(value: object) -> str:
     # Same measure, other words: "(số) doanh thu ghi nhận", "bình quân" (not of purchases),
     # "tính cho một đơn",
     # "lên hay xuống", southern "nhứt".
-    text = re.sub(r"\b(?:so )?doanh thu ghi nhan\b", "doanh thu", text)
+    text = re.sub(r"\b(?:(?:so|gia tri) )?doanh thu ghi nhan\b", "doanh thu", text)
     if not re.search(r"\bnhap\b", text):  # "giá nhập bình quân" is its own measure (§5)
         text = re.sub(r"\bbinh quan\b", "trung binh", text)
     text = re.sub(r"\btinh cho (mot|moi) don\b", r"\1 don", text)
@@ -283,9 +283,17 @@ _STANDARD: tuple[tuple[str, str], ...] = (
     (r"\bnv ban gioi nhat\b", "nhan vien ban gioi nhat"),
     # Revenue "(được) ghi nhận (qua cửa hàng)", "của cửa hàng" before "là".
     (r"\b(doanh thu\b.*?) (?:duoc )?ghi nhan(?: qua cua hang)?\b", r"\1"),
+    # Record counts retain the object and any condition that follows the count.
+    (r"\bghi nhan (?=(?:bao nhieu|bao nhiu|bnhiu|bn|may) " + _ORDER + r"\b)", "co "),
+    (r"\b(?:luong|so) (" + _ORDER + r") co trang thai huy\b", r"so \1 bi huy"),
+    (r"(?<!nhieu )(?<!nhiu )(?<!bnhiu )(?<!may )(?<!bn )"
+     r"\bphan tram (" + _ORDER + r") bi huy\b", r"ti le huy \1"),
+    (r"\b(?:khoan )?tien thu tu viec khach tra no\b", "tien khach tra no"),
     (r"\b(doanh thu\b.*?) cua cua hang(?= la\b)", r"\1"),
     # Order value: "doanh thu tháng X (có giá trị) trung bình mỗi đơn hàng",
     # "doanh thu / giá trị trung bình của một đơn hàng trong tháng X".
+    (r"\b(?:gia tri|doanh thu) trung binh tinh tren (mot|moi|1) (" + _ORDER + r")\b",
+     r"gia tri trung binh \1 \2"),
     (r"\bdoanh thu (" + _P + r") (?:co )?(?:gia tri )?trung binh (?:tren )?(?:moi|mot) "
      + _ORDER + r"\b", r"gia tri trung binh mot don \1"),
     (r"\bdoanh thu (" + _P + r") trung binh bao nhieu tien(?: hang)? (?:tren )?(?:moi|mot) "
@@ -307,6 +315,7 @@ _STANDARD: tuple[tuple[str, str], ...] = (
     (r"\bkhach(?: hang)? (?:nao )?(?:da )?(?:mua (?:hang )?(?:tong tien cao nhat|nhieu tien nhat)"
      r"|chi tieu nhieu nhat)\b", "khach mua nhieu tien nhat"),
     (r"\bhang hoa nao ban chay nhat\b", "mat hang nao ban chay nhat"),
+    (r"\b(mat hang|san pham)( nao)? co so luong ban ra cao nhat\b", r"\1\2 ban chay nhat"),
     (r"\btop (\d+) san pham ban chay nhat\b", r"\1 mat hang ban chay nhat"),
     (r"\b(?:mat )?hang nao co (?:tong )?loi nhuan (cao|thap) nhat\b",
      r"hang nao co tong lai gop \1 nhat"),

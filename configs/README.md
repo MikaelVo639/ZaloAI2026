@@ -4,6 +4,8 @@
 - `abstain.toml`: xuất abstain để kiểm tra luồng nộp/đóng gói.
 - `local_plan.toml`: prototype AGENT-02, giữ baseline cho câu grammar hiểu được,
   còn lại thử model local đã chuẩn bị. Không chọn làm mặc định khi chưa qua holdout.
+- `rewrite-coverage.toml`: giữ cấu hình viết lại của `rewrite-v8.toml` và thử thêm
+  hai phép tính do Qwen viết khi không tìm được kế hoạch từ câu viết lại.
 
 `backend` chọn engine; backend mới đăng ký trong `Config` và pipeline.
 `min_confidence` là ngưỡng nhận Candidate, chưa phải xác suất đã hiệu chỉnh.

@@ -42,6 +42,20 @@ class PerturbationTests(unittest.TestCase):
         self.assertEqual(perturb("clause_order", "Doanh thu trong tháng 4/2026?", "synthetic"),
                          "tháng 4/2026, Doanh thu?")
 
+    def test_metric_wording_keeps_denominator_scope_and_ranking_direction(self):
+        for original, expected in (
+            ("Trong tháng 2/2026 có mấy đơn hàng trả bằng thẻ?",
+             "Trong tháng 2/2026 ghi nhận mấy đơn hàng trả bằng thẻ?"),
+            ("Giá trị trung bình mỗi đơn trong quý IV/2025 là bao nhiêu?",
+             "giá trị bình quân tính trên mỗi đơn trong quý IV/2025 là bao nhiêu?"),
+            ("3 mặt hàng bán chạy nhất tháng 2/2026 là gì?",
+             "3 mặt hàng có số lượng bán ra cao nhất tháng 2/2026 là gì?"),
+            ("Tỷ lệ đơn huỷ tuần trước là bao nhiêu?",
+             "phần trăm đơn bị hủy tuần trước là bao nhiêu?"),
+        ):
+            with self.subTest(original=original):
+                self.assertEqual(perturb("metric_wording", original, "synthetic"), expected)
+
     def test_short_year_and_chat_style(self):
         self.assertRegex(perturb("short_year", "Doanh thu tháng 3/2025?", "k"),
                          r"^Doanh thu (th 3/25|3/25|T3/25)\?$")

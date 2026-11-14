@@ -1,0 +1,19 @@
+# Coverage experiment: use the same rewrite settings as rewrite-v8, then try
+# two model calculations on the original question if no rewrite can answer.
+backend = "rewrite"
+min_confidence = 0.5
+max_seconds = 20000
+model_path = "models/qwen2.5-coder-7b-instruct"
+question_timeout = 30
+ingestion_timeout = 300
+model_load_timeout = 600
+model_timeout = 30
+max_input_tokens = 8192
+max_new_tokens = 128
+rewrite_retries = 1
+rewrite_examples = 80
+rewrite_lenient = true
+rewrite_retry_rejected = true
+rewrite_votes = 3
+rewrite_single_vote = true
+rewrite_code_fallback = true

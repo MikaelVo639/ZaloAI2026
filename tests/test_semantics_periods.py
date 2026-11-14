@@ -69,6 +69,21 @@ class PeriodTests(unittest.TestCase):
                 self.assertEqual(intent, "order_count")
                 self.assertIn(start, (date(2026, 3, 3), date(2026, 3, 4)))
 
+    def test_measure_wording_preserves_the_plan_and_rejects_unknown_conditions(self):
+        for original, equivalent in (
+            ("Doanh thu hôm qua là bao nhiêu?",
+             "Giá trị doanh thu ghi nhận hôm qua là bao nhiêu?"),
+            ("Tháng 3/2026 có mấy đơn hàng?",
+             "Tháng 3/2026 ghi nhận mấy đơn hàng?"),
+            ("Tháng 3/2026 mặt hàng bán chạy nhất là gì?",
+             "Tháng 3/2026 mặt hàng có số lượng bán ra cao nhất là gì?"),
+        ):
+            with self.subTest(equivalent=equivalent):
+                expected = self.plan(original)
+                self.assertIsNotNone(expected)
+                self.assertEqual(self.plan(equivalent), expected)
+        self.assertIsNone(self.plan("Hôm qua ghi nhận mấy đơn do robot giao?"))
+
     def test_quantity_wording_preserves_the_asked_unit(self):
         book = (rulebook() + "| Bán được bao nhiêu <đơn vị> | cộng số lượng quy về đơn vị "
                 "cơ bản của các mặt hàng có đơn vị cơ bản là <đơn vị>, kể cả dòng bán theo "
