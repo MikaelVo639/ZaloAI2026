@@ -84,6 +84,30 @@ class PurchaseTests(unittest.TestCase):
             load_purchases(self.catalog(LIST_README, "phieu.csv",
                                         LIST_ROWS.replace("Đã hủy", "Phiếu tạm")))
 
+    def test_receipt_line_export_repeats_the_receipt_total(self):
+        readme = LIST_README.replace("- **TT**: trạng thái phiếu nhập\n",
+                                     "- **TT**: trạng thái phiếu nhập\n"
+                                     "- **Thành tiền**: tiền nhập của cả dòng\n")
+        header = "Mã,Ngày,Mã NCC,Tổng,TT,Thành tiền\n"
+        rows = (header + "PN1,02/06/2026,NCC1,1000000,Đã nhập hàng,600000\n"
+                "PN1,02/06/2026,NCC1,1000000,Đã nhập hàng,400000\n"
+                "PN2,03/06/2026,NCC2,500000,Đã hủy,500000\n")
+        book = load_purchases(self.catalog(readme, "phieu.csv", rows))
+        self.assertEqual({r.receipt_id: r.total for r in book.receipts},
+                         {"PN1": Decimal(1000000), "PN2": Decimal(500000)})
+        for broken in (rows.replace("NCC1,1000000,Đã nhập hàng,400000",
+                                    "NCC1,900000,Đã nhập hàng,400000"),   # totals disagree
+                       rows.replace(",400000", ",300000"),               # lines don't add up
+                       rows.replace("PN1,02/06/2026,NCC1,1000000,Đã nhập hàng,400000",
+                                    "PN1,05/06/2026,NCC1,1000000,Đã nhập hàng,400000")):
+            with self.subTest(broken=broken):
+                with self.assertRaises(PurchaseSourceError):
+                    load_purchases(self.catalog(readme, "phieu.csv", broken))
+        # A plain receipt list (no line amounts) still may not repeat a receipt.
+        with self.assertRaises(PurchaseSourceError):
+            load_purchases(self.catalog(LIST_README, "phieu.csv",
+                                        LIST_ROWS + "PN1,02/06/2026,NCC1,1000000,Đã nhập hàng\n"))
+
     def test_wordings_and_answers(self):
         for text, intent in (
             ("Tổng tiền nhập hàng tháng 6/2026 là bao nhiêu?", "purchase_total"),

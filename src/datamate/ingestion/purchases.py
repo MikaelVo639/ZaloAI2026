@@ -2,7 +2,8 @@
 
 Two documented shapes: a receipt list with the total of each receipt ("tổng tiền phiếu
 nhập", optional "trạng thái phiếu nhập"), or a purchase book whose lines carry "tiền nhập
-của cả dòng" and are summed per receipt. A KiotViet receipt export without a README
+của cả dòng" and are summed per receipt. A receipt/line export that repeats the receipt
+total on each line is read once per receipt when its lines agree and add up to it. A KiotViet receipt export without a README
 section is read with the meanings KiotViet-export READMEs give its columns. Anything
 undocumented, inconsistent or with an unknown status raises ``PurchaseSourceError``.
 """
@@ -199,6 +200,8 @@ def load_purchases(catalog: Catalog) -> PurchaseBook:
         raise PurchaseSourceError("source", str(exc)) from exc
     receipts: dict[str, dict] = {}
     totals: dict[str, Decimal] = defaultdict(Decimal)
+    line_sums: dict[str, Decimal] = defaultdict(Decimal)  # receipt/line exports only
+    repeated = False
     try:
         for row in rows:
             raw_id = row.get(fields["receipt_id"])
@@ -211,9 +214,19 @@ def load_purchases(catalog: Catalog) -> PurchaseBook:
             cancelled = _cancelled(row.get(fields["status"])) if "status" in fields else False
             record = {"day": day, "supplier": supplier, "cancelled": cancelled}
             if headers:
+                total = parse_amount(row.get(fields["total"]))
+                if "line_amount" in fields:
+                    line_sums[key] += parse_amount(row.get(fields["line_amount"]))
                 if key in receipts:
-                    raise PurchaseSourceError("key", "Receipt list repeats a receipt id")
-                totals[key] = parse_amount(row.get(fields["total"]))
+                    # A receipt/line export repeats the receipt on each of its lines: every
+                    # line must carry the same receipt facts and the same receipt total.
+                    if "line_amount" not in fields:
+                        raise PurchaseSourceError("key", "Receipt list repeats a receipt id")
+                    if receipts[key] != record or totals[key] != total:
+                        raise PurchaseSourceError("key", "Lines of one receipt disagree")
+                    repeated = True
+                    continue
+                totals[key] = total
             else:
                 if key in receipts and receipts[key] != record:
                     raise PurchaseSourceError("key", "Lines of one receipt disagree")
@@ -225,6 +238,9 @@ def load_purchases(catalog: Catalog) -> PurchaseBook:
         raise PurchaseSourceError("value", f"Purchase value unreadable: {exc}") from exc
     if not receipts:
         raise PurchaseSourceError("absent", "Purchase list is empty")
+    if repeated and any(abs(line_sums[key] - totals[key]) > 1 for key in receipts):
+        # The repeated total is read once per receipt only when its lines add up to it.
+        raise PurchaseSourceError("key", "A receipt total differs from the sum of its lines")
     supplier_names = (_sqlite_supplier_names(catalog, section)
                       if section.origin == "purchase_sqlite_pos.v1" else {})
     return PurchaseBook(
