@@ -36,6 +36,7 @@ from typing import Any, Iterable, Iterator
 from datamate.contracts import Catalog, Table
 from datamate.ingestion.catalog import is_repeated_header, iter_data_rows
 from datamate.ingestion.sales import (
+    AMBIGUOUS_STATE,
     Sale,
     is_total_label,
     parse_date,
@@ -82,6 +83,8 @@ _MEANINGS = {
     "don vi lon": "big_unit",
     "kenh ban": "channel",
     "ma nhan vien ban": "staff_id",
+    "ma nhan vien": "employee_code",
+    "ten nhan vien": "employee_name",
     # Order time for the rulebook shifts (ca sáng / ca chiều).
     "gio dat don": "time",
     "thoi diem dat don": "time",
@@ -204,17 +207,24 @@ def note_state(note: Any, allowed: frozenset[str] | None = None) -> str | None:
 def _states_from_notes(lines: list[dict[str, Any]]) -> None:
     """Give every line the state its order's notes name; "hoan thanh" when none does."""
     by_order: dict[str, set[str]] = defaultdict(set)
+    ambiguous: set[str] = set()
     for line in lines:
-        note = line.get("status_note")
+        note, key = line.get("status_note"), line["_order"]
         if not _blank(note):
-            state = note_state(note, line.get("_note_labels"))
-            if state:
-                by_order[line["_order"]].add(state)
+            try:
+                state = note_state(note, line.get("_note_labels"))
+            except ReadmeSalesError as exc:
+                if exc.code != "STATUS_AMBIGUOUS":
+                    raise
+                ambiguous.add(key)
+            else:
+                if state:
+                    by_order[key].add(state)
     for line in lines:
-        states = by_order.get(line["_order"], set())
-        if len(states) > 1:
-            raise ReadmeSalesError("STATUS_AMBIGUOUS", "The notes of one order name several states")
-        line["status"] = next(iter(states), "hoan thanh")
+        key = line["_order"]
+        states = by_order.get(key, set())
+        line["_state_ambiguous"] = key in ambiguous or len(states) > 1
+        line["status"] = None if line["_state_ambiguous"] else next(iter(states), "hoan thanh")
 
 
 # "hàng bán, có thể ghi tắt (tra ở sheet Ghi tắt)": names in the sales list may be short
@@ -282,10 +292,17 @@ _HEAD_FIELDS = frozenset({"order_id", "date", "product_id", "product_name", "qua
                           "channel", "payment_method", "staff_id"})
 
 
-_SERVICE_AMOUNT = re.compile(r"^(?:tong tien|thanh tien)(?: cua)? (?:phieu|phieu dich vu)$")
-_SERVICE_GRAIN = re.compile(r"\bmoi dong (?:la|tuong ung) (?:voi )?mot phieu(?: dich vu)?\b")
+_SERVICE_AMOUNT = re.compile(
+    r"^(?:tong tien|thanh tien)(?: cua)? (?:ca )?(?:phieu|phieu dich vu)$")
+_SERVICE_DATE = re.compile(
+    r"^ngay(?: (?:phieu|lap|ghi|ban|dat|lam|tiep nhan|dich vu|xu ly)(?: phieu)?)?$")
+_SERVICE_GRAIN = re.compile(
+    r"\bmoi dong (?:la |ghi |ghi lai |luu |luu lai |tuong ung (?:voi )?)?"
+    r"(?:mot |1 )(?:phieu|hoa don)\b"
+    r"|\bmoi dong (?:mot|1) (?:[^ ;.]+ ){1,5}(?:mot|1) phieu\b")
 _ONLY_COMPLETE = re.compile(
-    r"\bchi ghi (?:cac )?phieu (?:da )?(?:hoan thanh|thanh toan)\b")
+    r"\b(?:chi (?:ghi|luu) (?:lai )?(?:cac )?phieu|(?:tat ca|moi) (?:cac )?phieu) "
+    r"(?:deu )?(?:da )?(?:hoan thanh|thanh toan)\b")
 
 
 def _service_sheet(section: Section, readme: str) -> bool:
@@ -293,12 +310,32 @@ def _service_sheet(section: Section, readme: str) -> bool:
     # same README documents a single table of this shape (checked by the loader).
     if section.origin != "readme":
         return False
-    fields = section.fields
+    fields = _service_fields(section)
     if ("date" not in fields or not fields.keys() & {"order_goods", "service_goods"}
             or fields.keys() & {"product_id", "product_name", "quantity", "order_id", "amount"}):
         return False
-    return bool(_SERVICE_GRAIN.search(fold(" ".join(section.columns.values())))
-                or (len(parse_sections(readme)) == 1 and _SERVICE_GRAIN.search(fold(readme))))
+    if _SERVICE_GRAIN.search(fold(" ".join(section.columns.values()))):
+        return True
+    if not _SERVICE_GRAIN.search(fold(readme)):
+        return False
+    # A general convention alone must identify a single detail register. A summary
+    # alongside it is described as one row per date/employee, not one row per ticket.
+    candidates = [s for s in parse_sections(readme)
+                  if {"date", "service_goods"} <= _service_fields(s).keys()]
+    return len(candidates) == 1 and candidates[0].label == section.label
+
+
+def _service_fields(section: Section) -> dict[str, str]:
+    fields = section.fields
+    if "date" not in fields:
+        days = [column for column, meaning in section.columns.items()
+                if _SERVICE_DATE.fullmatch(fold(re.split(r"[:;,]", meaning, maxsplit=1)[0]))
+                or (re.match(r"^ngay (?:[a-z]+ )?[a-z]+$", fold(meaning))
+                    and fold(column).startswith("ngay")
+                    and not re.search(r"\b(?:giao|du kien|hen|han|nhap|tra|sinh)\b", fold(meaning)))]
+        if len(days) == 1:
+            fields["date"] = days[0]
+    return fields
 
 
 def _meaning_head_field(meaning: str) -> str | None:
@@ -481,7 +518,7 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
         return []
     headers = _table_headers(table for table in catalog.tables
                              if not any(matches_source(s.file, table.path.name)
-                                        for s in documented))
+                                        and s.sheet in (None, table.name) for s in documented))
     for version, lists in POS_PROFILES:
         sections = []
         for table, header in headers:
@@ -503,8 +540,50 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
     return []
 
 
-def sqlite_staff_codes(catalog: Catalog) -> dict[str, str]:
-    """Verified name-to-code map from the staff table paired with SQLite POS orders."""
+def staff_codes(catalog: Catalog, *, reserved_names: Iterable[str] = ()) -> dict[str, str]:
+    """Read a documented staff catalogue, or the verified legacy SQLite POS list."""
+    blocked = {fold(name) for name in reserved_names}
+    documented = []
+    try:
+        for section in parse_sections(catalog.readme):
+            fields = section.fields
+            if {"employee_code", "employee_name"} <= fields.keys() and not (
+                    fields.keys() & {"order_id", "date", "quantity", "status", "amount"}):
+                counts = Counter(meaning_field(value) for value in section.columns.values())
+                if counts["employee_code"] != 1 or counts["employee_name"] != 1:
+                    return {}
+                tables = _matching_tables(catalog, section)
+                if not tables:
+                    return {}
+                documented.extend((table, fields["employee_code"], fields["employee_name"])
+                                  for table in tables)
+        if documented:
+            if len({(t.path, t.name) for t, _, _ in documented}) != len(documented):
+                return {}
+            return _staff_code_map(documented, blocked)
+        return sqlite_staff_codes(catalog, reserved_names=blocked)
+    except (ReadmeSalesError, OSError):
+        return {}
+
+
+def _staff_code_map(sources: list[tuple[Table, str, str]],
+                    blocked: set[str]) -> dict[str, str]:
+    by_name: dict[str, set[str]] = defaultdict(set)
+    by_code: dict[str, set[str]] = defaultdict(set)
+    for table, code_col, name_col in sources:
+        for _, row in _records(table, (code_col, name_col)):
+            code, name = _text(row[code_col]), _text(row[name_col])
+            if code and name:
+                name = _name_key(name)
+                by_name[name].add(code)
+                by_code[code.upper()].add(name)
+    return {name: code for name, codes in by_name.items()
+            if len(codes) == 1 and name not in blocked
+            for code in codes if len(by_code[code.upper()]) == 1}
+
+
+def sqlite_staff_codes(catalog: Catalog, *, reserved_names: Iterable[str] = ()) -> dict[str, str]:
+    """Verified legacy staff table paired with SQLite POS orders."""
     if "`nhan_vien`" not in catalog.readme.lower() or "pos" not in fold(catalog.readme).split():
         return {}
     order_keys = _SQLITE_POS[0][0] | {"MaNhanVien"}
@@ -517,16 +596,7 @@ def sqlite_staff_codes(catalog: Catalog) -> dict[str, str]:
               and {"MaNhanVien", "TenGoi"} <= set(table.columns)]
     if len(tables) != 1:
         return {}
-    by_name: dict[str, set[str]] = defaultdict(set)
-    by_code: dict[str, set[str]] = defaultdict(set)
-    for _, row in _records(tables[0], ("MaNhanVien", "TenGoi")):
-        code, name = _text(row["MaNhanVien"]), _text(row["TenGoi"])
-        if code and name:
-            name = _name_key(name)
-            by_name[name].add(code)
-            by_code[code.upper()].add(name)
-    return {name: code for name, codes in by_name.items() if len(codes) == 1
-            for code in codes if len(by_code[code.upper()]) == 1}
+    return _staff_code_map([(tables[0], "MaNhanVien", "TenGoi")], set(reserved_names))
 
 
 # amount = unit price x quantity - line discount on most rows, and never more than price x
@@ -1029,7 +1099,9 @@ def _classify(sections: list[Section], catalog: Catalog) -> dict[str, _Role]:
     roles: dict[str, _Role] = {}
     for section in sections:
         fields = set(section.fields)
-        if "_other" in fields:
+        if _service_sheet(section, catalog.readme):
+            role = "service_orders"
+        elif "_other" in fields:
             if not _catalogue_with_stock(section, fields):
                 continue
             role = "products"
@@ -1039,8 +1111,6 @@ def _classify(sections: list[Section], catalog: Catalog) -> dict[str, _Role]:
             role = "lots"
         elif "amount" in fields and fields & {"product_name", "product_id"}:
             role = "lines"
-        elif _service_sheet(section, catalog.readme):
-            role = "service_orders"
         elif "order_id" in fields and fields & {"date", "status"} and "quantity" not in fields:
             role = "orders"
         elif ("customer_id" in fields and "customer_group" in fields
@@ -1051,7 +1121,16 @@ def _classify(sections: list[Section], catalog: Catalog) -> dict[str, _Role]:
             role = "products"
         else:
             continue
-        tables = _matching_tables(catalog, section)
+        if role == "service_orders":
+            # Keep all declared sheets so a missing header on one month cannot silently
+            # shorten the data. Non-financial columns do not establish the grain.
+            tables = [table for table in catalog.tables
+                      if matches_source(section.file, table.path.name)
+                      and section.sheet in (None, table.name)]
+            if not is_family(section.file) and len({table.path for table in tables}) > 1:
+                raise ReadmeSalesError("AMBIGUOUS_SOURCE", "Several files match one ticket ledger")
+        else:
+            tables = _matching_tables(catalog, section)
         if not tables and role in _OPTIONAL_ROLES:
             continue  # context only (customer groups): a missing list must not block sales
         if not tables:
@@ -1061,7 +1140,8 @@ def _classify(sections: list[Section], catalog: Catalog) -> dict[str, _Role]:
         entry.sections.append(section)
         entry.tables.extend((section, table) for table in tables)
     for role, entry in roles.items():
-        signatures = {frozenset(s.fields) for s in entry.sections}
+        signatures = {frozenset(_service_fields(s) if role == "service_orders" else s.fields)
+                      for s in entry.sections}
         if len(signatures) != 1:
             raise ReadmeSalesError("AMBIGUOUS_ROLE", "Files of one role disagree on fields",
                                    role=role, sources=[s.label for s in entry.sections])
@@ -1077,11 +1157,11 @@ _BASE_PRICE_MEANINGS = {
 
 def _role_rows(
     entry: _Role, headers: dict[tuple[Path, str], set[str]] | None = None,
-    with_file: bool = False, *, sale_cost_readme: str = "",
+    with_file: bool = False, *, sale_cost_readme: str = "", service: bool = False,
 ) -> Iterator[tuple[str, int, dict[str, Any]]]:
     """``(sheet, ordinal, row)``; ``with_file`` adds the source file name as ``_file``."""
     for section, table in entry.tables:
-        fields = section.fields
+        fields = _service_fields(section) if service else section.fields
         if sale_cost_readme and "unit_cost_at_sale" not in fields:
             cost = sale_cost_column(sale_cost_readme, table)
             if cost and cost not in section.columns:
@@ -1091,7 +1171,10 @@ def _role_rows(
         price_is_base = fold(section.columns.get(price_column, "")) in _BASE_PRICE_MEANINGS
         notes = _note_labels(fold(section.columns.get(fields.get("status_note", ""), "")))
         adjustments = _adjustment_labels(section, fields)
-        for ordinal, raw in _records(table, section.columns):
+        needed = ([column for field, column in fields.items() if field in
+                   {"date", "service_goods", "order_goods", "status", "status_note", "time", "staff_id"}]
+                  if service else section.columns)
+        for ordinal, raw in _records(table, needed):
             if headers is not None and key not in headers:
                 headers[key] = {name for name in raw if not re.fullmatch(r"_empty_\d+", name)}
             row = {key: raw.get(column) for key, column in fields.items()}
@@ -1454,11 +1537,12 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
                                              "negative": False, "returned": False})
         raw_date = line.get("date") if "date" in line_fields else (parent or {}).get("date")
         raw_status = line.get("status") if "status" in line_fields else (parent or {}).get("status")
-        if _blank(raw_status) or _blank(raw_date):
+        ambiguous = line.get("_state_ambiguous", False)
+        if (_blank(raw_status) and not ambiguous) or _blank(raw_date):
             raise ReadmeSalesError("MISSING_VALUE", "Order date or status is missing",
                                    order_source="lines" if parent is None else "orders")
         try:
-            status = policy.resolve(raw_status)
+            status = AMBIGUOUS_STATE if ambiguous else policy.resolve(raw_status)
         except StatusError as exc:
             raise ReadmeSalesError("UNKNOWN_STATUS", str(exc)) from exc
         sheet = line["_sheet"] if "date" in line_fields else (parent or {}).get("_sheet", "")
@@ -1507,6 +1591,8 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
             statuses = {"returned"}
         elif "returned" in statuses and len(statuses) > 1:
             statuses = {"returned"}
+        if AMBIGUOUS_STATE in statuses:
+            statuses = {AMBIGUOUS_STATE}
         if len(statuses) != 1 or len(state["days"]) != 1:
             raise ReadmeSalesError("CONFLICTING_ORDER", "An order has several dates or states",
                                    states=len(statuses), days=len(state["days"]))
@@ -1739,10 +1825,10 @@ def _from_service_orders(catalog: Catalog, role: _Role, rules: _Rules
     """A service register with an explicit one-ticket-per-row grain and no product facts."""
     if not rules.order_goods:
         raise ReadmeSalesError("RULE_CAPABILITY_MISSING", "Service tickets need the revenue rule")
-    fields = role.sections[0].fields
+    fields = _service_fields(role.sections[0])
     amount_field = "order_goods" if "order_goods" in fields else "service_goods"
     for section in role.sections:
-        amount_meaning = fold(section.columns[section.fields[amount_field]])
+        amount_meaning = fold(section.columns[_service_fields(section)[amount_field]])
         gross = ("truoc giam gia" in amount_meaning or "khong tru giam gia" in amount_meaning)
         net_of_fees = ("khong gom phi giao" in amount_meaning
                        and "khong gom thue" in amount_meaning)
@@ -1752,11 +1838,10 @@ def _from_service_orders(catalog: Catalog, role: _Role, rules: _Rules
     written_status = "status" in fields
     documented_notes = "status_note" in fields
     if not (written_status or documented_notes or
-            (len(role.sections) == 1 and len(parse_sections(catalog.readme)) == 1
-             and _ONLY_COMPLETE.search(fold(catalog.readme)))):
+            (len(role.sections) == 1 and _ONLY_COMPLETE.search(fold(catalog.readme)))):
         raise ReadmeSalesError("MISSING_VALUE", "Ticket status or completion is undocumented")
     rows = []
-    for sheet, ordinal, row in _role_rows(role, with_file=True):
+    for sheet, ordinal, row in _role_rows(role, with_file=True, service=True):
         if _blank(row.get("date")) and not _blank(row.get(amount_field)):
             raise ReadmeSalesError("MISSING_VALUE", "Ticket amount without a date")
         if is_total_label(row.get("date")) or (
@@ -1771,8 +1856,8 @@ def _from_service_orders(catalog: Catalog, role: _Role, rules: _Rules
     statuses = Counter()
     for key, sheet, row in rows:
         try:
-            status = policy.resolve(row.get("status") if written_status or documented_notes
-                                    else "hoan thanh")
+            label = row.get("status") if written_status or documented_notes else "hoan thanh"
+            status = AMBIGUOUS_STATE if row.get("_state_ambiguous") else policy.resolve(label)
             day = parse_day(row.get("date"), sheet)
             amount = parse_amount(row.get(amount_field))
         except (TypeError, ValueError, StatusError) as exc:

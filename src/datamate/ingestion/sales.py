@@ -29,6 +29,9 @@ STATUSES = {
 }
 
 
+AMBIGUOUS_STATE = "state_ambiguous"
+
+
 @dataclass(frozen=True)
 class Sale:
     order_id: str

@@ -35,8 +35,14 @@ def replay(train: Path, bench: Path, logs: Path) -> dict:
         raise ValueError("Replay requires a labelled train split and a nonempty benchmark")
     train_answers = index_records(read_jsonl(train / "answers.jsonl"))
     bench_answers = index_records(read_jsonl(bench / "answers.jsonl"))
+    originals_for_case = {}
+    if (bench / "cases.jsonl").exists():
+        originals_for_case = {row["id"]: row.get("train_id", row["id"])
+                              for row in read_jsonl(bench / "cases.jsonl")}
     if ({q.id for q in sample.questions} != bench_answers.keys()
-            or any(train_answers.get(key) != row for key, row in bench_answers.items())):
+            or any(train_answers.get(originals_for_case.get(key, key)) !=
+                   {**row, "id": originals_for_case.get(key, key)}
+                   for key, row in bench_answers.items())):
         raise ValueError("Benchmark labels do not match train")
     if (sample.rulebook != originals.rulebook
             or sample.calendar_path.read_bytes() != originals.calendar_path.read_bytes()):
@@ -47,7 +53,8 @@ def replay(train: Path, bench: Path, logs: Path) -> dict:
     for path in sorted(logs.glob("*.json")):
         entry = json.loads(path.read_text(encoding="utf-8"))
         identifier = entry.get("id")
-        question, original = bench_by_id.get(identifier), original_by_id.get(identifier)
+        question = bench_by_id.get(identifier)
+        original = original_by_id.get(originals_for_case.get(identifier, identifier))
         if (not question or not original or identifier in seen
                 or question.business_id != original.business_id
                 or question.as_of_date != original.as_of_date
@@ -63,11 +70,11 @@ def replay(train: Path, bench: Path, logs: Path) -> dict:
             # Unplanned first attempts log the actual leftover words (even if None).
             # An unsuccessful final retry has no such field, but the vote logs why
             # it retried; never mix guard rejections into the grammar sample.
-            marked = "unread_words" in attempt
+            marked = attempt.get("outcome") == "khong_doc" or "unread_words" in attempt
             final_unplanned = (entry.get("reason", "").startswith(
                 "Grammar cannot plan the rewrite") and (retry is None or retry == 1)
                 and (retry is None or vote_sizes[attempt["vote"]] == 2))
-            if (marked or final_unplanned) and attempt.get("rewrite") and not attempt.get("rejected"):
+            if (marked or ("outcome" not in attempt and final_unplanned)) and attempt.get("rewrite") and not attempt.get("rejected"):
                 by_business[original.business_id].append((original, attempt))
     if seen != bench_by_id.keys():
         raise ValueError("Logs must cover the complete benchmark (or its recorded subset)")

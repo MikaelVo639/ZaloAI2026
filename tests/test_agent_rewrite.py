@@ -58,6 +58,14 @@ def unsure_generate(cache, messages, max_input_tokens, max_new_tokens):
     return {"text": UNSURE}
 
 
+
+def empty_generate(cache, messages, max_input_tokens, max_new_tokens):
+    return {"text": "Viết lại: "}
+
+
+def echo_only_generate(cache, messages, max_input_tokens, max_new_tokens):
+    return {"text": "Câu hỏi: tháng này bao nhiêu tiền"}
+
 def number_changing_generate(cache, messages, max_input_tokens, max_new_tokens):
     return {"text": "Doanh thu tháng 7/2026 là bao nhiêu?"}
 
@@ -577,6 +585,24 @@ class RewriteAgentTests(unittest.TestCase):
         no_retry = self.agent(rejected_then_standard_generate, retry_rejected=True,
                               rewrite_retries=0).answer(self.question, self.context)
         self.assertEqual(len(no_retry.evidence["rewrites"]), 1)
+
+    def test_rewrite_attempt_outcomes_distinguish_each_branch(self):
+        for generate, outcome in (
+            (unsure_generate, "khong_ro"), (empty_generate, "rong"),
+            (echo_only_generate, "lap_lai"), (unplanned_generate, "khong_doc"),
+            (number_changing_generate, "bi_chan"), (standard_generate, "lap_duoc"),
+        ):
+            with self.subTest(outcome=outcome):
+                reply = self.agent(generate, votes=1, rewrite_retries=0).answer(
+                    self.question, self.context)
+                self.assertEqual([a["outcome"] for a in reply.evidence["rewrites"]], [outcome])
+        disagree = self.agent(third_vote_breaks_tie_generate).answer(self.question, self.context)
+        self.assertEqual([a["outcome"] for a in disagree.evidence["rewrites"]],
+                         ["khac_ke_hoach", "khac_ke_hoach"])
+        agrees = self.agent(third_vote_breaks_tie_generate, votes=3).answer(
+            self.question, self.context)
+        self.assertEqual([a["outcome"] for a in agrees.evidence["rewrites"]],
+                         ["lap_duoc", "khac_ke_hoach", "lap_duoc"])
 
     def test_firm_rejected_retry_preserves_rejection_against_single_vote(self):
         flags = dict(votes=3, single_vote=True, retry_rejected=True, firm_retry=True)

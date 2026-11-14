@@ -888,6 +888,46 @@ HEADER_PAYMENTS = [["Mã phiếu", "Mã hóa đơn", "Thời gian", "Tiền thu"
 class HeaderDebtTests(_Shop):
     """README without column sections: the Công nợ convention names the money columns."""
 
+    def test_money_conventions_and_repeated_order_fields_in_sales_sheet(self):
+        readme = """## File
+- `orders.csv`
+
+## Danh sách ở file riêng
+- `payments.csv`
+
+## Cột trong `orders.csv`
+- **Mã**: mã đơn
+- **Ngày**: ngày đặt
+- **Trạng thái**: trạng thái đơn
+- **Thanh toán**: hình thức thanh toán
+- **Kênh**: kênh bán
+- **Mã khách**: mã khách
+- **Hàng**: tên hàng
+- **STT**: số thứ tự dòng trong đơn
+
+## Quy ước
+- **Tiền thu** là số tiền khách nộp ở lần đó.
+- **Tổng thu**: số tiền khách phải trả cho cả đơn.
+- Dữ liệu có đến hết 31/01/2026.
+"""
+        header = ["Mã", "Ngày", "Trạng thái", "Tổng thu", "Thanh toán", "Kênh",
+                  "Mã khách", "Tên khách", "Còn nợ", "Hàng", "STT"]
+        row = ["D1", "01/01/2026", "Xong", 100000, "Ghi nợ", "Store", "K1", "An",
+               25000, "Món A", 1]
+        second_line = [*row[:-2], "Món B", 2]
+        ledger = load_debt_ledger(self.catalog(readme=readme, orders=[header, row, second_line]),
+                                  RULEBOOK)
+        self.assertEqual((len(ledger.orders), len(ledger.payments)), (1, 2))
+        self.assertEqual(ledger.orders[0].total, 100000)
+        second_line[3] = 90000
+        with self.assertRaisesRegex(DebtSourceError, "Merged sales rows disagree"):
+            load_debt_ledger(self.catalog(readme=readme, orders=[header, row, second_line]),
+                             RULEBOOK)
+        invalid = [["Mã đơn", "Ngày thu", "Tiền thu"], ["khác", "05/01/2026", "10"]]
+        with self.assertRaisesRegex(DebtSourceError, "overlap is below 95%"):
+            load_debt_ledger(self.catalog(readme=readme, orders=[header, row], payments=invalid),
+                             RULEBOOK)
+
     def test_order_and_payment_lists_are_read_from_their_headers(self):
         ledger = load_debt_ledger(self.catalog(readme=HEADER_README, orders=HEADER_ORDERS,
                                                payments=HEADER_PAYMENTS, customers=False),

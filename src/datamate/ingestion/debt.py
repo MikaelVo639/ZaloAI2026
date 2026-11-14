@@ -26,6 +26,7 @@ from datamate.ingestion.readme_sales import (
     _matching_tables,
     _table_headers,
     _records,
+    meaning_field,
     parse_amount,
     parse_day,
     parse_sections,
@@ -255,124 +256,165 @@ def _profile_sections(catalog: Catalog, documented: list[Section],
     return mixed
 
 
-_PAYMENT_DAY = re.compile(r"^(?:thoi gian|ngay|thoi diem|ngay gio)(?: thu(?: tien)?)?$")
-
-
-def _documents_debt_money(catalog: Catalog, sections: list[Section],
-                          references: dict[str, str]) -> bool:
-    """Whether a described list holds an order total or a payment amount."""
-    for section in sections:
-        try:
-            fields = _section_fields(_with_referenced_columns(catalog, section, references),
-                                     references)
-        except DebtSourceError:
-            return True  # a documented source the ledger must report on its own
-        if fields.keys() & {"order_total", "payment_amount"}:
-            return True
-    return False
+_PAYMENT_DAY = re.compile(
+    r"^(?:thoi gian|ngay|thoi diem|ngay gio)(?: (?:thu(?: tien)?|tra(?: tien)?|ghi nhan|"
+    r"thanh toan|lap phieu|lap))?$")
 
 
 def _header_debt_sections(catalog: Catalog, documented: list[Section],
-                          references: dict[str, str]) -> list[Section]:
-    """Order and payment lists the README leaves undescribed, when its ``Công nợ``
-    convention names their money columns.
-
-    The order list is one header_schema.table_role reads as "orders" and that holds the
-    column the convention calls the order total; the payment list holds the column it calls
-    the payment amount, one order id column and one payment-time column. Both or nothing,
-    one table shape per role; the ledger checks still apply to the rows.
-    """
-    undocumented = [t for t in catalog.tables
-                    if not any(matches_source(s.file, t.path.name) and s.sheet in (None, t.name)
-                               for s in documented)]
-    found: dict[str, list[Section]] = defaultdict(list)
-    tables: list[tuple[Table, set[str], dict[str, str]]] = []
-    for table, header in _table_headers(undocumented):
+                          references: dict[str, str], listed: set[str]) -> list[Section]:
+    """Infer a listed receipt's shape from one documented amount and unambiguous key/day."""
+    if not references:
+        return []
+    by_role: dict[str, list[Section]] = defaultdict(list)
+    context_ids = set()
+    for section in documented:
+        fields = _section_fields(section, references)
+        if "order_id" in fields and "order_day" in fields:
+            context_ids.add(fields["order_id"])
+    for table, header in _table_headers(t for t in catalog.tables if not any(
+            matches_source(s.file, t.path.name) and s.sheet in (None, t.name)
+            for s in documented)):
         probe = Section(table.path.name, table.name, {})
         referenced: dict[str, list[str]] = defaultdict(list)
         for column in header:
             semantic = _referenced_field(references, probe, column)
             if semantic:
                 referenced[semantic].append(column)
-        if not any(len(columns) > 1 for columns in referenced.values()):
-            tables.append((table, header, {semantic: columns[0]
-                                           for semantic, columns in referenced.items()}))
-    for table, header, named in tables:
+        if any(len(columns) != 1 for columns in referenced.values()):
+            continue
+        named = {semantic: columns[0] for semantic, columns in referenced.items()}
         guess = table_role(sorted(header))
-        if guess and guess[0] == "orders" and "order_total" in named:
-            columns = dict(guess[1])
-            columns.update({column: "" for column in named.values()})
-            found["orders"].append(Section(table.path.name, table.name, columns,
-                                           origin="header"))
-    order_ids = {column for section in found["orders"]
-                 for column, meaning in section.columns.items() if meaning == "mã đơn"}
-    for table, header, named in tables:
-        if set(named) != {"payment_amount"}:
+        if "order_total" in named:
+            columns = (guess[1] if guess and guess[0] == "orders"
+                       else _combined_sales_debt_columns(header))
+            if columns:
+                columns = {**columns, **{column: "" for column in named.values()}}
+                by_role["orders"].append(Section(table.path.name, table.name, columns,
+                                                 origin="header"))
+                continue
+        key = filename_key(table.path.name)
+        if "payment_amount" not in named or set(named) != {"payment_amount"}:
+            continue
+        # An explicitly named payment column in an inventoried file is sufficient; do
+        # not search unrelated files. Legacy no-inventory header recovery stays paired.
+        if key not in listed:
             continue
         ids = [column for column in header if header_field(column) == "order_id"]
-        if len(ids) > 1:  # "Mã phiếu" beside "Mã hóa đơn": the column the orders use
-            ids = [column for column in ids if column in order_ids]
-        days = [column for column in header if _PAYMENT_DAY.match(fold(column))
-                or _PAYMENT_DAY.match(fold(re.sub(r"(?<=[a-z])(?=[A-Z])", " ", column)))]
-        if len(ids) == 1 and len(days) == 1:
-            found["payments"].append(Section(
-                table.path.name, table.name,
-                {ids[0]: "mã đơn", days[0]: "thời điểm thu", named["payment_amount"]: ""},
-                origin="header"))
-    if not (found["orders"] and found["payments"]):
+        days = [column for column in header if _PAYMENT_DAY.fullmatch(_header_words(column))]
+        if not days:
+            # On a listed receipt register, an otherwise unique date column can name
+            # the receipt date without the verb "thu". Do not pick among several dates.
+            days = [column for column in header if re.match(
+                r"^ngay(?: [a-z]+){1,2}$", _header_words(column))
+                and not re.search(r"\b(?:sinh|han|du kien|cap nhat|sua|don|ban|giao|huy)\b",
+                                  _header_words(column))]
+        if len(ids) > 1:
+            ids = [column for column in ids if column in context_ids
+                   or re.fullmatch(r"(?:ma|so) (?:don(?: hang)?|hoa don)", _header_words(column))]
+        if len(ids) != 1 or len(days) != 1:
+            continue
+        by_role["payments"].append(Section(
+            table.path.name, table.name,
+            {ids[0]: "mã đơn", days[0]: "thời điểm thu", named["payment_amount"]: ""},
+            origin="header.receipt"))
+    if not context_ids and not (by_role["orders"] and by_role["payments"]):
         return []
-    sections = []
-    for role in ("orders", "payments"):
-        if len({tuple(sorted(s.columns.items())) for s in found[role]}) != 1:
-            return []
-        sections.extend(found[role])
-    return sections
+    # Do not silently import an unrelated order table if the README already describes one.
+    roles = ("payments",) if context_ids else ("orders", "payments")
+    return [section for role in roles for section in by_role[role]
+            if len({tuple(sorted(s.columns.items())) for s in by_role[role]}) == 1]
+
+
+def _combined_sales_debt_columns(header: set[str]) -> dict[str, str]:
+    """Check the line and order anchors together; credit still uses the documented total."""
+    meanings = {"order_id": "mã đơn", "date": "ngày bán", "status": "trạng thái đơn",
+                "payment_method": "hình thức thanh toán", "channel": "kênh bán",
+                "customer_id": "mã khách", "customer_name": "tên khách",
+                "product_id": "mã hàng", "product_name": "tên hàng", "quantity": "số lượng"}
+    unique: dict[str, list[str]] = defaultdict(list)
+    for column in header:
+        field = header_field(column)
+        if field in meanings:
+            unique[field].append(column)
+    anchors = {"order_id", "date", "status", "payment_method", "quantity"}
+    if (not anchors <= unique.keys() or not unique.keys() & {"product_id", "product_name"}
+            or not unique.keys() & {"customer_id", "customer_name"}
+            or any(len(v) != 1 for v in unique.values())):
+        return {}
+    return {columns[0]: meanings[field] for field, columns in unique.items()}
+
+
+def _header_words(column: str) -> str:
+    return fold(re.sub(r"(?<=[a-z])(?=[A-Z])", " ", column))
+
+
+_DEBT_MONEY = frozenset({"payment_amount", "order_total", "closing_debt"})
 
 
 def _debt_references(readme: str) -> tuple[dict[str, str], tuple[str, ...]]:
-    """Column references from the README's explicit ``Công nợ`` convention."""
+    """Explicit money meanings in the debt paragraph or standalone README conventions."""
     fields: dict[str, str] = {}
     evidence: list[str] = []
+    in_conventions = active = False
     for line in readme.splitlines():
-        heading, separator, _description = line.partition(":")
-        if not separator or fold(heading).strip() != "cong no":
+        if line.startswith("## "):
+            in_conventions = "quy uoc" in fold(line[3:])
+            active = False
             continue
-        evidence.append(line.strip())
+        heading, sep, _ = line.partition(":")
+        debt_heading = bool(sep and fold(heading).strip() == "cong no")
+        if debt_heading:
+            active = True
+        elif not line.strip() or (re.match(r"^-\s+\*\*[^*]+\*\*:", line) and active):
+            active = False
+        if not (active or in_conventions):
+            continue
         matches = list(re.finditer(
             r"\*\*([^*]+)\*\*|`([^`]+)`|(?<![\w`*])([\wÀ-ỹ]+(?:\s+[\wÀ-ỹ]+)*\."
             r"[\wÀ-ỹ]+(?:\s+[\wÀ-ỹ]+)*)(?=\s+(?:là|la)\b)", line))
+        found = False
         for index, match in enumerate(matches):
             column = (match.group(1) or match.group(2) or match.group(3)).strip()
             if fold(column) == "cong no":
                 continue
             stop = matches[index + 1].start() if index + 1 < len(matches) else len(line)
-            meaning = fold(line[match.end():stop])
+            raw = line[match.end():stop]
+            if not active and not re.match(r"^\s*(?::|=|là\b|la\b)", raw, re.I):
+                continue
+            meaning = fold(raw)
             semantic = None
-            if "so tien tra lan do" in meaning:
+            if re.search(r"\bso tien (?:khach )?(?:da )?(?:tra|nop|thanh toan) (?:(?:o|trong) )?"
+                         r"(?:lan (?:do|nay)|moi lan)\b",
+                         meaning):
                 semantic = "payment_amount"
-            elif "so khach phai tra cho ca don" in meaning or "tong phai thu" in meaning:
+            elif re.search(r"\b(?:so (?:tien )?khach phai tra cho ca don|tong phai thu)\b",
+                           meaning):
                 semantic = "order_total"
-            elif "chua thu" in meaning or "con no cuoi" in meaning:
+            elif ("chua thu" in meaning and "cuoi" in meaning) or "con no cuoi" in meaning:
                 semantic = "closing_debt"
-            if semantic:
+            if semantic in _DEBT_MONEY:
                 previous = fields.get(column)
                 if previous and previous != semantic:
                     raise DebtSourceError("column_missing", "Debt convention is ambiguous",
                                           column=column)
                 fields[column] = semantic
+                found = True
+        if debt_heading or found:
+            evidence.append(line.strip())
     return fields, tuple(evidence)
 
 
 def _referenced_field(references: dict[str, str], section: Section,
                       column: str) -> str | None:
-    if column in references:
-        return references[column]
     column_key = fold(column)
+    direct = {semantic for reference, semantic in references.items()
+              if "." not in reference and fold(reference) == column_key}
     source_keys = {
         fold(section.sheet or ""),
         fold(section.file.rsplit("/", 1)[-1].rsplit(".", 1)[0]),
     }
-    candidates = set()
+    candidates = set(direct)
     for reference, semantic in references.items():
         if "." not in reference:
             continue
@@ -393,7 +435,7 @@ def _with_referenced_columns(catalog: Catalog, section: Section,
         tables = _matching_tables(catalog, section)
     except ReadmeSalesError:
         return section
-    header = {str(column) for table in tables for column in table.columns if column}
+    header = set.intersection(*(_header_names(table) for table in tables)) if tables else set()
     extra = {column: "" for column in sorted(header - section.columns.keys())
              if _referenced_field(references, section, column)}
     if not extra:
@@ -425,7 +467,8 @@ def _file_inventory(readme: str) -> dict[str, str]:
     in_files = False
     for line in readme.splitlines():
         if line.startswith("## "):
-            in_files = fold(line[3:]).strip() == "file"
+            name = fold(line[3:]).strip()
+            in_files = name == "file" or bool(re.fullmatch(r"danh sach (?:o|trong) (?:cac )?file rieng", name))
             continue
         if in_files:
             match = re.match(r"\s*-\s+`([^`]+)`(.*)", line)
@@ -878,8 +921,9 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
     references, readme_lines = _debt_references(catalog.readme)
     sections = parse_sections(catalog.readme)
     sections += _profile_sections(catalog, sections, references)
-    if references and not _documents_debt_money(catalog, sections, references):
-        sections += _header_debt_sections(catalog, sections, references)
+    if references:
+        sections += _header_debt_sections(catalog, sections, references,
+                                           listed_payments | files.keys())
     if not listed_payments and not _has_debt_hint(catalog, sections, references, readme_lines):
         complete, unresolved = _source_completeness(catalog, sections, files)
         if complete:
@@ -930,11 +974,18 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
     raw_orders: list[dict[str, Any]] = []
     seen_orders: dict[str, tuple] = {}
     order_cells: dict[int, tuple] = {}
+    merged_keys = {}
     duplicates_once = rule_line(table_rows(rulebook),
                                 "hai dong cua cung mot don giong nhau o moi o", "tinh mot lan")
     label_counts: Counter[str] = Counter()
     order_rows = list(_rows(catalog, roles["orders"], order_cells))
     eliminated = eliminated_labels({row.get("status") for *_, row in order_rows})
+    merged_sections = set()
+    for section, _ in order_schema:
+        semantics = {meaning_field(m) for m in section.columns.values()}
+        if semantics & {"product_id", "product_name"} and semantics & {
+                "quantity", "line_no", "amount"}:
+            merged_sections.add(section.label)
     for section, table_key, ordinal, row in order_rows:
         source = f"{table_key}#{ordinal}"
         if (_blank(row.get("order_day")) and _blank(row.get("status"))
@@ -948,12 +999,27 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
                   role="orders", source=source)
         order_id = str(row["order_id"]).strip()
         row_cells = order_cells.pop(id(row))
+        merged = section.label in merged_sections
+        if merged:
+            # Verify the full order projection, including the amount, on every product row.
+            money = {"order_total", "closing_debt", "paid_to_date"}
+            record_key = tuple(sorted((field,
+                _amount(value, field=field, source=source, multiplier=money_multiplier)
+                if field in money and not _blank(value) else _text(value))
+                for field, value in row.items()))
         if order_id in seen_orders:
+            if merged and merged_keys.get(order_id) == record_key:
+                label_counts["repeated_order_fields"] += 1
+                continue
             if duplicates_once and seen_orders[order_id] == row_cells:
                 label_counts["duplicate_order_rows"] += 1  # export duplicate (rulebook)
                 continue
-            raise DebtSourceError("key", "Order list repeats an order id", source=source)
+            reason = ("Merged sales rows disagree on order fields" if merged
+                      else "Order list repeats an order id")
+            raise DebtSourceError("key", reason, source=source)
         seen_orders[order_id] = row_cells
+        if merged:
+            merged_keys[order_id] = record_key
         state = order_state(row["status"]) or eliminated.get(normalize_label(row["status"]))
         if state is None:
             raise DebtSourceError("label", "Unknown order status", source=source,
@@ -1013,7 +1079,17 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
 
     payments: list[DebtPayment] = []
     zero_payments = 0
-    for section, table_key, ordinal, row in _rows(catalog, roles["payments"]):
+    payment_rows = list(_rows(catalog, roles["payments"]))
+    header_links: dict[str, list[bool]] = defaultdict(list)
+    for section, table_key, _, row in payment_rows:
+        if section.origin.startswith("header"):
+            header_links[table_key].append((_text(row.get("order_id")) or "") in seen_orders)
+    for table_key, links in header_links.items():
+        if sum(links) * 100 < len(links) * 95:
+            raise DebtSourceError("orphan", "Inferred receipt order-key overlap is below 95%",
+                                  source=table_key, matched=sum(links), receipts=len(links))
+    # Even above the shape-validation threshold, no orphan receipts may silently be dropped.
+    for section, table_key, ordinal, row in payment_rows:
         source = f"{table_key}#{ordinal}"
         _required(row, ("order_id", "payment_day", "payment_amount"),
                   role="payments", source=source)
@@ -1091,6 +1167,9 @@ def load_debt_ledger(catalog: Catalog, rulebook: str) -> DebtLedger:
             "payments_joined": len(payments),
             "zero_payments": zero_payments,
             "orphan_payments": 0,
+            **({"inferred_receipt_links": {"matched": sum(map(sum, header_links.values())),
+                                           "receipts": sum(map(len, header_links.values()))}}
+               if header_links else {}),
             "closing_debt_present": closing_column_present,
             "closing_debt_checked": checked,
             "closing_debt_mismatches": 0,

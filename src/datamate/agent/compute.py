@@ -50,8 +50,8 @@ from datamate.ingestion.purchases import (
     load_purchase_lines,
     load_purchases,
 )
-from datamate.ingestion.readme_sales import field_meanings, sqlite_staff_codes
-from datamate.ingestion.sales import Sale
+from datamate.ingestion.readme_sales import field_meanings, staff_codes
+from datamate.ingestion.sales import AMBIGUOUS_STATE, Sale
 from datamate.ingestion.source_names import filename_key
 from datamate.ingestion.stock import (
     StockItem,
@@ -276,7 +276,9 @@ def prepare_sales(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -
         return {"ok": False, "reason": str(loaded)}
     sales, source = loaded
     days = [s.day for s in sales]
+    ambiguous_days = [s.day for s in sales if s.status == AMBIGUOUS_STATE]
     return {"ok": True, "source": source,
+            "first_ambiguous_day": min(ambiguous_days).isoformat() if ambiguous_days else None,
             "data_first_day": min(days).isoformat() if days else None,
             "data_last_day": max(days).isoformat() if days else None}
 
@@ -316,7 +318,9 @@ def vocabulary(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -> d
         labels = {getattr(s, attribute) for s in sales if getattr(s, attribute)}
         result[f"{kind}_terms"] = label_terms(labels, field_meanings(catalog.readme, attribute),
                                               kind)
-    staff = sorted(sqlite_staff_codes(catalog).items())
+    reserved = {name for row in sales for name in (row.product_name, row.product_id,
+                row.product_group, row.customer_group) if name}
+    staff = sorted(staff_codes(catalog, reserved_names=reserved).items())
     if staff:
         result["staff_names"] = [name for name, _ in staff]
         result["staff_codes"] = [code for _, code in staff]
@@ -802,6 +806,9 @@ def _answer_rule_rank(cache: dict[str, Any], catalog: Catalog, plan: Plan, ruleb
             if not prepared["ok"]:
                 return Candidate(reason=prepared["reason"], evidence=evidence)
             sales, source = cache["sales"]
+            uncertain = _uncertain_order_answer(sales, plan, rulebook, evidence)
+            if uncertain is not None:
+                return uncertain
             if source.get("grain") == "service_tickets":
                 return Candidate(reason="Service tickets document only order revenue and counts",
                                  evidence=evidence)
@@ -1181,6 +1188,9 @@ def _answer_net_purchase(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return Candidate(reason=str(book), evidence=evidence)
     if not prepare_sales(cache, catalog, rulebook)["ok"]:
         return Candidate(reason="Sales records do not load", evidence=evidence)
+    uncertain = _uncertain_order_answer(cache["sales"][0], plan, rulebook, evidence)
+    if uncertain is not None:
+        return uncertain
     first = min(line.day for line in book.lines)
     last = _coverage_day(catalog.readme) or max(line.day for line in book.lines)
     evidence.update(purchase_source=book.source,
@@ -1632,13 +1642,72 @@ def daily_sale_price(sales: list[Sale], day: date, unit: str) -> Decimal | None:
     return next(iter(prices)) if len(prices) == 1 else None
 
 
+def _ambiguous_state_affects(sales: list[Sale], plan: Plan, rulebook: str) -> bool:
+    """A sales-dependent plan may use a disputed order only if its state is immaterial."""
+    if plan.intent == "daily_sale_price":
+        return False  # reads price cells for the day, irrespective of order state
+    windows = list(plan.periods) or [(plan.start, plan.end)]
+    if plan.compare_start:
+        windows.append((plan.compare_start, plan.compare_end))
+    if plan.intent == "unsold_count":
+        # An order before the period can establish that a product has been sold before.
+        windows = [(date.min, plan.end)]
+    rows = [s for s in sales if s.status == AMBIGUOUS_STATE
+            and any(start <= s.day <= end for start, end in windows)]
+    if not rows:
+        return False
+    # A share uses the whole-shop denominator. A shift comparison uses both shifts.
+    if plan.comparison != "share":
+        for condition in plan.filters:
+            name, value = condition.field, condition.value
+            if name == "product":
+                codes = {s.product_id for s in select_product(sales, value) if s.product_id}
+                rows = [s for s in rows if s.product_id in codes
+                        or s.product_id is None or s in select_product([s], value)]
+            elif name == "size":
+                rows = [s for s in rows if not s.product_name or select_size([s], value)]
+            elif name == "staff":
+                rows = [s for s in rows if not s.staff_id or select_staff([s], value)]
+            elif name in GROUP_FIELDS:
+                rows = [s for s in rows if getattr(s, name) is None
+                        or select_group([s], name, value)]
+            elif name in PAYMENT_FIELDS:
+                attribute = PAYMENT_FIELDS[name]
+                if len(plan.filters) == 1:
+                    rows = [s for s in rows if not getattr(s, attribute)
+                            or select_label([s], attribute, value)]
+                # Paired labels are alternatives; keep all uncertain orders.
+            elif name == "shift" and not plan.comparison:
+                limits = next(((start, end) for label, start, end in read_rules(rulebook).shifts
+                               if label == value), None)
+                if limits is not None:
+                    rows = [s for s in rows if s.minute is None
+                            or select_shift([s], *limits)]
+    if not rows:
+        return False
+    if (plan.intent == "revenue" and not plan.shape and not plan.comparison
+            and not plan.threshold and all(f.field not in DRUG_FIELDS for f in plan.filters)):
+        # A row with zero revenue cannot change the simple total.
+        return any(s.amount for s in rows)
+    return True
+
+
+def _uncertain_order_answer(sales: list[Sale], plan: Plan, rulebook: str,
+                            evidence: dict[str, Any]) -> Candidate | None:
+    if _ambiguous_state_affects(sales, plan, rulebook):
+        return Candidate(reason="An order with an ambiguous status can change the answer",
+                         evidence={**evidence, "state_ambiguous": True})
+    return None
+
+
 def answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                 rulebook: str = "", specs: tuple[RuleSpec, ...] | None = None) -> Candidate:
     """Answer a plan; an abstain becomes ``unanswerable`` only when the rulebook's absence
     row applies and the business records no trace of what the intent needs (absence.py).
     ``specs``: the agent's enabled rule specs (model-filled ones included) for rule_rank."""
     candidate = _answer_plan(cache, catalog, plan, rulebook, specs)
-    if candidate.type != "abstain" or plan.intent not in INTENT_CONCEPT:
+    if (candidate.type != "abstain" or candidate.evidence.get("state_ambiguous")
+            or plan.intent not in INTENT_CONCEPT):
         return candidate
     rule = _absence_rule(rulebook)
     concept = missing_concept(catalog, plan.intent) if rule else ""
@@ -1690,6 +1759,9 @@ def _answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         "inputs": {"tables": source["tables"], "sales_rows": source["sales_rows"],
                    "data_first_day": prepared["data_first_day"],
                    "data_last_day": prepared["data_last_day"]}}
+    uncertain = _uncertain_order_answer(sales, plan, rulebook, evidence)
+    if uncertain is not None:
+        return uncertain
     if source.get("grain") == "service_tickets" and (
             plan.intent not in {"revenue", "order_count"} or plan.filters or plan.threshold):
         return Candidate(reason="Service tickets document only order revenue and counts",

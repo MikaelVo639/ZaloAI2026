@@ -25,8 +25,13 @@ businesses it changed; ``<name>.answers.jsonl`` beside it holds their train refe
   written in a notes column whose README lists its possible states. Some notes mention
   a state that this column does not record.
 - ``order_adjustments``: add two documented non-merchandise rows to an existing order.
-- ``service_tickets``: project an order ledger onto dates, states and ticket totals, retaining
-  only plain revenue and order-count questions.
+- ``ambiguous_status_in_notes``: also inject ambiguous notes on a few orders in different months.
+- ``service_tickets``: store ticket totals and status on monthly sheets below a title,
+  with extra description columns; retain plain revenue and order-count questions.
+- ``debt_in_convention``: document money columns only in conventions, and repeat order
+  facts on two product lines. ``debt_inconsistent_total`` changes one of the totals.
+- ``staff_catalogue``: give the staff table and columns new documented names.
+  ``staff_duplicate_names`` also adds a conflicting code for each name.
 - ``short_names``: every other product of a sales line list is written by its initials; a
   ``GhiTat.csv`` list gives the full name of each short form, as the README then says.
 - ``unknown_export``: a shop whose sales come from a POS / sales-software export no longer
@@ -67,7 +72,9 @@ from datamate.semantics.text import fold
 VARIANTS = ("monthly_files", "duplicate_orders", "summary_rows", "no_column_docs",
             "status_labels", "repeated_headers", "cost_convention_only", "catalogue_stock_column",
             "unknown_export", "readme_paraphrase", "status_in_notes", "short_names",
-            "order_adjustments", "service_tickets")
+            "order_adjustments", "service_tickets", "ambiguous_status_in_notes",
+            "debt_in_convention", "debt_inconsistent_total", "staff_catalogue",
+            "staff_duplicate_names")
 STATUS_LABELS = {"tra hang": "Khách trả", "dang giao": "Đang ship"}
 DUPLICATE_EVERY = 25
 FAMILY_NOTE = "Các file `{template}` là dữ liệu chia theo tháng, mỗi tháng một file, cùng cột."
@@ -520,7 +527,7 @@ def _rewrite_tables(source: Path, destination: Path, readme: str,
     (destination / "README.md").write_text(readme, encoding="utf-8")
 
 
-def status_in_notes(source: Path, destination: Path) -> bool:
+def status_in_notes(source: Path, destination: Path, *, ambiguous: bool = False) -> bool:
     """Write ``destination`` as ``source`` with the order state of its one-table sales line
     lists written in a notes column; False when no such list has a status column whose
     every label is a known state."""
@@ -553,9 +560,27 @@ def status_in_notes(source: Path, destination: Path) -> bool:
         actual = set(states) & _NOTE_STATES.keys()
         declared = actual or {"huy"}
         other = next((v for k, v in _OTHER_NOTES.items() if k not in declared), "Đổi size")
-        for row, state in zip(records, states):
+        disputed: set[int] = set()
+        if ambiguous and {"date", "order_id"} <= section.fields.keys():
+            date_column = section.fields["date"]
+            order_column = section.fields["order_id"]
+            by_month = {}
+            for i, (row, state) in enumerate(zip(records, states)):
+                if state != "hoan thanh" or not row.get(order_column) or not row.get(date_column):
+                    continue
+                try:
+                    day = parse_day(row[date_column], table.name)
+                except (TypeError, ValueError):
+                    continue
+                by_month.setdefault((day.year, day.month), i)
+            disputed.update(i for k, i in enumerate(by_month.values()) if k in {0, 3, 7})
+        negated = {"huy": "Khách chưa huỷ", "tra hang": "Khách chưa trả",
+                   "dang giao": "Khách báo chưa giao"}
+        for i, (row, state) in enumerate(zip(records, states)):
             row.pop(column, None)
             row[note] = other if state == "hoan thanh" else _NOTE_TEXT.get(state)
+            if i in disputed:
+                row[note] = negated[min(declared)]
             header += [name for name in row if name not in header]
             rows.append(row)
         rewritten[table.path] = (table, header, rows)
@@ -576,6 +601,10 @@ def status_in_notes(source: Path, destination: Path) -> bool:
         text = text.replace(heading + "\n", f"{heading}\n- **Ghi chú đơn**: {notes[label][1]}\n", 1)
     _rewrite_tables(source, destination, text, rewritten)
     return True
+
+
+def ambiguous_status_in_notes(source: Path, destination: Path) -> bool:
+    return status_in_notes(source, destination, ambiguous=True)
 
 
 def _initials(name: str) -> str:
@@ -698,19 +727,117 @@ def service_tickets(source: Path, destination: Path) -> bool:
     if not {status for _, status, _ in orders.values()} <= statuses.keys():
         return False
     destination.mkdir(parents=True)
-    with (destination / "tickets.csv").open("x", encoding="utf-8", newline="") as stream:
-        writer = csv.writer(stream)
-        writer.writerow(("Ngày phiếu", "Tổng", "Kết quả"))
-        for day, status, amount in orders.values():
-            writer.writerow((day.isoformat(), str(amount), statuses[status]))
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    sheets = {}
+    for day, status, amount in orders.values():
+        month = day.strftime("T%m-%Y")
+        if month not in sheets:
+            sheet = sheets[month] = workbook.create_sheet(month)
+            sheet.append([])
+            sheet.append(["Sổ tiếp nhận", month])
+            sheet.append(["Ngày phiếu", "Tổng", "Kết quả", "Hẹn lấy", "Việc làm", "Ghi chú"])
+        sheets[month].append([day.isoformat(), str(amount), statuses[status], "Khi xong",
+                              "Kiểm tra", "Gọi trước khi khách tới"])
+    workbook.save(destination / "tickets.xlsx")
     coverage = "\n".join(line for line in readme.splitlines()
                           if "du lieu co den het" in fold(line))
     (destination / "README.md").write_text(
-        "## File\n- `tickets.csv` (csv)\n\n## Cột trong `tickets.csv`\n"
+        "## File\n- `tickets.xlsx` (xlsx)\n\n## Cột trong `tickets.xlsx`\n"
         "- **Ngày phiếu**: ngày bán; mỗi dòng là một phiếu dịch vụ\n"
         "- **Tổng**: tổng tiền phiếu; trước giảm giá cả đơn, không gồm phí giao, không gồm thuế\n"
-        "- **Kết quả**: trạng thái đơn\n\n## Quy ước\n" + coverage + "\n", encoding="utf-8")
+        "- **Kết quả**: trạng thái đơn\n"
+        "- **Hẹn lấy**: ngày giao dự kiến, để mô tả lịch hẹn\n"
+        "- **Việc làm**: nội dung thực hiện\n- **Ghi chú**: lời nhắc liên hệ\n"
+        "\n## Quy ước\n" + coverage + "\n", encoding="utf-8")
     return True
+
+
+def debt_in_convention(source: Path, destination: Path, *, inconsistent: bool = False) -> bool:
+    """Store TRAIN orders with line grain and list the receipts only in the inventory."""
+    from datamate.ingestion.debt import DebtSourceError, load_debt_ledger
+
+    catalog = build_catalog(source.parent, source.name)
+    book = (source.parents[1] / "rulebook.md").read_text(encoding="utf-8-sig")
+    try:
+        ledger = load_debt_ledger(catalog, book)
+    except DebtSourceError:
+        return False
+    if not ledger.orders or not ledger.payments:
+        return False
+    destination.mkdir(parents=True)
+    # On coded shops test the paired header route, including a receipt date with no word
+    # "thu"; on name-only shops keep some order meanings explicitly documented.
+    code_header = ["Mã khách"] if ledger.uses_customer_codes else []
+    header = ["Mã đơn", "Ngày bán", "Trạng thái", "Tổng phiếu", "Hình thức thanh toán", "Kênh",
+              *code_header, "Tên khách", "Tên hàng", "Số lượng"]
+    orders_doc = ("" if ledger.uses_customer_codes else (
+        "## Cột trong `register.csv`\n"
+        "- **Mã đơn**: mã đơn\n- **Ngày bán**: ngày đặt\n- **Trạng thái**: trạng thái đơn\n"
+        "- **Hình thức thanh toán**: hình thức thanh toán\n- **Kênh**: kênh bán\n"
+        "- **Tên khách**: tên khách\n- **Tên hàng**: tên hàng\n- **Số lượng**: số lượng\n"))
+    (destination / "README.md").write_text(
+        "## File\n- `register.csv`\n\n## Danh sách ở file riêng\n- `receipts.csv`\n\n"
+        + orders_doc + "\n## Quy ước\n- **Tổng phiếu**: số tiền khách phải trả cho cả đơn.\n"
+        "- **Tiền lần thu** là số tiền khách nộp ở lần đó.\n"
+        f"- Dữ liệu có đến hết {ledger.last_day:%d/%m/%Y}.\n", encoding="utf-8")
+    with (destination / "register.csv").open("x", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(header)
+        for i, order in enumerate(ledger.orders):
+            channel = "Shopee" if order.excluded == "marketplace" else "Store"
+            code = [order.customer_id] if ledger.uses_customer_codes else []
+            fields = [order.order_id, order.day.isoformat(), order.state, order.total,
+                      order.payment_method, channel, *code, order.customer_name]
+            writer.writerow([*fields, "Món A", 1])
+            if i == 0:
+                if inconsistent:
+                    fields[3] += 1
+                writer.writerow([*fields, "Món B", 2])
+    with (destination / "receipts.csv").open("x", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["Mã đơn", "Ngày nhận", "Tiền lần thu", "Lời nhắc"])
+        writer.writerows((p.order_id, p.day.isoformat(), p.amount, "đã lưu")
+                         for p in ledger.payments)
+    return True
+
+
+def debt_inconsistent_total(source: Path, destination: Path) -> bool:
+    return debt_in_convention(source, destination, inconsistent=True)
+
+
+def staff_catalogue(source: Path, destination: Path, *, duplicate: bool = False) -> bool:
+    """Rename the documented staff relation without changing any order's employee code."""
+    import sqlite3
+    from datamate.ingestion.readme_sales import sqlite_staff_codes
+
+    catalog = build_catalog(source.parent, source.name)
+    if not sqlite_staff_codes(catalog):
+        return False
+    table = next(t for t in catalog.tables if t.name == "nhan_vien" and t.path.suffix == ".sqlite")
+    _link_tree(source, destination)
+    path = destination / table.path.name
+    path.unlink()
+    shutil.copy2(table.path, path)
+    with sqlite3.connect(path) as connection:
+        connection.execute("ALTER TABLE nhan_vien RENAME TO bang_ca")
+        connection.execute("ALTER TABLE bang_ca RENAME COLUMN MaNhanVien TO KyHieu")
+        connection.execute("ALTER TABLE bang_ca RENAME COLUMN TenGoi TO HoTen")
+        if duplicate:
+            connection.execute('INSERT INTO bang_ca (KyHieu, HoTen) '
+                               "SELECT 'AMBIG-' || KyHieu, HoTen FROM bang_ca")
+    readme = destination / "README.md"
+    readme.unlink()
+    readme.write_text(catalog.readme.replace("`nhan_vien`", "`bang_ca`") + (
+        f"\n## Cột trong `{table.path.name}`, sheet `bang_ca`\n"
+        "- **KyHieu**: mã nhân viên\n- **HoTen**: tên nhân viên\n"), encoding="utf-8")
+    return True
+
+
+def staff_duplicate_names(source: Path, destination: Path) -> bool:
+    return staff_catalogue(source, destination, duplicate=True)
 
 
 _BUILDERS = {"monthly_files": monthly_files, "duplicate_orders": duplicate_orders,
@@ -720,7 +847,9 @@ _BUILDERS = {"monthly_files": monthly_files, "duplicate_orders": duplicate_order
              "catalogue_stock_column": catalogue_stock_column, "unknown_export": unknown_export,
              "readme_paraphrase": readme_paraphrase, "status_in_notes": status_in_notes,
              "short_names": short_names, "order_adjustments": order_adjustments,
-             "service_tickets": service_tickets}
+             "service_tickets": service_tickets, "ambiguous_status_in_notes": ambiguous_status_in_notes,
+             "debt_in_convention": debt_in_convention, "debt_inconsistent_total": debt_inconsistent_total,
+             "staff_catalogue": staff_catalogue, "staff_duplicate_names": staff_duplicate_names}
 
 
 def build_variant(train: Path, output: Path, name: str) -> dict[str, Any]:
@@ -743,15 +872,25 @@ def build_variant(train: Path, output: Path, name: str) -> dict[str, Any]:
     questions = [json.loads(line) for line in
                  (train / "questions.jsonl").read_text(encoding="utf-8").splitlines() if line]
     kept = [q for q in questions if q["business_id"] in changed]
-    if name == "service_tickets":
+    if name in {"service_tickets", "debt_in_convention", "debt_inconsistent_total"}:
+        from datamate.agent.compute import DEBT_INTENTS
         from datamate.contracts import Question
         from datamate.semantics.planner import plan_question
         from datamate.semantics.rules import read_rules
 
         rules = read_rules((train / "rulebook.md").read_text(encoding="utf-8"))
+        intents = ({"revenue", "order_count"} if name == "service_tickets"
+                   else DEBT_INTENTS | {"top_debt_customers"})
         kept = [q for q in kept if (plan := plan_question(Question(
             q["id"], q["business_id"], q["question"], date.fromisoformat(q["as_of_date"])),
-            rules)) and plan.intent in {"revenue", "order_count"} and not plan.filters]
+            rules)) and plan.intent in intents and not plan.filters]
+    if name in {"staff_catalogue", "staff_duplicate_names"}:
+        from datamate.ingestion.readme_sales import sqlite_staff_codes
+
+        staff = {business: sqlite_staff_codes(build_catalog(train / "data", business))
+                 for business in changed}
+        kept = [q for q in kept if any(f" nhan vien {value} " in f" {fold(q['question'])} "
+                                     for value in staff[q["business_id"]])]
     answers = {json.loads(line)["id"]: line for line in
                (train / "answers.jsonl").read_text(encoding="utf-8").splitlines() if line}
     (split / "questions.jsonl").write_text(

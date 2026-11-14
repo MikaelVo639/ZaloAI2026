@@ -16,7 +16,9 @@ from pathlib import Path
 
 from datamate.agent.baseline import BaselineAgent
 from datamate.contracts import BusinessContext, Question, Split
-from datamate.evaluation.robustness import MODEL_PERTURBATIONS, _link_tree, perturb
+from datamate.evaluation.robustness import (
+    MODEL_PERTURBATIONS, REPORT_BENCHMARK_TYPES, _link_tree, perturb,
+)
 from datamate.evaluation.scorer import evaluate
 from datamate.evaluation.validation import validate_submission
 from datamate.ingestion import build_catalog
@@ -67,9 +69,10 @@ def _choose(candidates: dict[str, dict[tuple[str, str], list[Question]]],
     return chosen
 
 
-def _scan_business(split: Split, group: tuple[str, list[Question]]) -> tuple:
+def _scan_business(split: Split, kinds: tuple[str, ...], value_ids: frozenset[str],
+                   group: tuple[str, list[Question]]) -> tuple:
     business, questions = group
-    counts = {kind: Counter() for kind in MODEL_PERTURBATIONS}
+    counts = {kind: Counter() for kind in kinds}
     lost: list[tuple[str, str, Question]] = []
     agent = BaselineAgent()
     try:
@@ -78,7 +81,9 @@ def _scan_business(split: Split, group: tuple[str, list[Question]]) -> tuple:
             plan = agent._plan(question, context)
             if plan is None:
                 continue
-            for kind in MODEL_PERTURBATIONS:
+            for kind in kinds:
+                if kind == "yes_no_wording" and question.id not in value_ids:
+                    continue
                 changed = perturb(kind, question.question, f"{kind}:{question.id}")
                 if changed is None:
                     continue
@@ -97,8 +102,9 @@ def _scan_business(split: Split, group: tuple[str, list[Question]]) -> tuple:
     return counts, lost
 
 
-def _scan(split: Split, by_business: dict[str, list[Question]], workers: int):
-    scan = partial(_scan_business, split)
+def _scan(split: Split, by_business: dict[str, list[Question]], workers: int,
+          kinds: tuple[str, ...], value_ids: frozenset[str]):
+    scan = partial(_scan_business, split, kinds, value_ids)
     groups = sorted(by_business.items())
     if workers == 1:
         yield from map(scan, groups)
@@ -108,7 +114,7 @@ def _scan(split: Split, by_business: dict[str, list[Question]], workers: int):
 
 
 def build(data_dir: Path, original: Path, output: Path, limit: int = 480, *,
-          workers: int = 1) -> dict:
+          workers: int = 1, report_suite: bool = False) -> dict:
     if limit <= 0:
         raise ValueError("Benchmark limit must be positive")
     if workers <= 0:
@@ -127,21 +133,36 @@ def build(data_dir: Path, original: Path, output: Path, limit: int = 480, *,
     if refs.keys() != questions.keys():
         raise ValueError("Training questions and references differ")
     validate_submission(predictions, set(refs), require_complete=True)
+    excluded_types = {"unanswerable", "boolean"} if report_suite else {"unanswerable"}
     eligible = {row["id"] for row in evaluate(predictions, list(refs.values()))["outcomes"]
-                if row["outcome"] == "correct" and row["reference"]["type"] != "unanswerable"}
+                if row["outcome"] == "correct" and row["reference"]["type"] not in excluded_types}
     by_business = defaultdict(list)
     for question in split.questions:
         if question.id in eligible:
             by_business[question.business_id].append(question)
 
-    buckets = {kind: defaultdict(list) for kind in MODEL_PERTURBATIONS}
-    counts = {kind: Counter() for kind in MODEL_PERTURBATIONS}
-    for report, lost in _scan(split, by_business, workers):
+    kinds = REPORT_BENCHMARK_TYPES if report_suite else MODEL_PERTURBATIONS
+    buckets = {kind: defaultdict(list) for kind in kinds}
+    counts = {kind: Counter() for kind in kinds}
+    value_ids = frozenset(key for key, row in refs.items() if row["type"] in {"number", "string"})
+    for report, lost in _scan(split, by_business, workers, kinds, value_ids):
         for kind, tally in report.items():
             counts[kind].update(tally)
         for kind, intent, question in lost:
             buckets[kind][(intent, question.business_id)].append(question)
-    chosen = _choose(buckets, limit)
+    if report_suite:
+        # Different phrasings of the same original can be compared across the groups;
+        # assign a distinct evaluation ID without using it to infer anything.
+        chosen = []
+        for kind in kinds:
+            applicable = counts[kind]["applicable"]
+            if not applicable or 100 * counts[kind]["lost"] < 95 * applicable:
+                raise ValueError(f"{kind}: fewer than 95% lost their original plan: {dict(counts[kind])}; "
+                                 f"all groups: {counts}")
+            chosen.extend((kind, intent, q) for intent, q in list(_spread(buckets[kind]))[:limit])
+        print({kind: dict(count) for kind, count in counts.items()}, file=sys.stderr)
+    else:
+        chosen = _choose(buckets, limit)
     if not chosen:
         raise ValueError("No correct training questions lost their plan under these variants")
     selected_split = output / "split"
@@ -151,18 +172,21 @@ def build(data_dir: Path, original: Path, output: Path, limit: int = 480, *,
         shutil.copy2(split.root / file, selected_split / file)
     for business in sorted({question.business_id for _, _, question in chosen}):
         _link_tree(split.root / "data" / business, data / business)
+    picked = [(f"{kind}:{q.id}" if report_suite else q.id, kind, intent, q)
+              for kind, intent, q in chosen]
     write_jsonl(selected_split / "questions.jsonl", (
-        {**questions[q.id], "question": q.question} for _, _, q in chosen
-    ))
-    write_jsonl(output / "answers.jsonl", (refs[q.id] for _, _, q in chosen))
+        {**questions[q.id], "id": case_id, "question": q.question}
+        for case_id, _, _, q in picked))
+    write_jsonl(output / "answers.jsonl", (
+        {**refs[q.id], "id": case_id} for case_id, _, _, q in picked))
     write_jsonl(output / "cases.jsonl", (
-        {"id": q.id, "business_id": q.business_id, "variant": kind, "intent": intent}
-        for kind, intent, q in chosen
-    ))
+        {"id": case_id, "business_id": q.business_id, "variant": kind, "intent": intent,
+         **({"train_id": q.id} if report_suite else {})}
+        for case_id, kind, intent, q in picked))
     report = {
         "scorer": "LOCAL PROXY", "questions": len(chosen),
         "perturbations": {kind: {**counts[kind], "selected": sum(k == kind for k, _, _ in chosen)}
-                          for kind in MODEL_PERTURBATIONS},
+                          for kind in kinds},
         "by_intent": dict(Counter(intent for _, intent, _ in chosen)),
         "by_business": dict(Counter(q.business_id for _, _, q in chosen)),
     }
@@ -263,6 +287,8 @@ def main() -> int:
     builder.add_argument("--output-dir", type=Path, required=True)
     builder.add_argument("--original", type=Path, default=Path("outputs/runs/train-ref/submission.jsonl"))
     builder.add_argument("--limit", type=int, default=480)
+    builder.add_argument("--report-suite", action="store_true",
+                         help="four report suites; --limit is the cap per suite")
     builder.add_argument("--workers", type=int, default=4, help="parallel business scans")
     sampler = commands.add_parser("code-sample",
                                   help="original TRAIN questions for the model calculation alone")
@@ -276,7 +302,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "build":
         report = build(args.data_dir, args.original, args.output_dir, args.limit,
-                       workers=args.workers)
+                       workers=args.workers, report_suite=args.report_suite)
     elif args.command == "code-sample":
         report = code_sample(args.data_dir, args.output_dir, args.limit)
     else:

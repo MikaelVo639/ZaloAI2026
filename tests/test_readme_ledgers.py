@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from datamate.agent.baseline import BaselineAgent
 from datamate.agent.compute import answer_plan
-from datamate.contracts import BusinessContext, Plan, Question, Split
+from datamate.contracts import BusinessContext, Filter, Plan, Question, Split
 from datamate.ingestion.catalog import build_catalog
 from datamate.ingestion.readme_sales import (
     ReadmeSalesError,
@@ -18,6 +18,7 @@ from datamate.ingestion.readme_sales import (
     note_state,
     parse_day,
     sqlite_staff_codes,
+    staff_codes,
 )
 from test_ingestion_readme_sales import RULEBOOK, _Shop
 
@@ -128,8 +129,48 @@ class LedgerTests(_Shop):
                          ["cancelled", "valid", "valid", "valid"])
         rows[2][-1] = "Đang giao"  # order 0 has notes naming two documented states
         catalog = self.shop(readme, {"so.csv": rows, "tat.csv": SHORT})
-        with self.assertRaisesRegex(ReadmeSalesError, "STATUS_AMBIGUOUS"):
-            load_readme_sales(catalog, RULEBOOK)
+        sales, _, _ = load_readme_sales(catalog, RULEBOOK)
+        self.assertEqual({s.status for s in sales if s.order_id == "0"}, {"state_ambiguous"})
+
+    def test_only_sales_answers_affected_by_an_ambiguous_order_are_withheld(self):
+        readme = LEDGER.replace("huỷ hoặc trả lại", "huỷ hoặc đang giao")
+        rows = ledger(("",))
+        rows[1][-1] = "Chưa giao"
+        rows[2][2] = "TX"
+        catalog = self.shop(readme, {"so.csv": rows, "tat.csv": SHORT})
+        early, later = date(2026, 1, 1), date(2026, 1, 2)
+        cache = {}
+        for plan, want in (
+            (Plan("revenue", early, early), None),
+            (Plan("order_count", early, early), None),
+            (Plan("cancel_count", early, early), None),
+            (Plan("revenue", later, later), 40000),
+            (Plan("revenue", early, later, filters=(Filter("product", "Bánh mì"),)), 10000),
+            (Plan("revenue", early, later, filters=(Filter("product", "Trà xanh"),)), None),
+        ):
+            with self.subTest(plan=plan):
+                candidate = answer_plan(cache, catalog, plan, RULEBOOK)
+                self.assertEqual(candidate.type, "number" if want is not None else "abstain")
+                self.assertEqual(candidate.answer, want)
+                if want is None:
+                    self.assertTrue(candidate.evidence["state_ambiguous"])
+
+    def test_service_ledger_ignores_extra_descriptions_and_reads_every_month(self):
+        readme = TICKETS.replace("register.csv", "register.xlsx").replace("(csv)", "(xlsx)")
+        readme = readme.replace("## Quy ước", "- **Hẹn**: ngày giao dự kiến\n"
+                               "- **Việc**: mô tả tự do\n\n## Quy ước")
+        def records(day, amount):
+            return [[], ["Sổ thử", "tiêu đề"], ["Ngày", "Giá", "Hẹn", "Việc"],
+                    [day, amount, "gọi sau", "kiểm tra"]]
+        sheets = {"T01-2026": records("10/01/2026", 40000),
+                  "T02-2026": records("11/02/2026", 33000)}
+        catalog = self.shop(readme, {"register.xlsx": sheets})
+        sales, _, _ = load_readme_sales(catalog, GROSS_RULEBOOK)
+        self.assertEqual(sum(s.amount for s in sales), 73000)
+        sheets["T02-2026"][2][1] = "Cột tiền lạ"
+        catalog = self.shop(readme, {"register.xlsx": sheets})
+        with self.assertRaisesRegex(ReadmeSalesError, "HEADER_NOT_FOUND"):
+            load_readme_sales(catalog, GROSS_RULEBOOK)
 
     def test_documented_adjustments_are_neither_revenue_nor_products(self):
         readme = LEDGER.replace("ở file tat.csv)", "ở file tat.csv); không phải mặt hàng: "
@@ -232,6 +273,14 @@ class LedgerTests(_Shop):
         with self.assertRaises(ReadmeSalesError) as caught:
             load_readme_sales(catalog, RULEBOOK)
         self.assertEqual(caught.exception.code, "AMOUNT_UNVERIFIED")
+
+    def test_documented_staff_catalogue_rejects_duplicates_and_entity_collisions(self):
+        readme = LEDGER + ("\n## Cột trong `team.csv`\n"
+                          "- **Số sổ**: mã nhân viên\n- **Thẻ**: tên nhân viên\n")
+        rows = [["Số sổ", "Thẻ"], ["A", "Vũ Bích"], ["B", "Trà xanh"],
+                ["C", "Hà Yến"], ["D", "Ha Yen"], ["E", "An Vân"], ["E", "An Lan"]]
+        catalog = self.shop(readme, {"team.csv": rows, "so.csv": ledger(), "tat.csv": SHORT})
+        self.assertEqual(staff_codes(catalog, reserved_names=["Trà xanh"]), {"vu bich": "A"})
 
     def test_total_and_note_rows_in_the_date_column_are_skipped(self):
         rows = [*ledger(), ["Cộng tháng 1", "", "", "", "", "960000", ""],

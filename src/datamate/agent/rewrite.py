@@ -633,24 +633,28 @@ def _rejected_messages(messages: list[dict[str, str]], rewrite: str,
 SPEC_MAX_NEW_TOKENS = 320  # one rule spec JSON
 
 
-def parse_rewrite(text: str) -> str | None:
+def _parse_rewrite(text: str) -> tuple[str | None, str]:
     lines = [line.strip() for line in str(text).splitlines() if line.strip()]
     if not lines:
-        return None
-    # A model that echoes "Câu hỏi: …" before "Viết lại: …" restates on the later line.
+        return None, "rong"
     labelled = [line for line in lines if re.match(r"(?:viết lại|viet lai)\s*:", line, re.I)]
     line = labelled[0] if labelled else lines[0]
-    # "Câu hỏi: … Viết lại: …" echoed on one line: the restatement follows the label.
     inline = re.search(r"\b(?:viết lại|viet lai)\s*:\s*(.+)$", line, re.IGNORECASE)
     if inline and re.match(r"(?:câu hỏi|cau hoi)\s*:", line, re.IGNORECASE):
         line = inline.group(1)
     if re.match(r"(?:câu hỏi|cau hoi)\s*:", line, re.IGNORECASE):
-        return None
+        return None, "lap_lai"
     line = re.sub(r"^(?:viết lại|viet lai)\s*:\s*", "", line, flags=re.IGNORECASE)
     line = line.strip().strip("`\"'“”").strip()
-    if not line or UNSURE in line:
-        return None
-    return line
+    if not line:
+        return None, "rong"
+    if UNSURE in line:
+        return None, "khong_ro"
+    return line, "khong_doc"  # provisional until the guard and planner run
+
+
+def parse_rewrite(text: str) -> str | None:
+    return _parse_rewrite(text)[0]
 
 
 # Rewrite failures after which the model calculation is tried (never model or data failures).
@@ -729,13 +733,14 @@ class RewriteAgent(LocalPlanAgent):
                 max_input_tokens=self.max_input_tokens, max_new_tokens=self.max_new_tokens)
             attempt["execution"] = generated.execution()
             if not generated.ok:
+                attempt["outcome"] = "loi_thuc_thi"
                 if generated.timed_out or not self.planner_worker.alive:
                     self._model_error = Candidate(reason="Rewrite model stopped after worker failure",
                                                   evidence=dict(evidence))
                 return Candidate(reason=f"Rewrite failed: {generated.error}", evidence=evidence)
             attempt["model_output"] = generated.value
-            rewrite = parse_rewrite(generated.value.get("text", ""))
-            attempt["rewrite"] = rewrite
+            rewrite, outcome = _parse_rewrite(generated.value.get("text", ""))
+            attempt.update(rewrite=rewrite, outcome=outcome)
             if rewrite is None:
                 if prior_rejection is not None:
                     return prior_rejection
@@ -745,7 +750,7 @@ class RewriteAgent(LocalPlanAgent):
                         else "Rewrite model was unsure")
             rejected = check_rewrite(asked, rewrite, names)
             if rejected:
-                attempt["rejected"] = rejected
+                attempt.update(rejected=rejected, outcome="bi_chan")
                 if not self.retry_rejected or retry == self.rewrite_retries:
                     return rejected
                 attempt.update(vote=vote, retry=retry)
@@ -757,6 +762,7 @@ class RewriteAgent(LocalPlanAgent):
             restated = Question(question.id, question.business_id, rewrite, question.as_of_date)
             plan = self._plan(restated, context)
             if plan is not None:
+                attempt["outcome"] = "lap_duoc"
                 return plan
             if retry == self.rewrite_retries:
                 return "Grammar cannot plan the rewrite"
@@ -805,6 +811,10 @@ class RewriteAgent(LocalPlanAgent):
             return Candidate(reason="Model calculation is not verified for service tickets",
                              evidence={"path": "code"})
         today = question.as_of_date
+        ambiguous = context.cache.get("worker_sales", {}).get("first_ambiguous_day")
+        if ambiguous and ambiguous <= today.isoformat():
+            return Candidate(reason="Model calculation is not verified with ambiguous order states",
+                             evidence={"path": "code", "state_ambiguous": True})
         shape = self.worker.run(self.code_profile, self.question_timeout, today=today,
                                 catalog=context.catalog, calendar=context.split.calendar_path)
         if not shape.ok:
@@ -912,6 +922,7 @@ class RewriteAgent(LocalPlanAgent):
         plans: list[Plan] = []
         plan_keys: list[Plan] = []
         failures: list[str] = []
+        planned_attempts: list[dict] = []
         for vote, messages in enumerate(prompts, 1):
             outcome = self._vote(vote, messages, question, context, asked, names,
                                  product_names, vocabulary, evidence)
@@ -927,11 +938,16 @@ class RewriteAgent(LocalPlanAgent):
                     row for row in outcome.evidence if not row.startswith(IGNORED_OPENING_EVIDENCE)
                 )))
                 plans.append(outcome)
+                planned_attempts.append(evidence["rewrites"][-1])
             if self.votes == 3 and vote == 2:
                 if len(plan_keys) == 2 and plan_keys[0] == plan_keys[1]:
                     break  # agreed: no third vote
                 if not plans:
                     return Candidate(reason=failures[0], evidence=evidence)
+        if len(set(plan_keys)) > 1:
+            for attempt, key in zip(planned_attempts, plan_keys):
+                if plan_keys.count(key) == 1:
+                    attempt["outcome"] = "khac_ke_hoach"
         if self.votes == 3:
             agreed = [plan for plan, key in zip(plans, plan_keys) if plan_keys.count(key) >= 2]
             if not agreed and self.single_vote and len(plans) == 1 and all(

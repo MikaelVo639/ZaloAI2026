@@ -19,8 +19,15 @@ import unicodedata
 from pathlib import Path
 from typing import Callable
 
+from datamate.semantics.text import fold
+
 MODEL_PERTURBATIONS = (
     "clause_order", "paraphrase", "verbose_chat", "combo", "metric_wording", "report_wording",
+)
+
+# Held-out phrasing for model selection. Never use these as inference grammar or examples.
+REPORT_BENCHMARK_TYPES = (
+    "report_wording", "yes_no_wording", "condition_last", "indirect_wording",
 )
 
 PERTURBATIONS = ("unaccented", "month_abbreviation", "particle", "synonym", "transposition",
@@ -300,6 +307,81 @@ def _report_wording(text: str, key: str) -> str | None:
     return _replace_measure(text, key, _REPORT_WORDINGS)
 
 
+_OPEN_MEASURE = re.compile(
+    r"\b(?:bao nhiêu|bao nhiu|mấy|bnhiu|nhiêu|là ai|là gì|nào)\b", re.I)
+_CONDITION = re.compile(
+    r"\b(?:riêng |theo |của |qua |trên )?(?:kênh bán|kênh|nhóm khách hàng|nhóm khách) "
+    r'(?:“[^”]+”|"[^"]+"|`[^`]+`)', re.I)
+_CANCELLED_CONDITION = re.compile(r"\b(?:bi |da )?huy\b")
+_FOLDED_CONDITION = re.compile(
+    r"\b(?:cac )?(?:khach(?: hang)? (?:thuoc )?nhom|nhom khach(?: hang)?) "
+    r"(?:than thiet|vang lai|dai ly|ban le|ban si)\b"
+    r"|\b(?:cac )?don (?:hang )?tra bang (?:tien mat|chuyen khoan|vi dien tu|cod)\b")
+
+
+def _yes_no_wording(text: str, key: str) -> str | None:
+    core = text.strip().rstrip("?! .")
+    if not _OPEN_MEASURE.search(core) or re.search(r"\b(?:đúng không|có phải)\b", core, re.I):
+        return None
+    # The confirmation covers which figure the reader is asking for. The wh question
+    # itself still asks for the exact value/name, with no suggested value to accept.
+    return _choice(key, (
+        f"Có phải ô cần điền kết quả của mục «{core}» nằm ở phần này? Xin cho giá trị cụ thể.",
+        f"Có phải phần «{core}» là mục cần điền kết quả cụ thể? Xin cho kết quả của mục đó.",
+    ))
+
+
+def _condition_last(text: str, key: str) -> str | None:
+    core = text.strip().rstrip("?! .")
+    if not (_OPEN_MEASURE.search(core) or re.search(
+            r"\b(?:bao nhieu|bao nhiu|may|bnhiu|nhieu|bn|so|ti le)\b", fold(core))):
+        return None
+    # Fold token by token with original offsets so spelling, dates and names remain verbatim.
+    tokens = [(fold(match[0]), match.span()) for match in re.finditer(r"[^\s,;?!]+", core)]
+    spans = []
+    folded = []
+    for word, (start, end) in tokens:
+        for token in word.split():
+            folded.append(token)
+            spans.append((start, end))
+    plain = " ".join(folded)
+    quotes = list(_CONDITION.finditer(core))
+    matches = list(_FOLDED_CONDITION.finditer(plain)) or list(_CANCELLED_CONDITION.finditer(plain))
+    if len(quotes) == 1:
+        start, end = quotes[0].span()
+    elif not quotes and len(matches) == 1:
+        match = matches[0]
+        start = spans[plain[:match.start()].count(" ")][0]
+        end = spans[plain[:match.end()].count(" ")][1]
+    else:
+        return None
+    if re.search(r"\b(?:hoac|va|so voi|tru|khong)\s*$", fold(core[:start])):
+        return None
+    condition = core[start:end]
+    main = (core[:start].rstrip(" ,") + " " + core[end:].lstrip(" ,")).strip()
+    return f"{main}? Phần giới hạn phạm vi cần áp khi tra kết quả: {condition}."
+
+
+_INDIRECT_WORDINGS = (
+    (r"\bdoanh thu\b", "con số tiền bán hàng tổng kết được"),
+    (r"\bgiá trị trung bình\b", "mức tiền chia đều"),
+    (r"\bbán chạy nhất\b", "đứng trên các món còn lại nếu xét lượng bán"),
+)
+
+
+def _indirect_wording(text: str, key: str) -> str | None:
+    core = _replace_measure(text, key, _INDIRECT_WORDINGS)
+    if core is None and re.search(r"\b(?:số|bao nhiêu|mấy) (?:đơn|hóa đơn)\b", text, re.I):
+        core = text
+    if core is None or not _OPEN_MEASURE.search(core):
+        return None
+    core = core.strip().rstrip("?! .")
+    return _choice(key, (
+        f"Ô kết quả của mục «{core}» trong bản tổng hợp còn trống; mình nhờ tra và điền cụ thể.",
+        f"Mục «{core}» ở bản ghi còn thiếu kết quả; mình muốn lấy giá trị để bổ sung vào ô đó.",
+    ))
+
+
 _FUNCTIONS: dict[str, Callable[[str, str], str | None]] = {
     "unaccented": _unaccented,
     "month_abbreviation": _month_abbreviation,
@@ -317,6 +399,9 @@ _FUNCTIONS: dict[str, Callable[[str, str], str | None]] = {
     "combo": _combo,
     "metric_wording": _metric_wording,
     "report_wording": _report_wording,
+    "yes_no_wording": _yes_no_wording,
+    "condition_last": _condition_last,
+    "indirect_wording": _indirect_wording,
 }
 
 

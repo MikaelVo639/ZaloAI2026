@@ -232,6 +232,8 @@ class BaselineAgent:
             # The debt worker retains typed failures for interpretation with the Plan.
             context.cache[cache_key] = {"ok": True, "generation": self.worker.generation,
                                         "rulebook": rulebook}
+            if not debt and (ambiguous := result.value.get("first_ambiguous_day")):
+                context.cache[cache_key]["first_ambiguous_day"] = ambiguous
             if not debt and result.value.get("source", {}).get("grain") == "service_tickets":
                 context.cache[cache_key]["service_tickets"] = True
             return None
