@@ -593,16 +593,26 @@ def build_rewrite_messages(question: str, examples: list[tuple[str, str]],
 
 
 def _retry_messages(messages: list[dict[str, str]], rewrite: str,
-                    remaining: str | None) -> list[dict[str, str]]:
+                    remaining: str | None, *, firm: bool = False) -> list[dict[str, str]]:
+    """Ask again after the grammar could not plan ``rewrite``. ``firm``: the model already
+    restated the question, so it may answer KHONG_RO only when the example wording cannot
+    keep every condition, not merely when it is unsure."""
     if remaining:
         words = " ".join(remaining.split()[:12])
         feedback = f"Bộ đọc chưa hiểu các từ: «{words}»."
     else:
         feedback = "Bộ đọc chưa lập được phép tính và kỳ thời gian từ câu viết lại."
+    if firm:
+        instruction = (
+            f"{feedback} Hãy viết lại câu hỏi gốc đúng một dòng, thay những từ đó bằng cách "
+            "nói có cùng nghĩa trong các ví dụ, giữ nguyên mọi số, ngày, kỳ, tên và điều kiện. "
+            f"Chỉ trả {UNSURE} khi không thể viết như vậy mà không thêm, bỏ hay đổi một điều "
+            "kiện, kỳ hoặc thứ được hỏi.")
+    else:
+        instruction = (f"{feedback} Hãy viết lại câu hỏi gốc đúng một dòng theo cách viết "
+                       f"trong các ví dụ, giữ nguyên nghĩa. Nếu chưa chắc, trả {UNSURE}.")
     return [*messages, {"role": "assistant", "content": rewrite},
-            {"role": "user", "content": (
-                f"{feedback} Hãy viết lại câu hỏi gốc đúng một dòng theo cách viết "
-                f"trong các ví dụ, giữ nguyên nghĩa. Nếu chưa chắc, trả {UNSURE}.")}]
+            {"role": "user", "content": instruction}]
 
 
 def _rejected_messages(messages: list[dict[str, str]], rewrite: str,
@@ -625,6 +635,10 @@ def parse_rewrite(text: str) -> str | None:
     # A model that echoes "Câu hỏi: …" before "Viết lại: …" restates on the later line.
     labelled = [line for line in lines if re.match(r"(?:viết lại|viet lai)\s*:", line, re.I)]
     line = labelled[0] if labelled else lines[0]
+    # "Câu hỏi: … Viết lại: …" echoed on one line: the restatement follows the label.
+    inline = re.search(r"\b(?:viết lại|viet lai)\s*:\s*(.+)$", line, re.IGNORECASE)
+    if inline and re.match(r"(?:câu hỏi|cau hoi)\s*:", line, re.IGNORECASE):
+        line = inline.group(1)
     if re.match(r"(?:câu hỏi|cau hoi)\s*:", line, re.IGNORECASE):
         return None
     line = re.sub(r"^(?:viết lại|viet lai)\s*:\s*", "", line, flags=re.IGNORECASE)
@@ -647,13 +661,14 @@ class RewriteAgent(LocalPlanAgent):
     def __init__(self, model_path: str, *, votes: int = 2, examples: int = 6,
                  rewrite_retries: int = 1, lenient: bool = False,
                  retry_rejected: bool = False, code_fallback: bool = False,
-                 code_only: bool = False, single_vote: bool = False, **kwargs: Any) -> None:
+                 code_only: bool = False, single_vote: bool = False,
+                 firm_retry: bool = False, **kwargs: Any) -> None:
         super().__init__(model_path, **kwargs)
-        if any(type(flag) is not bool
-               for flag in (lenient, retry_rejected, code_fallback, code_only, single_vote)):
-            raise ValueError("lenient, retry_rejected, code_fallback, code_only and single_vote "
-                             "must be true or false")
-        self.single_vote = single_vote
+        if any(type(flag) is not bool for flag in (lenient, retry_rejected, code_fallback,
+                                                   code_only, single_vote, firm_retry)):
+            raise ValueError("lenient, retry_rejected, code_fallback, code_only, single_vote and "
+                             "firm_retry must be true or false")
+        self.single_vote, self.firm_retry = single_vote, firm_retry
         self.lenient, self.retry_rejected = lenient, retry_rejected
         self.code_fallback, self.code_only = code_fallback, code_only
         if type(votes) is not int or not 1 <= votes <= 3:
@@ -693,6 +708,7 @@ class RewriteAgent(LocalPlanAgent):
               vocabulary, evidence: dict[str, Any]) -> Plan | str | Candidate:
         """One restatement (with its retry): a Plan, the reason it failed, or a Candidate
         when the model itself failed."""
+        restated_unplanned = False  # a restatement the grammar could not plan
         for retry in range(self.rewrite_retries + 1):
             attempt: dict[str, Any] = {"prompt_sha256": hashlib.sha256(
                 json.dumps(messages, ensure_ascii=False).encode()).hexdigest()}
@@ -712,7 +728,10 @@ class RewriteAgent(LocalPlanAgent):
             rewrite = parse_rewrite(generated.value.get("text", ""))
             attempt["rewrite"] = rewrite
             if rewrite is None:
-                return "Rewrite model was unsure"
+                # After a restatement the grammar could not plan, a KHONG_RO on the retry is
+                # the grammar's gap, not the model's doubt (both reasons behave the same).
+                return ("Grammar cannot plan the rewrite" if restated_unplanned
+                        else "Rewrite model was unsure")
             rejected = check_rewrite(asked, rewrite, names)
             if rejected:
                 attempt["rejected"] = rejected
@@ -727,9 +746,10 @@ class RewriteAgent(LocalPlanAgent):
                 return plan
             if retry == self.rewrite_retries:
                 return "Grammar cannot plan the rewrite"
+            restated_unplanned = True
             remaining = unread_words(restated, context.cache["rules"], product_names, vocabulary)
             attempt.update(vote=vote, retry=retry, unread_words=remaining)
-            messages = _retry_messages(messages, rewrite, remaining)
+            messages = _retry_messages(messages, rewrite, remaining, firm=self.firm_retry)
         return "Grammar cannot plan the rewrite"
 
     # Worker tasks of the model calculation (module-level for the spawn worker).

@@ -70,6 +70,18 @@ def retry_generate(cache, messages, max_input_tokens, max_new_tokens):
     return {"text": STANDARD}
 
 
+def unplanned_then_unsure_generate(cache, messages, max_input_tokens, max_new_tokens):
+    return {"text": UNPLANNED if len(messages) == 2 else UNSURE}
+
+
+def firm_retry_generate(cache, messages, max_input_tokens, max_new_tokens):
+    if len(messages) == 2:
+        return {"text": UNPLANNED}
+    retry = messages[-1]["content"]
+    assert "khuc ngo" in retry and "Nếu chưa chắc" not in retry and "Chỉ trả" in retry
+    return {"text": STANDARD}
+
+
 def unplanned_generate(cache, messages, max_input_tokens, max_new_tokens):
     return {"text": UNPLANNED}
 
@@ -360,6 +372,7 @@ class RewritePromptTests(unittest.TestCase):
     def test_parse_reads_the_restated_line_after_an_echo(self):
         self.assertEqual(parse_rewrite(f"Câu hỏi: dthu\nViết lại: {STANDARD}"), STANDARD)
         self.assertIsNone(parse_rewrite("Câu hỏi: dthu thang nay"))
+        self.assertEqual(parse_rewrite(f"Câu hỏi: dthu thang nay Viết lại: {STANDARD}"), STANDARD)
 
     def test_examples_are_chosen_by_similarity_and_deterministic(self):
         chosen = select_examples("thang 2/2026 bi huy may don", 3)
@@ -475,6 +488,26 @@ class RewriteAgentTests(unittest.TestCase):
         self.assertEqual(disagreement.type, "abstain")
         self.assertEqual(disagreement.reason, "Rewrites lead to different plans")
         self.assertEqual(len(disagreement.evidence["rewrites"]), 4)
+
+    def test_unsure_after_an_unplanned_restatement_is_the_grammar_gap(self):
+        for kwargs in ({}, {"votes": 3}, {"votes": 3, "single_vote": True, "firm_retry": True}):
+            with self.subTest(**kwargs):
+                candidate = self.agent(unplanned_then_unsure_generate, **kwargs).answer(
+                    self.question, self.context)
+                self.assertEqual((candidate.type, candidate.reason),
+                                 ("abstain", "Grammar cannot plan the rewrite"))
+        unsure = self.agent(unsure_generate).answer(self.question, self.context)
+        self.assertEqual(unsure.reason, "Rewrite model was unsure")
+
+    def test_firm_retry_asks_for_the_example_wording(self):
+        firm = self.agent(firm_retry_generate, firm_retry=True).answer(self.question, self.context)
+        expected = self.baseline_answer(STANDARD)
+        self.assertEqual((firm.type, firm.answer), (expected.type, expected.answer), firm.reason)
+        with self.assertRaises(AssertionError):
+            firm_retry_generate(None, _retry_messages(
+                build_rewrite_messages("x", select_examples("x")), UNPLANNED, "khuc ngo"), 1, 1)
+        with self.assertRaisesRegex(ValueError, "firm_retry"):
+            self.agent(standard_generate, firm_retry=1)
 
     def test_second_failure_and_unsafe_retry_abstain(self):
         for generate, reason in ((unplanned_generate, "Grammar cannot plan the rewrite"),
@@ -604,6 +637,14 @@ class RewriteAgentTests(unittest.TestCase):
                          ("rewrite", 0.5, 1))
         with self.assertRaisesRegex(ValueError, "rewrite_retries"):
             Config(rewrite_retries=2)
+        configs = Path(__file__).resolve().parents[1] / "configs"
+        v8, v9 = (Config.load(configs / name) for name in ("rewrite-v8.toml", "rewrite-v9.toml"))
+        self.assertFalse(v8.rewrite_firm_retry)
+        self.assertTrue(v9.rewrite_firm_retry)
+        self.assertEqual({k: v for k, v in vars(v8).items() if k != "rewrite_firm_retry"},
+                         {k: v for k, v in vars(v9).items() if k != "rewrite_firm_retry"})
+        with self.assertRaisesRegex(ValueError, "rewrite_firm_retry"):
+            Config(rewrite_firm_retry="yes")
 
 
 if __name__ == "__main__":
