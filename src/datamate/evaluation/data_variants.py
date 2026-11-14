@@ -19,6 +19,12 @@ businesses it changed; ``<name>.answers.jsonl`` beside it holds their train refe
 - ``cost_convention_only``: document the POS sales columns while leaving the selling cost
   column described only by the README convention.
 - ``catalogue_stock_column``: add an empty, documented stock balance column to CSV catalogues.
+- ``readme_paraphrase``: the README describes the columns of its sales line lists in other
+  words, each followed by an explanation ("số hoá đơn, ghi ở mọi dòng của hoá đơn").
+- ``status_in_notes``: a sales line list loses its status column; the order state is
+  written in a notes column (blank: completed), as the README then says.
+- ``short_names``: every other product of a sales line list is written by its initials; a
+  ``GhiTat.csv`` list gives the full name of each short form, as the README then says.
 - ``unknown_export``: a shop whose sales come from a POS / sales-software export no longer
   says so ("máy POS", "phần mềm bán hàng", a ``pos.*`` file name), as an export from software
   the known export profiles do not cover: its columns are known only by their headers.
@@ -50,10 +56,11 @@ from datamate.ingestion.readme_sales import (
 )
 from datamate.ingestion.sales import column_mapping
 from datamate.ingestion.source_names import filename_key, matches_source
+from datamate.semantics.text import fold
 
 VARIANTS = ("monthly_files", "duplicate_orders", "summary_rows", "no_column_docs",
             "status_labels", "repeated_headers", "cost_convention_only", "catalogue_stock_column",
-            "unknown_export")
+            "unknown_export", "readme_paraphrase", "status_in_notes", "short_names")
 STATUS_LABELS = {"tra hang": "Khách trả", "dang giao": "Đang ship"}
 DUPLICATE_EVERY = 25
 FAMILY_NOTE = "Các file `{template}` là dữ liệu chia theo tháng, mỗi tháng một file, cùng cột."
@@ -414,11 +421,220 @@ def unknown_export(source: Path, destination: Path) -> bool:
     return True
 
 
+_PARAPHRASES = {
+    "ma don": "số hoá đơn, ghi ở mọi dòng của hoá đơn",
+    "ngay ban": "ngày bán; ghi theo hoá đơn",
+    "ten hang": "hàng bán, tên đầy đủ",
+    "so luong": "số lượng bán",
+    "don gia": "đơn giá bán; giá một đơn vị của dòng",
+    "thanh tien sau giam": "thành tiền của dòng; đã trừ giảm giá của dòng",
+    "kenh ban": "kênh bán: các kênh tiệm dùng",
+}
+
+
+def _sales_line_sections(readme: str) -> list[Any]:
+    return [section for section in parse_sections(readme)
+            if {"amount"} <= set(section.fields) and section.fields.keys() & {"product_name",
+                                                                              "product_id"}]
+
+
+def _rewrite_meanings(readme: str, sections: list[Any], change: Any) -> str:
+    """README with ``change(column, meaning)`` applied to the column lines of ``sections``."""
+    labels = {section.label for section in sections}
+    out, current = [], None
+    for line in readme.splitlines():
+        heading = re.match(r"##\s+Cột trong\s+`([^`]+)`(?:,\s*sheet\s+`([^`]+)`)?", line)
+        if line.startswith("## "):
+            current = None
+            if heading:
+                current = (f"{heading.group(1)}::{heading.group(2)}" if heading.group(2)
+                           else heading.group(1))
+        item = re.match(r"(\s*-\s+\*\*(.+?)\*\*:\s*)(.+)$", line)
+        if current in labels and item:
+            replaced = change(item.group(2).strip(), item.group(3).strip())
+            if replaced is None:
+                continue
+            line = item.group(1) + replaced
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def readme_paraphrase(source: Path, destination: Path) -> bool:
+    """Write ``destination`` as ``source`` with its sales line columns described in other
+    words; False when the README describes no sales line list."""
+    readme = (source / "README.md").read_text(encoding="utf-8-sig")
+    sections = _sales_line_sections(readme)
+
+    def change(_column: str, meaning: str) -> str:
+        base = fold(re.sub(r"\s*\(.*\)\s*\.?\s*$", "", meaning)).strip()
+        return _PARAPHRASES.get(base, meaning)
+
+    rewritten = _rewrite_meanings(readme, sections, change)
+    if not sections or rewritten == readme.rstrip("\n") + "\n":
+        return False
+    _link_tree(source, destination)
+    (destination / "README.md").unlink()
+    (destination / "README.md").write_text(rewritten, encoding="utf-8")
+    return True
+
+
+_NOTE_TEXT = {"huy": "Khách huỷ đơn", "tra hang": "Khách trả lại hàng",
+              "dang giao": "Đang giao cho khách", "hoan thanh": None}
+_NOTE_MEANING = ("ghi chú của đơn; đơn huỷ, đơn trả hàng, đơn đang giao được ghi ở đây, "
+                 "không có cột trạng thái riêng")
+
+
+def _one_table_lists(readme: str, catalog: Any, need: str) -> list[tuple[Any, Any]]:
+    found = []
+    for section in _sales_line_sections(readme):
+        tables = [t for t in catalog.tables
+                  if filename_key(t.path.name) == filename_key(section.file)
+                  and section.sheet in (None, t.name)]
+        sheets = [t for t in catalog.tables if tables and t.path == tables[0].path]
+        if need in section.fields and len(tables) == 1 and len(sheets) == 1:
+            found.append((section, tables[0]))
+    return found
+
+
+def _rewrite_tables(source: Path, destination: Path, readme: str,
+                    rewritten: dict[Path, tuple[Any, list[str], list[dict[str, Any]]]],
+                    extra: dict[str, list[list[Any]]] | None = None) -> None:
+    _link_tree(source, destination)
+    for path, (table, header, rows) in rewritten.items():
+        (destination / path.name).unlink()
+        _write(destination / path.name, table.name, header, rows,
+               table.encoding or "utf-8", table.delimiter or ",")
+    for name, rows in (extra or {}).items():
+        with (destination / name).open("x", encoding="utf-8", newline="") as stream:
+            csv.writer(stream).writerows(rows)
+    (destination / "README.md").unlink()
+    (destination / "README.md").write_text(readme, encoding="utf-8")
+
+
+def status_in_notes(source: Path, destination: Path) -> bool:
+    """Write ``destination`` as ``source`` with the order state of its one-table sales line
+    lists written in a notes column; False when no such list has a status column whose
+    every label is a known state."""
+    from datamate.ingestion.status import eliminated_labels, normalize_label, order_state
+
+    readme = (source / "README.md").read_text(encoding="utf-8-sig")
+    catalog = build_catalog(source.parent, source.name)
+    rewritten: dict[Path, tuple[Any, list[str], list[dict[str, Any]]]] = {}
+    notes: dict[str, str] = {}
+    for section, table in _one_table_lists(readme, catalog, "status"):
+        column = section.fields["status"]
+        if table.path in rewritten:
+            return False
+        records = [row for _, row in _records(table, section.columns)]
+        eliminated = eliminated_labels({row.get(column) for row in records})
+        note = "Ghi chú đơn"
+        if any(note in row for row in records[:1]) or note in section.columns:
+            return False
+        header: list[str] = []
+        rows: list[dict[str, Any]] = []
+        for row in records:
+            label = row.pop(column, None)
+            state = None
+            if label not in (None, "") and str(label).strip():
+                state = order_state(label) or eliminated.get(normalize_label(label))
+                if state is None:
+                    return False
+            row[note] = _NOTE_TEXT[state] if state else None
+            header += [name for name in row if name not in header]
+            rows.append(row)
+        rewritten[table.path] = (table, header, rows)
+        notes[section.label] = column
+    if not rewritten:
+        return False
+    sections = [s for s in _sales_line_sections(readme) if s.label in notes]
+
+    def change(column: str, meaning: str) -> str | None:
+        return None if column in notes.values() else meaning
+
+    text = _rewrite_meanings(readme, sections, change)
+    for label in notes:
+        file = label.split("::")[0]
+        heading = next(line for line in text.splitlines()
+                       if re.match(r"##\s+Cột trong\s+`" + re.escape(file) + "`", line))
+        text = text.replace(heading + "\n", f"{heading}\n- **Ghi chú đơn**: {_NOTE_MEANING}\n", 1)
+    _rewrite_tables(source, destination, text, rewritten)
+    return True
+
+
+def _initials(name: str) -> str:
+    words = re.findall(r"[^\W_]+", name)
+    return "".join(word[0].upper() if word.isalpha() else word for word in words)
+
+
+def short_names(source: Path, destination: Path) -> bool:
+    """Write ``destination`` as ``source`` with every other product of its one-table sales
+    line lists written short, and a ``GhiTat.csv`` short form -> full name list of every
+    product; False when no such list names its products."""
+    readme = (source / "README.md").read_text(encoding="utf-8-sig")
+    catalog = build_catalog(source.parent, source.name)
+    if any(path.name == "GhiTat.csv" for path in source.iterdir()):
+        return False
+    lists = _one_table_lists(readme, catalog, "product_name")
+    if not lists:
+        return False
+    names: list[str] = []
+    records: dict[Path, tuple[Any, Any, list[dict[str, Any]]]] = {}
+    for section, table in lists:
+        if table.path in records:
+            return False
+        rows = [row for _, row in _records(table, section.columns)]
+        records[table.path] = (section, table, rows)
+        column = section.fields["product_name"]
+        for row in rows:
+            value = row.get(column)
+            if value not in (None, "") and str(value).strip() not in names:
+                names.append(str(value).strip())
+    full_keys = {fold(name) for name in names}
+    short: dict[str, str] = {}
+    used: set[str] = set()
+    for name in sorted(names):
+        base = _initials(name) or "H"
+        code, n = base, 1
+        while fold(code) in used or fold(code) in full_keys:
+            n += 1
+            code = f"{base}{n}"
+        used.add(fold(code))
+        short[name] = code
+    rewritten = {}
+    for path, (section, table, rows) in records.items():
+        column = section.fields["product_name"]
+        header: list[str] = []
+        out = []
+        for row in rows:
+            value = row.get(column)
+            written = str(value).strip() if value not in (None, "") else ""
+            if written in short and sorted(names).index(written) % 2 == 0:
+                row = {**row, column: short[written]}
+            header += [name for name in row if name not in header]
+            out.append(row)
+        rewritten[path] = (table, header, out)
+    labels = {section.label for section, _ in lists}
+    columns = {section.fields["product_name"] for section, _ in lists}
+    sections = [s for s in _sales_line_sections(readme) if s.label in labels]
+
+    def change(column: str, meaning: str) -> str:
+        return (f"{meaning}, có thể ghi tắt (tra ở file `GhiTat.csv`)" if column in columns
+                else meaning)
+
+    text = _rewrite_meanings(readme, sections, change)
+    text = text.replace("## File\n", "## File\n- `GhiTat.csv` (csv)\n", 1)
+    table = [["Ghi tắt", "Tên hàng"], *[[code, name] for name, code in sorted(short.items())]]
+    _rewrite_tables(source, destination, text, rewritten, {"GhiTat.csv": table})
+    return True
+
+
 _BUILDERS = {"monthly_files": monthly_files, "duplicate_orders": duplicate_orders,
              "summary_rows": summary_rows, "no_column_docs": no_column_docs,
              "status_labels": status_labels, "repeated_headers": repeated_headers,
              "cost_convention_only": cost_convention_only,
-             "catalogue_stock_column": catalogue_stock_column, "unknown_export": unknown_export}
+             "catalogue_stock_column": catalogue_stock_column, "unknown_export": unknown_export,
+             "readme_paraphrase": readme_paraphrase, "status_in_notes": status_in_notes,
+             "short_names": short_names}
 
 
 def build_variant(train: Path, output: Path, name: str) -> dict[str, Any]:

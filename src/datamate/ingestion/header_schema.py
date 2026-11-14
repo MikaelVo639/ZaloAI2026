@@ -112,9 +112,11 @@ def looks_like_sales_lines(headers: list[str] | tuple[str, ...]) -> bool:
     return {"date", "amount"} <= fields
 
 
-def header_columns(headers: list[str] | tuple[str, ...]) -> dict[str, str] | None:
+def header_columns(headers: list[str] | tuple[str, ...],
+                   provided: frozenset[str] = frozenset()) -> dict[str, str] | None:
     """README-style ``{column: meaning}`` for a list of headers, or None when a field is
-    named by two columns or the list is not a sales line list."""
+    named by two columns or the list is not a sales line list. ``provided``: fields the
+    README conventions already give another column (left out of ``headers``)."""
     by_field: dict[str, list[str]] = {}
     for header in headers:
         field = header_field(header)
@@ -124,7 +126,8 @@ def header_columns(headers: list[str] | tuple[str, ...]) -> dict[str, str] | Non
         return None
     # Product names are enough for totals; with names only the loader marks product identity
     # unverified, and product rankings, counts and filters abstain (they went wrong on train).
-    if not LINE_FIELDS <= set(by_field) or not {"product_id", "product_name"} & set(by_field):
+    if (not LINE_FIELDS - provided <= set(by_field)
+            or not {"product_id", "product_name"} & set(by_field)):
         return None
     meanings = {field: meaning for field, meaning, _ in _FIELDS}
     return {columns[0]: meanings[field] for field, columns in by_field.items()}

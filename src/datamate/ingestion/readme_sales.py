@@ -23,6 +23,7 @@ money totals are reconciled where the files allow it. Any failure raises
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter, defaultdict
 from contextlib import ExitStack, closing
 from dataclasses import dataclass, field, replace
@@ -43,13 +44,14 @@ from datamate.ingestion.sales import (
 )
 from datamate.ingestion.header_schema import (
     header_columns,
+    header_field,
     looks_like_sales_lines,
     other_list_name,
     sales_list_name,
     table_role,
 )
 from datamate.ingestion.source_names import filename_key, is_family, matches_source
-from datamate.ingestion.status import StatusError, by_elimination, status_policy
+from datamate.ingestion.status import StatusError, by_elimination, order_state, status_policy
 from datamate.semantics.rules import rule_line
 from datamate.semantics.text import fold
 
@@ -153,7 +155,139 @@ def meaning_field(meaning: str) -> str | None:
     for prefix, key in _PREFIXES:
         if text.startswith(prefix):
             return key
-    return None
+    return _meaning_head_field(meaning)
+
+
+# A meaning followed by its explanation ("ngày bán (dòng phí để trống)", "kênh bán: Tại tiệm,
+# …", "thành tiền của dòng; …"): its head read as a ledger header would be. Order sequence
+# numbers ("số thứ tự đơn trong sổ") are order ids; "số thứ tự dòng" stays a line number.
+_ORDER_SEQUENCE = re.compile(
+    r"^(?:so thu tu|stt) (?:don|hoa don|phieu ban)(?: hang)?(?: trong (?:so|ngay|thang))?$")
+_HEAD_AMOUNT = re.compile(r"^thanh tien(?: cua)? (?:dong|moi dong|ca dong)$")
+# "Ghi chú của đơn; đơn huỷ hoặc đang giao được ghi ở đây": no status column, the order's
+# state is written in its notes (status_note). A blank note is a completed order.
+_NOTE_HEADS = frozenset({"ghi chu", "ghi chu cua don", "ghi chu don", "ghi chu cua hoa don",
+                         "note", "notes"})
+_NOTE_STATES = re.compile(r"\b(?:huy|tra lai|tra hang|dang giao)\b")
+_NOTE_LABELS = (
+    ("huy", re.compile(r"\bhuy\b")),
+    ("tra hang", re.compile(r"\b(?:tra lai|tra hang|doi tra|hoan tra|hoan hang)\b")),
+    ("dang giao", re.compile(r"\bdang (?:giao|ship|van chuyen)\b")),
+)
+_NOTE_NEGATION = re.compile(r"\b(?:khong|chua|ko) (?:huy|tra|giao)\b")
+
+
+def note_state(note: Any) -> str | None:
+    """The order state a note names ("Khách trả lại hàng" -> "tra hang"), None for a note
+    that names none; a note naming several states, or a negated one, raises."""
+    whole = order_state(note)  # the note is a status label itself ("Khách huỷ")
+    if whole and whole != "hoan thanh":
+        return whole
+    text = fold(str(note))
+    if _NOTE_NEGATION.search(text):
+        raise ReadmeSalesError("STATUS_AMBIGUOUS", "An order note negates a state")
+    found = {state for state, pattern in _NOTE_LABELS if pattern.search(text)}
+    if len(found) > 1:
+        raise ReadmeSalesError("STATUS_AMBIGUOUS", "An order note names several states")
+    return next(iter(found), None)
+
+
+def _states_from_notes(lines: list[dict[str, Any]]) -> None:
+    """Give every line the state its order's notes name; "hoan thanh" when none does."""
+    by_order: dict[str, set[str]] = defaultdict(set)
+    for line in lines:
+        note = line.get("status_note")
+        if not _blank(note):
+            state = note_state(note)
+            if state:
+                by_order[line["_order"]].add(state)
+    for line in lines:
+        states = by_order.get(line["_order"], set())
+        if len(states) > 1:
+            raise ReadmeSalesError("STATUS_AMBIGUOUS", "The notes of one order name several states")
+        line["status"] = next(iter(states), "hoan thanh")
+
+
+# "hàng bán, có thể ghi tắt (tra ở sheet Ghi tắt)": names in the sales list may be short
+# forms, resolved through one list of short form -> full name (and its kind of goods).
+_SHORT_MEANING = re.compile(r"\b(?:ghi tat|viet tat)\b")
+_SHORT_HEADER = re.compile(r"^(?:ghi tat|viet tat|ten tat|ten viet tat|ten ghi tat|ma tat)$")
+_KIND_HEADER = re.compile(r"^(?:loai|loai hang|nhom|nhom hang)$")
+
+
+def _expand_abbreviations(catalog: Catalog, lines_role: "_Role",
+                          lines: list[dict[str, Any]]) -> bool | None:
+    """Replace short product names by their full names when the README says the sales list
+    may write them short. None: the README says nothing of short names; True: every name
+    is a known short form or full name; False: some name stays unresolved, or no unique
+    list of short forms exists (product identity is then unverified)."""
+    section = lines_role.sections[0]
+    column = section.fields.get("product_name")
+    if not column or not _SHORT_MEANING.search(fold(section.columns.get(column, ""))):
+        return None
+    used = {table.key for _, table in lines_role.tables}
+    lists = []
+    for table, header in _table_headers(t for t in catalog.tables if t.key not in used):
+        short = [h for h in header if _SHORT_HEADER.match(fold(h))]
+        full = [h for h in header if h not in short and header_field(h) == "product_name"]
+        kind = [h for h in header if _KIND_HEADER.match(fold(h))]
+        if len(short) == 1 and len(full) == 1 and len(kind) <= 1:
+            lists.append((table, short[0], full[0], kind[0] if kind else None))
+    if len(lists) != 1:
+        return False
+    table, short, full, kind = lists[0]
+    shorts: dict[str, tuple[str, str | None]] = {}
+    fulls: dict[str, str | None] = {}
+    for _, row in _records(table, [c for c in (short, full, kind) if c]):
+        if _blank(row.get(short)) or _blank(row.get(full)):
+            continue
+        entry = (str(row[full]).strip(), _text(row.get(kind)) if kind else None)
+        full_key = _name_key(entry[0])
+        fulls.setdefault(full_key, entry[1])
+        short_key = _name_key(row[short])
+        if short_key != full_key and _name_key(
+                shorts.setdefault(short_key, entry)[0]) != full_key:
+            raise ReadmeSalesError("AMBIGUOUS_SHORT_NAME", "A short name has several items")
+    for key, entry in shorts.items():
+        if key in fulls and _name_key(entry[0]) != key:
+            raise ReadmeSalesError("AMBIGUOUS_SHORT_NAME", "A short name is another item's name")
+    resolved = True
+    for line in lines:
+        if _blank(line.get("product_name")):
+            continue
+        key = _name_key(line["product_name"])
+        if key in fulls:  # written in full: the line keeps its own spelling
+            group = fulls[key]
+        elif key in shorts:
+            line["product_name"], group = shorts[key]
+        else:
+            resolved = False
+            continue
+        if group and _blank(line.get("product_group")):
+            line["product_group"] = group
+    return resolved
+
+
+_HEAD_FIELDS = frozenset({"order_id", "date", "product_id", "product_name", "quantity",
+                          "unit", "unit_price", "discount", "customer_id", "customer_name",
+                          "channel", "payment_method", "staff_id"})
+
+
+def _meaning_head_field(meaning: str) -> str | None:
+    raw = re.sub(r"\([^)]*\)", " ", re.split(r"[:;,]", meaning, maxsplit=1)[0])
+    if re.search(r"\bhãng\b", unicodedata.normalize("NFC", raw.lower())):
+        return None  # "hãng" (brand) folds to the same letters as "hàng" (goods)
+    head = fold(raw).strip()
+    if head in _NOTE_HEADS and _NOTE_STATES.search(fold(meaning)):
+        return "status_note"
+    if not head or head in _MEANINGS:
+        return _MEANINGS.get(head)
+    if _ORDER_SEQUENCE.match(head):
+        return "order_id"
+    if _HEAD_AMOUNT.match(head):
+        return "amount"
+    field = header_field(head)
+    return field if field in _HEAD_FIELDS else None
 
 
 def field_meanings(readme: str, field: str) -> list[str]:
@@ -360,12 +494,22 @@ def header_sections(catalog: Catalog, documented: list[Section]) -> list[Section
                     if not any(matches_source(s.file, t.path.name) and s.sheet in (None, t.name)
                                for s in documented)]
     headers = _table_headers(undocumented)
+    named = convention_columns(catalog.readme)
     sections = []
     for table, header in headers:
         if not (sales_list_name(table.path.name, table.name)
                 and looks_like_sales_lines(sorted(header))):
             continue
-        columns = header_columns(sorted(header))
+        given = {column: meaning for column, meaning in named.items() if column in header}
+        provided = frozenset(filter(None, map(meaning_field, given.values())))
+        provided |= {"status"} if "status_note" in provided else set()
+        columns = header_columns(sorted(set(header) - set(given)), provided)
+        if columns is not None:
+            columns.update(given)
+            if _SHORT_MEANING.search(fold(catalog.readme)):
+                for column, meaning in columns.items():
+                    if meaning_field(meaning) == "product_name":
+                        columns[column] = f"{meaning}, có thể ghi tắt"
         section = None if columns is None else Section(table.path.name, table.name, columns,
                                                        origin="header")
         if section is None or not _amounts_check_out(table, section):
@@ -375,6 +519,27 @@ def header_sections(catalog: Catalog, documented: list[Section]) -> list[Section
     documented_orders = any("order_id" in s.fields and s.fields.keys() & {"date", "status"}
                             and "quantity" not in s.fields for s in documented)
     return sections or _joined_header_sections(headers, documented_orders)
+
+
+def convention_columns(readme: str) -> dict[str, str]:
+    """README meanings of columns the conventions name in bold: "các dòng cùng **STT** là
+    một đơn" (the order id) and a notes column the conventions say records an order state
+    ("**Đơn khách trả lại**: **Ghi chú** của đơn ghi khách trả lại")."""
+    found: dict[str, str] = {}
+    for line in readme.splitlines():
+        text = fold(line)
+        for match in re.finditer(r"\*\*([^*]+)\*\*", line):
+            column = match.group(1).strip()
+            before = fold(line[:match.start()])
+            after = fold(line[match.end():])
+            if before.endswith("cac dong cung") and after.startswith("la mot don"):
+                found[column] = "mã đơn"
+            elif (fold(column) in _NOTE_HEADS and _NOTE_STATES.search(text)
+                  and fold(column) not in fold(line.split(":", 1)[0])):
+                found[column] = "ghi chú của đơn; ghi đơn " + ", ".join(
+                    state for state in ("huỷ", "trả lại", "đang giao")
+                    if re.search(rf"\b{fold(state)}\b", text))
+    return found
 
 
 def _joined_header_sections(headers: list[tuple[Table, set[str]]],
@@ -504,12 +669,21 @@ def _blank(value: Any) -> bool:
 
 
 def _summary_row(row: dict[str, Any], keys: Iterable[str]) -> bool:
-    """A total or note row of a list: nothing in ``keys`` besides the order id, and an order
-    id that is blank or a total label written in the id column ("Tổng 01/05", "Cộng")."""
-    if any(not _blank(row.get(key)) for key in keys if key != "order_id"):
+    """A total or note row of a list: nothing in ``keys`` besides the order id and date, an
+    order id that is blank or a total label ("Tổng 01/05", "Cộng"), and a date that is blank
+    or a total label too ("Cộng tháng"); or, with no order id, a row with no product and no
+    money at all (a note written in the date column)."""
+    keys = list(keys)
+    if any(not _blank(row.get(key)) for key in keys if key not in ("order_id", "date")):
         return False
     order = row.get("order_id")
-    return _blank(order) or is_total_label(order)
+    if not (_blank(order) or is_total_label(order)):
+        return False
+    day = row.get("date")
+    if "date" not in keys or _blank(day) or is_total_label(day):
+        return True
+    return _blank(order) and all(_blank(row.get(name))
+                                 for name in ("product_id", "product_name", "amount"))
 
 
 # ---------------------------------------------------------------- reading values
@@ -593,10 +767,17 @@ def parse_day(value: Any, sheet: str = "") -> date:
     text = str(value).strip()
     if re.fullmatch(r"\d{5}", text) and 20000 < int(text) < 80000:
         return date(1899, 12, 30) + timedelta(days=int(text))
-    short = re.fullmatch(r"(\d{1,2})/(\d{1,2})", text)
+    short = re.fullmatch(r"(\d{1,2})[/.-](\d{1,2})", text)
     year = re.search(r"(?<!\d)(20\d{2})(?!\d)", sheet)
     if short and year:
         return date(int(year.group(1)), int(short.group(2)), int(short.group(1)))
+    # A day number alone on a monthly sheet ("T7-2025", "Tháng 07/2025").
+    month = re.search(r"(?<!\d)(\d{1,2})\s*[-/._ ]\s*(20\d{2})(?!\d)", sheet)
+    if re.fullmatch(r"\d{1,2}(?:\.0)?", text) and month:
+        return date(int(month.group(2)), int(month.group(1)), int(float(text)))
+    dotted = re.fullmatch(r"(\d{1,2})\.(\d{1,2})\.(20\d{2})", text)
+    if dotted:
+        return date(int(dotted.group(3)), int(dotted.group(2)), int(dotted.group(1)))
     return parse_date(text, sheet)
 
 
@@ -837,6 +1018,23 @@ def _rules(rulebook: str) -> _Rules:
 
 # ---------------------------------------------------------------- loading
 
+def _check_read_amounts(roles: dict[str, "_Role"]) -> None:
+    """A line amount documented in other words than "thành tiền sau giảm" (read from its
+    head, e.g. "thành tiền của dòng") must check out as price x quantity - discount."""
+    if "lines" not in roles:
+        return
+    for section, table in roles["lines"].tables:
+        column = section.fields.get("amount")
+        if section.origin != "readme" or column is None:
+            continue
+        meaning = fold(re.sub(r"\s*\(.*\)\s*\.?\s*$", "", section.columns[column]))
+        if meaning.strip() in _MEANINGS:
+            continue
+        if not _amounts_check_out(table, section):
+            raise ReadmeSalesError("AMOUNT_UNVERIFIED",
+                                   "A line amount read from other words does not check out")
+
+
 def load_readme_sales(catalog: Catalog, rulebook: str
                       ) -> tuple[list[Sale], dict[str, Any], frozenset[int]]:
     """Load sales of one business from its README-described lists.
@@ -851,6 +1049,7 @@ def load_readme_sales(catalog: Catalog, rulebook: str
     if not sections:
         raise ReadmeSalesError("README_COLUMNS_MISSING", "README has no column descriptions")
     roles = _classify(sections, catalog)
+    _check_read_amounts(roles)
     rules = _rules(rulebook)
     conventions = parse_conventions(catalog.readme)
     if "lines" in roles:
@@ -1088,6 +1287,12 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         lines.append({**row, "_order": key, "_sheet": sheet})
     seen.clear()
     first_values.clear()
+    if "status" not in line_fields and "status_note" in line_fields:
+        _states_from_notes(lines)
+        line_fields = line_fields | {"status"}
+    names_resolved = _expand_abbreviations(catalog, roles["lines"], lines)
+    if names_resolved is not None:
+        line_fields = line_fields | {"product_group"}
 
     status_counts: Counter[str] = Counter()
     order_state: dict[str, dict[str, Any]] = {}
@@ -1258,8 +1463,8 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
             catalog, roles, headers)
     if fee_rows and rules.service_fee is None:
         eligible = set()
-    if (any(s.origin == "header" for s in roles["lines"].sections)
-            and "product_id" not in line_fields):
+    if names_resolved is False or (any(s.origin == "header" for s in roles["lines"].sections)
+                                   and "product_id" not in line_fields):
         # Header-guessed columns with product names only: no catalogue says which spellings
         # are one product or breaks ties by code. Product rankings, counts and filters abstain.
         evidence["product_identity"] = "names_unverified"
