@@ -6,7 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from datamate.evaluation.robustness import MODEL_PERTURBATIONS, PERTURBATIONS, build_splits, perturb
+from datamate.evaluation.robustness import (
+    MODEL_PERTURBATIONS, PERTURBATIONS, build_splits, longest_shared_run, perturb,
+    strip_diacritics,
+)
+from datamate.semantics.text import fold
 
 
 class PerturbationTests(unittest.TestCase):
@@ -95,6 +99,76 @@ class PerturbationTests(unittest.TestCase):
     def test_not_applicable_is_none(self):
         self.assertIsNone(perturb("unaccented", "doanh thu thang nay", "k"))
         self.assertIsNone(perturb("synonym", "Có bao nhiêu đơn?", "k"))
+
+
+class ReportSuiteTests(unittest.TestCase):
+    """Held-out model benchmark wordings restructure the question instead of quoting it."""
+
+    def assertRestructured(self, original, changed, *, keep=()):
+        self.assertIsNotNone(changed)
+        self.assertNotIn("«", changed)
+        self.assertCountEqual(re.findall(r"\d+", original), re.findall(r"\d+", changed))
+        for text in keep:
+            self.assertIn(text, changed)
+        run = longest_shared_run(original, changed)
+        self.assertFalse(run >= 8 and 4 * run >= 3 * len(fold(original).split()))
+
+    def test_yes_no_wording_asks_whether_then_for_the_figure(self):
+        original = "Tháng 4/2026 doanh thu của Trà đồi Sương 12 gói là bao nhiêu?"
+        for key in ("a", "b", "c"):
+            changed = perturb("yes_no_wording", original, key)
+            self.assertRestructured(original, changed, keep=("Trà đồi Sương 12 gói",))
+            self.assertTrue(changed.startswith("Doanh thu của Trà đồi Sương 12 gói tháng 4/2026 có"))
+            self.assertRegex(changed, r"(?:không|được)\b.*bao nhiêu")
+        self.assertEqual(
+            perturb("yes_no_wording", "Xem giúp quý 3/2025 cửa hàng có bao nhiêu đơn hàng?", "a"),
+            "Quý 3/2025, cửa hàng có đơn hàng nào không? Nếu có thì tổng cộng bao nhiêu?")
+
+    def test_yes_no_wording_keeps_the_unit_and_the_spelling(self):
+        changed = perturb("yes_no_wording", "thang 4/2025 nhap hang het bao nhiu tien", "k")
+        self.assertRestructured("thang 4/2025 nhap hang het bao nhiu tien", changed)
+        self.assertTrue(changed.endswith("bao nhiu tien?"))
+        self.assertEqual(changed, strip_diacritics(changed))
+
+    def test_yes_no_wording_skips_a_verb_left_as_subject_and_shares(self):
+        for question in ("Tháng 5/2025 bị huỷ mấy đơn vậy?",
+                         "Tháng 7/2026 cửa hàng có bao nhiêu % đơn bị huỷ?",
+                         "Doanh thu tháng 4/2026 tăng bao nhiêu so với tháng 3/2026?"):
+            with self.subTest(question=question):
+                self.assertIsNone(perturb("yes_no_wording", question, "k"))
+
+    def test_condition_last_moves_the_whole_filter_phrase(self):
+        cases = {
+            "Tháng 1/2026 nhân viên mã NV003 bán được bao nhiêu tiền?":
+                ("Tháng 1/2026 bán được bao nhiêu tiền,", "nhân viên mã NV003"),
+            "Tháng 5/2026 có bao nhiêu đơn bị huỷ?": ("Tháng 5/2026 có bao nhiêu đơn,", "hủy"),
+            "Doanh thu từ khách nhóm thân thiết tháng 4/2026 là bao nhiêu?":
+                ("Doanh thu tháng 4/2026 là bao nhiêu,", "khách nhóm thân thiết"),
+            "Tuần trước riêng ca chiều bán được tổng cộng bao nhiêu tiền?":
+                ("Tuần trước bán được tổng cộng bao nhiêu tiền,", "ca chiều"),
+        }
+        for original, (main, condition) in cases.items():
+            with self.subTest(original=original):
+                changed = perturb("condition_last", original, original)
+                self.assertRestructured(original, changed, keep=(condition,))
+                self.assertTrue(changed.startswith(main), changed)
+                self.assertGreater(changed.index(condition), len(main))
+
+    def test_condition_last_leaves_shares_and_compound_filters(self):
+        for question in (
+                "Trong tổng doanh thu tháng 5/2026, phần của khách nhóm thân thiết là mấy phần trăm?",
+                "thang 10/2025 cua hang co bn % don bi huy",
+                "Tháng 4/2026, doanh thu các đơn trả bằng COD và các đơn trả bằng ví điện tử "
+                "mỗi loại bao nhiêu ạ?"):
+            with self.subTest(question=question):
+                self.assertIsNone(perturb("condition_last", question, "k"))
+
+    def test_indirect_wording_moves_the_period_to_the_end(self):
+        original = "Doanh thu của Tôn lạnh Hoa Sen 0.4mm trong tháng 7 năm 2025 là bao nhiêu?"
+        changed = perturb("indirect_wording", original, "k")
+        self.assertRestructured(original, changed, keep=("Tôn lạnh Hoa Sen 0.4mm",))
+        self.assertTrue(changed.endswith(", tính cho tháng 7 năm 2025?"))
+        self.assertNotIn("doanh thu", changed.lower())
 
 
 class BuildSplitsTests(unittest.TestCase):

@@ -307,79 +307,280 @@ def _report_wording(text: str, key: str) -> str | None:
     return _replace_measure(text, key, _REPORT_WORDINGS)
 
 
-_OPEN_MEASURE = re.compile(
-    r"\b(?:bao nhiêu|bao nhiu|mấy|bnhiu|nhiêu|là ai|là gì|nào)\b", re.I)
-_CONDITION = re.compile(
-    r"\b(?:riêng |theo |của |qua |trên )?(?:kênh bán|kênh|nhóm khách hàng|nhóm khách) "
-    r'(?:“[^”]+”|"[^"]+"|`[^`]+`)', re.I)
-_CANCELLED_CONDITION = re.compile(r"\b(?:bi |da )?huy\b")
-_FOLDED_CONDITION = re.compile(
-    r"\b(?:cac )?(?:khach(?: hang)? (?:thuoc )?nhom|nhom khach(?: hang)?) "
-    r"(?:than thiet|vang lai|dai ly|ban le|ban si)\b"
-    r"|\b(?:cac )?don (?:hang )?tra bang (?:tien mat|chuyen khoan|vi dien tu|cod)\b")
+# Report suites (yes_no_wording, condition_last, indirect_wording) restructure the
+# question: the period moves, the asked-for figure is re-asked in other words and the
+# original is never kept as one quoted or contiguous block, so a model cannot pass by
+# copying it back. Numbers, dates, product names and filter values stay verbatim.
+_TIME = re.compile(
+    r"\b(?:(?:trong|vao|tinh den het|den het|(?:tinh )?rieng|ngay) )*"
+    r"(?:thang \d{1,2}(?:/\d{4}| nam \d{4})|quy (?:\d|i{1,3}|iv)(?:/\d{4}| nam \d{4})"
+    r"|nam \d{4}|ngay \d{1,2}/\d{1,2}/\d{4}|hom qua|hom nay|bua qua|bua nay"
+    r"|tuan (?:truoc|roi|nay)|thang (?:truoc|nay)|\d+ ngay (?:gan nhat|qua))\b")
+_SEVERAL_PERIODS = re.compile(
+    r"\b(?:so voi|tu dau|tu ngay|tu \d|den het ngay|lan luot|cung ky|hon hay kem|tang hay giam"
+    r"|(?:thang|th|tuan|quy|nam) (?:truoc|lien truoc))\b")
+_ASK_OPENING = re.compile(
+    r"^(?:(?:e|ê|oi|ơi) )?(?:cho (?:toi|minh|em|tui) (?:biet|hoi)"
+    r"|(?:xem|check|coi|tra) (?:giup|gium|ho)(?: (?:minh|toi|em|tui))?"
+    r"|giup (?:minh|toi|em)|cho hoi)(?: la)? |^(?:e|ê|oi|ơi) ")
+_VALUE_TAIL = re.compile(
+    r"(?:(?:la|duoc|het|tong cong|tat ca) )?(?:bao nhieu|bao nhiu|bnhiu|bn|may)"
+    r"(?: (?:%|phan tram|tien(?: hang)?|don(?: hang)?|dong))?(?: (?:vay|a|ta|z|nhi|the))?$")
+_VALUE_HEAD = re.compile(
+    r"^((?:cua hang|quan|shop|tiem) )?co (bao nhieu|may|bn) ")
+_PARTICLE_END = re.compile(r"(?: (?:vay|a|ta|z|nhi|the|nhe))+$")
+_LOWER_FIRST = frozenset({
+    "doanh", "dthu", "tong", "so", "co", "gia", "trung", "thang", "quy", "nam", "hom", "bua",
+    "cua", "tien", "top", "ngay", "mat", "nhom", "ti", "ty", "khach", "don", "dem", "tinh",
+    "trong", "loi", "tuan", "hom", "hnay", "hqua"})
+
+
+def _folded_spans(text: str) -> tuple[str, list[tuple[int, int]]]:
+    """Folded text and, per folded token, the span of the original word it came from."""
+    folded: list[str] = []
+    spans: list[tuple[int, int]] = []
+    for match in re.finditer(r"\S+", text):
+        for token in fold(match[0]).split():
+            folded.append(token)
+            spans.append(match.span())
+    return " ".join(folded), spans
+
+
+def _find(text: str, pattern: re.Pattern[str]) -> list[tuple[int, int]]:
+    """Original character spans of the folded matches of ``pattern``."""
+    plain, spans = _folded_spans(text)
+    found = []
+    for match in pattern.finditer(plain):
+        begin = match.start() + len(match[0]) - len(match[0].lstrip())
+        if begin >= match.end():
+            continue
+        first = plain[:begin].count(" ")
+        last = plain[:match.end()].rstrip().count(" ")
+        found.append((spans[first][0], spans[last][1]))
+    return found
+
+
+def _cut(text: str, start: int, end: int) -> str:
+    rest = (text[:start].rstrip(" ,") + " " + text[end:].lstrip(" ,")).strip(" ,")
+    return re.sub(r"\s+", " ", rest)
+
+
+def _plain_core(text: str) -> str:
+    core = text.strip().rstrip("?!.… ").strip()
+    for start, end in _find(core, _PARTICLE_END)[-1:]:
+        core = core[:start].rstrip(" ,")
+    for start, end in _find(core, _ASK_OPENING)[:1]:
+        if start == 0:
+            core = core[end:].lstrip(" ,:")
+    return core
+
+
+def _split_time(core: str) -> tuple[str, str] | None:
+    """(the single period phrase, the rest), or None for several or comparisons."""
+    if _SEVERAL_PERIODS.search(fold(core)):
+        return None
+    spans = _find(core, _TIME)
+    if len(spans) > 1:
+        return None
+    if not spans:
+        return "", core
+    start, end = spans[0]
+    period = core[start:end].strip(" ,;:")
+    period = re.sub(r"^(?:trong|vào|vao|(?:tính |tinh )?riêng|(?:tính |tinh )?rieng)\s+"
+                    r"(?:(?:ngày|ngay)\s+(?=(?:hôm|hom|bữa|bua)\b))?", "", period, flags=re.I)
+    return period, _cut(core, start, end)
+
+
+def _lower_first(text: str) -> str:
+    """Lower an ordinary first word, not a name ("Bánh Oreo 133g", "NV001")."""
+    words = text.split(maxsplit=2)
+    if not words or words[0].isupper() and len(words[0]) > 1:
+        return text
+    if fold(words[0]) in _LOWER_FIRST or len(words) == 1 or words[1][:1].islower():
+        return text[:1].lower() + text[1:]
+    return text
+
+
+def _upper_first(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
+def _same_script(original: str, added: str) -> str:
+    """Added wording follows the question's own spelling (no diacritics when it has none)."""
+    return strip_diacritics(added) if strip_diacritics(original) == original else added
+
+
+def longest_shared_run(original: str, changed: str) -> int:
+    """Length, in folded words, of the longest run of the original kept verbatim."""
+    words, target = fold(original).split(), f" {fold(changed)} "
+    best = 0
+    for i in range(len(words)):
+        size = best + 1
+        while i + size <= len(words) and f" {' '.join(words[i:i + size])} " in target:
+            best, size = size, size + 1
+    return best
+
+
+def _copies_original(original: str, changed: str) -> bool:
+    """Kept as one block: a run of 8+ words that is also 3/4 of the question. A long
+    product name alone is not a copy; a quoted or barely touched question is."""
+    run = longest_shared_run(original, changed)
+    return run >= 8 and 4 * run >= 3 * len(fold(original).split())
+
+
+def _report_suite(original: str, changed: str | None) -> str | None:
+    if changed is None or _copies_original(original, changed):
+        return None
+    return re.sub(r"\s+", " ", changed).strip()
+
+
+def _fill(text: str, frame: str, **parts: str) -> str:
+    """Fill a frame written in Vietnamese with diacritics, spelled like the question."""
+    return _same_script(text, frame).format(**parts)
+
+
+_ASKED_LEAD = re.compile(r"^(?:là|la|được|duoc|hết|het|tổng cộng|tong cong|tất cả|tat ca)\s+",
+                         re.I)
 
 
 def _yes_no_wording(text: str, key: str) -> str | None:
-    core = text.strip().rstrip("?! .")
-    if not _OPEN_MEASURE.search(core) or re.search(r"\b(?:đúng không|có phải)\b", core, re.I):
+    """"Tháng 5/2025, X có tính ra được không? Nếu được thì cụ thể là bao nhiêu?"."""
+    core = _plain_core(text)
+    split = _split_time(core)
+    if split is None:
         return None
-    # The confirmation covers which figure the reader is asking for. The wh question
-    # itself still asks for the exact value/name, with no suggested value to accept.
-    return _choice(key, (
-        f"Có phải ô cần điền kết quả của mục «{core}» nằm ở phần này? Xin cho giá trị cụ thể.",
-        f"Có phải phần «{core}» là mục cần điền kết quả cụ thể? Xin cho kết quả của mục đó.",
-    ))
+    period, rest = split
+    # A period that opened the question moves behind the figure, and vice versa.
+    opened = bool(period) and fold(core).find(fold(period)) < 16
+    tail = _find(rest, _VALUE_TAIL)
+    head = _find(rest, _VALUE_HEAD)
+    if head and head[0][0] == 0:
+        start, end = head[0]
+        parts = re.match(r"^(.*?)\s*(?:có|co)\s+(bao nhiêu|bao nhieu|bao nhiu|mấy|may|bn)$",
+                         rest[:end].strip(), re.I)  # [owner…] có <bao nhiêu|mấy>
+        thing = rest[end:].strip(" ,")
+        if parts is None or "%" in rest:
+            return None
+        owner, asked = parts[1], parts[2]
+        if not thing or len(thing.split()) > 5 or re.search(
+                r"\b(?:nao|ma|khong|ko|tren|duoi|tu|moi|tung)\b", fold(thing)):
+            return None
+        subject = _fill(text, "{o} có {t} nào không", o=owner, t=thing).strip()
+        frames = ("{s}? Nếu có thì tổng cộng {a}?", "{s}, có thì là {a}?")
+    elif tail and tail[-1][1] == len(rest):
+        start, end = tail[-1]
+        subject = rest[:start].rstrip(" ,")
+        asked = _ASKED_LEAD.sub("", rest[start:end])
+        # "bán được bao nhiêu tiền": a verb, not a figure, would be left as the subject.
+        if len(subject.split()) < 2 or re.search(
+                r"\b(?:ban|ban ra|mua|thu|nhap|co|mang ve|ve|duoc|dc|đc|huy|trong)$|^(?:bi|da) ",
+                fold(subject)):
+            return None
+        frames = ("{s} có tính ra được không? Nếu được thì cụ thể là {a}?",
+                  "{s} có ra được số không, có thì là {a} vậy?")
+        if opened:
+            subject, period = f"{subject} {_lower_first(period)}", ""
+    else:
+        return None
+    subject = _lower_first(subject) if period else _upper_first(subject)
+    changed = _fill(text, _choice(key, frames), s=subject, a=asked)
+    return _report_suite(text, f"{_upper_first(period)}, {changed}" if period else changed)
+
+
+# A filter the question attaches to a noun; the attaching words move with it.
+_CONDITION_SPANS = (
+    (re.compile(r"\b(?:cac don(?: hang)? |cac )?(?:(?:cua|tu) (?:cac )?)?(?:khach(?: hang)? (?:thuoc )?nhom"
+                r"|nhom khach(?: hang)?) (?:than thiet|vang lai|dai ly|ban le|ban si)\b"),
+     "customer"),
+    (re.compile(r"\b(?:cac )?(?:don (?:hang )?)?(?:duoc )?(?:tra|thanh toan) (?:bang|qua) "
+                r"(?:tien mat|chuyen khoan|vi dien tu|cod|the)\b"), "payment"),
+    (re.compile(r"(?:(?<=\bdon )|(?<=\bdon hang ))(?:(?:o|co) trang thai |bi |da (?:bi )?)huy\b"),
+     "cancelled"),
+    (re.compile(r"\b(?:(?:tinh )?rieng |trong |cua |vao )?ca (?:sang|chieu|toi)\b"), "shift"),
+    (re.compile(r"\b(?:(?:cac )?don(?: hang)? )?(?:cua |do )?nhan vien (?:ma )?[a-z]{1,4}\d{1,4}\b"),
+     "staff"),
+)
+_QUOTED_CHANNEL = re.compile(
+    r"(?:(?:của |cua )?(?:các |cac )?(?:đơn|don)(?: hàng| hang)? )?"
+    r"(?:riêng |rieng |theo |qua |trên |tren |của |cua )"
+    r"((?:kênh bán|kenh ban|kênh|kenh) (?:“[^”]+”|\"[^\"]+\"|`[^`]+`))", re.I)
+_CONDITION_FRAMES = {
+    "channel": ("{m}, chỉ tính đơn bán qua {c}?", "{m}, riêng {c} thôi?"),
+    "customer": ("{m}, chỉ tính đơn của {c}?", "{m}, riêng phần của {c} thôi?"),
+    "payment": ("{m}, chỉ tính các đơn {c}?", "{m}, riêng các đơn {c} thôi?"),
+    "cancelled": ("{m}, chỉ đếm những đơn đã hủy?", "{m}, riêng các đơn bị hủy thôi?"),
+    "shift": ("{m}, chỉ tính {c}?", "{m}, riêng {c} thôi?"),
+    "staff": ("{m}, chỉ tính đơn của {c}?", "{m}, riêng đơn do {c} bán thôi?"),
+}
+_CONDITION_LEAD = re.compile(
+    r"^(?:(?:tính |tinh )?(?:riêng|rieng) |trong |vào |vao |(?:của|cua|do|từ|tu) )+", re.I)
+_CONDITION_PREFIX = re.compile(
+    r"^(?:(?:các|cac) )?(?:(?:đơn|don)(?: hàng| hang)? )?(?:(?:của|cua) )?(?:(?:các|cac) )?",
+    re.I)
 
 
 def _condition_last(text: str, key: str) -> str | None:
-    core = text.strip().rstrip("?! .")
-    if not (_OPEN_MEASURE.search(core) or re.search(
-            r"\b(?:bao nhieu|bao nhiu|may|bnhiu|nhieu|bn|so|ti le)\b", fold(core))):
+    """The single filter moves to the end as its own clause; the rest reads on its own."""
+    core = _plain_core(text)
+    plain = fold(core)
+    if not re.search(r"\b(?:bao nhieu|bao nhiu|bnhiu|bn|may|nhieu|dem|tong)\b", plain):
         return None
-    # Fold token by token with original offsets so spelling, dates and names remain verbatim.
-    tokens = [(fold(match[0]), match.span()) for match in re.finditer(r"[^\s,;?!]+", core)]
-    spans = []
-    folded = []
-    for word, (start, end) in tokens:
-        for token in word.split():
-            folded.append(token)
-            spans.append((start, end))
-    plain = " ".join(folded)
-    quotes = list(_CONDITION.finditer(core))
-    matches = list(_FOLDED_CONDITION.finditer(plain)) or list(_CANCELLED_CONDITION.finditer(plain))
-    if len(quotes) == 1:
-        start, end = quotes[0].span()
-    elif not quotes and len(matches) == 1:
-        match = matches[0]
-        start = spans[plain[:match.start()].count(" ")][0]
-        end = spans[plain[:match.end()].count(" ")][1]
-    else:
+    found = [(m.start(), m.end(), "channel", m[1]) for m in _QUOTED_CHANNEL.finditer(core)]
+    for pattern, kind in _CONDITION_SPANS:
+        found += [(start, end, kind, _CONDITION_LEAD.sub("", _CONDITION_PREFIX.sub(
+                      "", core[start:end]))) for start, end in _find(core, pattern)]
+    if len(found) != 1:
         return None
-    if re.search(r"\b(?:hoac|va|so voi|tru|khong)\s*$", fold(core[:start])):
+    start, end, kind, condition = found[0]
+    if re.search(r"\b(?:hoac|va|so voi|tru|khong|ko)$", fold(core[:start])) or re.search(
+            r"\b(?:ti le|ty le|phan tram|ti trong|ty trong|chiem|so voi|lan luot)\b", plain
+    ) or "%" in core:
+        return None  # part of another phrase, or a share whose scope the filter changes
+    main = _cut(core, start, end)
+    if len(main.split()) < 4 or re.search(r"\b(?:cua|cac|o|thuoc|qua|theo|bi|da|va)$",
+                                          fold(main)):
         return None
-    condition = core[start:end]
-    main = (core[:start].rstrip(" ,") + " " + core[end:].lstrip(" ,")).strip()
-    return f"{main}? Phần giới hạn phạm vi cần áp khi tra kết quả: {condition}."
+    if kind == "shift":
+        condition = condition[:1].lower() + condition[1:]
+    changed = _fill(text, _choice(key, _CONDITION_FRAMES[kind]), m=_upper_first(main), c=condition)
+    return _report_suite(text, changed)
 
 
 _INDIRECT_WORDINGS = (
     (r"\bdoanh thu\b", "con số tiền bán hàng tổng kết được"),
+    (r"\bdthu\b", "số tiền bán hàng thu về"),
     (r"\bgiá trị trung bình\b", "mức tiền chia đều"),
     (r"\bbán chạy nhất\b", "đứng trên các món còn lại nếu xét lượng bán"),
+    (r"\bsố (đơn(?: hàng)?)\b", r"lượng \1 chốt được"),
+    (r"\bcó (bao nhiêu|mấy) (đơn(?: hàng)?)\b", r"chốt được \1 \2"),
+)
+_INDIRECT_FRAMES = (
+    "Mình đang tổng kết lại sổ, cần biết {r}{p}?",
+    "Nhờ tra giúp mình một chỗ trong sổ: {r}{p}?",
+    "Đang đối chiếu sổ sách nên muốn hỏi {r}{p}?",
 )
 
 
 def _indirect_wording(text: str, key: str) -> str | None:
-    core = _replace_measure(text, key, _INDIRECT_WORDINGS)
-    if core is None and re.search(r"\b(?:số|bao nhiêu|mấy) (?:đơn|hóa đơn)\b", text, re.I):
-        core = text
-    if core is None or not _OPEN_MEASURE.search(core):
+    """An indirect request: other words for the figure, the period moved to the end."""
+    split = _split_time(_plain_core(text))
+    if split is None:
         return None
-    core = core.strip().rstrip("?! .")
-    return _choice(key, (
-        f"Ô kết quả của mục «{core}» trong bản tổng hợp còn trống; mình nhờ tra và điền cụ thể.",
-        f"Mục «{core}» ở bản ghi còn thiếu kết quả; mình muốn lấy giá trị để bổ sung vào ô đó.",
-    ))
+    period, rest = split
+    renamed = _replace_measure(rest, key, _INDIRECT_WORDINGS)
+    if renamed is None or not re.search(
+            r"\b(?:bao nhieu|bao nhiu|bnhiu|bn|may|la ai|la gi|nao)\b", fold(renamed)):
+        return None
+    if strip_diacritics(text) == text:
+        renamed = strip_diacritics(renamed)  # the new measure words follow the question
+    if not period:
+        when = ""
+    elif re.match(r"(?:tinh )?den het\b", fold(period)):
+        when = f", {period}"
+    else:
+        when = _fill(text, ", tính cho {t}", t=_lower_first(period))
+    return _report_suite(text, _fill(text, _choice(key, _INDIRECT_FRAMES),
+                                     r=_lower_first(renamed), p=when))
 
 
 _FUNCTIONS: dict[str, Callable[[str, str], str | None]] = {
