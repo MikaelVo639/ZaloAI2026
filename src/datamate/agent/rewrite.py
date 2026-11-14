@@ -452,16 +452,19 @@ def _pack_units(text: str) -> set[tuple[str, str]]:
             for unit, part in _PACK_UNITS.findall(text)}
 
 
-def rewrite_names(agent: BaselineAgent, context: BusinessContext) -> tuple[str, ...]:
+def rewrite_names(agent: BaselineAgent, context: BusinessContext, *,
+                  include_staff: bool = False) -> tuple[str, ...]:
     """Identity labels available from the current business's offline sources."""
     if "rewrite_names" not in context.cache:
         result = agent.worker.run(compute.rewrite_identity_names, agent.ingestion_timeout,
                                   catalog=context.catalog, rulebook=context.split.rulebook)
+        vocabulary = agent._vocabulary(context)
         labels = [label for field in ("product_group", "customer_group")
-                  for label in agent._vocabulary(context).get(field, ())]
+                  for label in vocabulary.get(field, ())]
         context.cache["rewrite_names"] = (
             *agent._product_names(context), *labels, *(result.value if result.ok else ()))
-    return context.cache["rewrite_names"]
+    names = context.cache["rewrite_names"]
+    return (*names, *agent._vocabulary(context).get("staff_names", ())) if include_staff else names
 
 
 # Votes that restated nothing: no evidence against the one vote that did.
@@ -616,12 +619,14 @@ def _retry_messages(messages: list[dict[str, str]], rewrite: str,
 
 
 def _rejected_messages(messages: list[dict[str, str]], rewrite: str,
-                       rejected: str) -> list[dict[str, str]]:
+                       rejected: str, *, firm: bool = False) -> list[dict[str, str]]:
+    fallback = (f"Chỉ trả {UNSURE} nếu không thể giữ nguyên các chi tiết và điều kiện đó."
+                if firm else f"Nếu chưa chắc, trả {UNSURE}.")
     return [*messages, {"role": "assistant", "content": rewrite},
             {"role": "user", "content": (
                 f"Câu viết lại bị từ chối ({rejected}). Hãy viết lại câu hỏi gốc đúng một "
                 "dòng, giữ nguyên mọi số, ngày, kỳ, tên và mọi điều kiện của câu gốc. "
-                f"Nếu chưa chắc, trả {UNSURE}.")}]
+                f"{fallback}")}]
 
 
 
@@ -662,13 +667,16 @@ class RewriteAgent(LocalPlanAgent):
                  rewrite_retries: int = 1, lenient: bool = False,
                  retry_rejected: bool = False, code_fallback: bool = False,
                  code_only: bool = False, single_vote: bool = False,
-                 firm_retry: bool = False, **kwargs: Any) -> None:
+                 firm_retry: bool = False, firm_rejected_retry: bool = False,
+                 **kwargs: Any) -> None:
         super().__init__(model_path, **kwargs)
         if any(type(flag) is not bool for flag in (lenient, retry_rejected, code_fallback,
-                                                   code_only, single_vote, firm_retry)):
+                                                   code_only, single_vote, firm_retry,
+                                                   firm_rejected_retry)):
             raise ValueError("lenient, retry_rejected, code_fallback, code_only, single_vote and "
-                             "firm_retry must be true or false")
+                             "firm_retry and firm_rejected_retry must be true or false")
         self.single_vote, self.firm_retry = single_vote, firm_retry
+        self.firm_rejected_retry = firm_retry and firm_rejected_retry
         self.lenient, self.retry_rejected = lenient, retry_rejected
         self.code_fallback, self.code_only = code_fallback, code_only
         if type(votes) is not int or not 1 <= votes <= 3:
@@ -709,6 +717,7 @@ class RewriteAgent(LocalPlanAgent):
         """One restatement (with its retry): a Plan, the reason it failed, or a Candidate
         when the model itself failed."""
         restated_unplanned = False  # a restatement the grammar could not plan
+        prior_rejection = None
         for retry in range(self.rewrite_retries + 1):
             attempt: dict[str, Any] = {"prompt_sha256": hashlib.sha256(
                 json.dumps(messages, ensure_ascii=False).encode()).hexdigest()}
@@ -728,6 +737,8 @@ class RewriteAgent(LocalPlanAgent):
             rewrite = parse_rewrite(generated.value.get("text", ""))
             attempt["rewrite"] = rewrite
             if rewrite is None:
+                if prior_rejection is not None:
+                    return prior_rejection
                 # After a restatement the grammar could not plan, a KHONG_RO on the retry is
                 # the grammar's gap, not the model's doubt (both reasons behave the same).
                 return ("Grammar cannot plan the rewrite" if restated_unplanned
@@ -738,7 +749,10 @@ class RewriteAgent(LocalPlanAgent):
                 if not self.retry_rejected or retry == self.rewrite_retries:
                     return rejected
                 attempt.update(vote=vote, retry=retry)
-                messages = _rejected_messages(messages, rewrite, rejected)
+                if self.firm_rejected_retry:
+                    prior_rejection = rejected
+                messages = _rejected_messages(messages, rewrite, rejected,
+                                              firm=self.firm_rejected_retry)
                 continue
             restated = Question(question.id, question.business_id, rewrite, question.as_of_date)
             plan = self._plan(restated, context)
@@ -787,6 +801,9 @@ class RewriteAgent(LocalPlanAgent):
         failure = self._prepare(context)
         if failure is not None:
             return failure
+        if context.cache.get("worker_sales", {}).get("service_tickets"):
+            return Candidate(reason="Model calculation is not verified for service tickets",
+                             evidence={"path": "code"})
         today = question.as_of_date
         shape = self.worker.run(self.code_profile, self.question_timeout, today=today,
                                 catalog=context.catalog, calendar=context.split.calendar_path)
@@ -879,7 +896,7 @@ class RewriteAgent(LocalPlanAgent):
     def _rewrite_answer(self, question: Question, context: BusinessContext) -> Candidate:
         product_names = self._product_names(context)
         vocabulary = self._vocabulary(context)
-        names = rewrite_names(self, context)
+        names = rewrite_names(self, context, include_staff=self.firm_rejected_retry)
         asked = spell_months(question.question)  # what the model reads and is checked on
         chosen = select_examples(asked, self.examples)
         rule_names = [spec.nguon.strip().strip("|").split("|")[0].strip()

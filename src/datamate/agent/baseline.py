@@ -19,7 +19,7 @@ from datamate.semantics.planner import (
     stock_question,
 )
 from datamate.semantics.rules import read_rules
-from datamate.semantics.text import fold, opening_cuts
+from datamate.semantics.text import fold, normalize_question, opening_cuts
 
 QUESTION_TIMEOUT_SECONDS = 30.0
 INGESTION_TIMEOUT_SECONDS = 300.0
@@ -88,7 +88,8 @@ class BaselineAgent:
         plan = self._plan_text(question, context)
         if plan is not None or not _CUT_HINT.search(question.question):
             return plan
-        labels = [label for values in self._vocabulary(context).values() for label in values]
+        labels = [label for field, values in self._vocabulary(context).items()
+                  if field != "staff_codes" for label in values]
         names = tuple(fold(name) for name in [*self._product_names(context), *labels])
         for rest in opening_cuts(question.question, names):
             plan = self._plan_text(replace(question, question=rest), context)
@@ -120,7 +121,8 @@ class BaselineAgent:
         if plan is None:
             # Retry with this business's product names/codes ("doanh thu <mặt hàng> …").
             names = self._product_names(context)
-            if names:
+            folded = fold(question.question)
+            if names or "nhan vien" in folded:
                 vocabulary = self._vocabulary(context)
                 plan = plan_question(question, rules, names, vocabulary)
                 if plan is None and price_history_question(question, rules):
@@ -132,6 +134,14 @@ class BaselineAgent:
                     increases, source = context.cache["price_history"]
                     plan = plan_question(question, rules, names, vocabulary,
                                          price_increases=increases, price_source=source)
+        if plan is None and re.search(r"\bphieu dich vu\b", fold(question.question)):
+            if self._prepare(context) is None and context.cache["worker_sales"].get("service_tickets"):
+                # Only this documented source gives "phiếu dịch vụ" the same grain as an order.
+                normalized = re.sub(r"\bphieu dich vu\b", "don",
+                                    normalize_question(question.question))
+                ticket_plan = plan_question(replace(question, question=normalized), rules)
+                if ticket_plan and ticket_plan.intent in ("order_count", "revenue"):
+                    plan = ticket_plan
         if plan is None:
             plan = plan_rule_rank(question, rules, self._rule_specs(context.split.rulebook))
         return self._with_base_unit(plan, context) if plan is not None else None
@@ -222,6 +232,8 @@ class BaselineAgent:
             # The debt worker retains typed failures for interpretation with the Plan.
             context.cache[cache_key] = {"ok": True, "generation": self.worker.generation,
                                         "rulebook": rulebook}
+            if not debt and result.value.get("source", {}).get("grain") == "service_tickets":
+                context.cache[cache_key]["service_tickets"] = True
             return None
         step = "Debt ingestion" if debt else "Sales ingestion"
         reason = result.value["reason"] if result.ok else _failure_reason(step, result)

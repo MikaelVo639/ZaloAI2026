@@ -50,7 +50,7 @@ from datamate.ingestion.purchases import (
     load_purchase_lines,
     load_purchases,
 )
-from datamate.ingestion.readme_sales import field_meanings
+from datamate.ingestion.readme_sales import field_meanings, sqlite_staff_codes
 from datamate.ingestion.sales import Sale
 from datamate.ingestion.source_names import filename_key
 from datamate.ingestion.stock import (
@@ -316,6 +316,10 @@ def vocabulary(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -> d
         labels = {getattr(s, attribute) for s in sales if getattr(s, attribute)}
         result[f"{kind}_terms"] = label_terms(labels, field_meanings(catalog.readme, attribute),
                                               kind)
+    staff = sorted(sqlite_staff_codes(catalog).items())
+    if staff:
+        result["staff_names"] = [name for name, _ in staff]
+        result["staff_codes"] = [code for _, code in staff]
     return result
 
 
@@ -798,6 +802,9 @@ def _answer_rule_rank(cache: dict[str, Any], catalog: Catalog, plan: Plan, ruleb
             if not prepared["ok"]:
                 return Candidate(reason=prepared["reason"], evidence=evidence)
             sales, source = cache["sales"]
+            if source.get("grain") == "service_tickets":
+                return Candidate(reason="Service tickets document only order revenue and counts",
+                                 evidence=evidence)
             if (spec.doi_tuong == "mat_hang"
                     and source.get("product_identity") == "names_unverified"):
                 return Candidate(reason="Products known only by header-guessed names",
@@ -1683,6 +1690,10 @@ def _answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         "inputs": {"tables": source["tables"], "sales_rows": source["sales_rows"],
                    "data_first_day": prepared["data_first_day"],
                    "data_last_day": prepared["data_last_day"]}}
+    if source.get("grain") == "service_tickets" and (
+            plan.intent not in {"revenue", "order_count"} or plan.filters or plan.threshold):
+        return Candidate(reason="Service tickets document only order revenue and counts",
+                         evidence=evidence)
     if plan.intent == "revenue_increasing":
         return _answer_revenue_trend(sales, catalog.readme, plan, evidence)
     if plan.compare_start:

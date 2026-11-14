@@ -160,7 +160,7 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
     plan = _plan_question(question, text, rules, names, vocabulary, price_increases, price_source)
     if plan is not None:
         return plan
-    labels = tuple(label for field in ("product_group", "customer_group")
+    labels = tuple(label for field in ("product_group", "customer_group", "staff_names")
                    for label in (vocabulary or {}).get(field, ()))
     corrected = _repair_grammar_tokens(text, names + labels)
     if corrected != text:
@@ -313,7 +313,7 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
                       " ", text)
         text = re.sub(r"\bquan(?= ban\b)", " ", text)
         text = re.sub(r"\s+", " ", text).strip()
-    staff = _staff(text)
+    staff = _staff(text, vocabulary or {})
     if staff is False or (staff and filters):
         return None  # several staff codes, or a second filter
     if staff:
@@ -1501,15 +1501,22 @@ _BEST_STAFF = re.compile(
     r"|\b(?:ai la )?(?:nhan vien|nguoi ban) (?:nao )?co doanh thu cao nhat(?: la ai)?\b")
 
 
-def _staff(text: str) -> tuple[str, str] | None | bool:
-    """"nhân viên mã NV001": a staff code filter; None: no code; False: several codes."""
-    found = list(_STAFF.finditer(text))
+def _staff(text: str, vocabulary: dict[str, Iterable[str]]) -> tuple[str, str] | None | bool:
+    """Select an explicit staff code or an unambiguous name from this business's POS list."""
+    found = [(match.span(), match.group(1) or match.group(2)) for match in _STAFF.finditer(text)]
+    names = dict(zip(vocabulary.get("staff_names", ()), vocabulary.get("staff_codes", ())))
+    if names:
+        choices = "|".join(re.escape(name) for name in sorted(names, key=lambda n: (-len(n), n)))
+        named = re.compile(rf"\b(?:(?:cac )?don (?:hang )?do |cua )?nhan vien ({choices})\b")
+        found.extend((match.span(), names[match.group(1)]) for match in named.finditer(text))
     if not found:
         return None
-    codes = {match.group(1) or match.group(2) for match in found}
+    codes = {code.upper() for _, code in found}
     if len(codes) != 1:
         return False
-    return _STAFF.sub(" ", text), codes.pop().upper()
+    for start, end in sorted({span for span, _ in found}, reverse=True):
+        text = text[:start] + " " + text[end:]
+    return text, codes.pop()
 
 
 _SHIFT = re.compile(r"\b(?:rieng |trong |cua )?ca (sang|chieu)\b")

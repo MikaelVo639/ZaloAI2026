@@ -12,6 +12,7 @@ from datamate.agent.rewrite import (
     EXAMPLES,
     UNSURE,
     RewriteAgent,
+    _rejected_messages,
     _retry_messages,
     build_rewrite_messages,
     check_rewrite,
@@ -133,6 +134,14 @@ def only_first_vote_restates_generate(cache, messages, max_input_tokens, max_new
 def first_vote_restates_second_changes_generate(cache, messages, max_input_tokens,
                                                 max_new_tokens):
     order = _order(messages)
+    return {"text": STANDARD if order == 0 else
+            "Doanh thu tháng 7/2026 là bao nhiêu?" if order == 1 else UNSURE}
+
+
+def rejected_then_unsure_generate(cache, messages, max_input_tokens, max_new_tokens):
+    order = _order(messages)
+    if len(messages) > 2:
+        return {"text": UNSURE}
     return {"text": STANDARD if order == 0 else
             "Doanh thu tháng 7/2026 là bao nhiêu?" if order == 1 else UNSURE}
 
@@ -569,6 +578,23 @@ class RewriteAgentTests(unittest.TestCase):
                               rewrite_retries=0).answer(self.question, self.context)
         self.assertEqual(len(no_retry.evidence["rewrites"]), 1)
 
+    def test_firm_rejected_retry_preserves_rejection_against_single_vote(self):
+        flags = dict(votes=3, single_vote=True, retry_rejected=True, firm_retry=True)
+        control = self.agent(rejected_then_unsure_generate, **flags).answer(
+            self.question, self.context)
+        self.assertEqual(control.type, "number")
+        variant = self.agent(rejected_then_unsure_generate, firm_rejected_retry=True,
+                             **flags).answer(self.question, self.context)
+        self.assertEqual((variant.type, variant.reason),
+                         ("abstain", "Rewrite changed the numbers of the question"))
+        messages = _rejected_messages([], "wrong", variant.reason, firm=True)
+        self.assertIn(variant.reason, messages[-1]["content"])
+        self.assertIn("Chỉ trả", messages[-1]["content"])
+        self.assertNotIn("Nếu chưa chắc", messages[-1]["content"])
+        recovered = self.agent(rejected_then_standard_generate, firm_rejected_retry=True,
+                               **flags).answer(self.question, self.context)
+        self.assertEqual(recovered.type, "number", recovered.reason)
+
     def test_two_of_three_votes(self):
         tie = self.agent(third_vote_breaks_tie_generate, votes=3).answer(self.question, self.context)
         self.assertEqual(tie.type, "number", tie.reason)
@@ -645,6 +671,11 @@ class RewriteAgentTests(unittest.TestCase):
                          {k: v for k, v in vars(v9).items() if k != "rewrite_firm_retry"})
         with self.assertRaisesRegex(ValueError, "rewrite_firm_retry"):
             Config(rewrite_firm_retry="yes")
+        v10 = Config.load(configs / "rewrite-v10.toml")
+        self.assertFalse(v9.rewrite_firm_rejected_retry)
+        self.assertEqual(v9, replace(v10, rewrite_firm_rejected_retry=False))
+        with self.assertRaisesRegex(ValueError, "rewrite_firm_rejected_retry"):
+            Config(rewrite_firm_rejected_retry="yes")
 
 
 if __name__ == "__main__":

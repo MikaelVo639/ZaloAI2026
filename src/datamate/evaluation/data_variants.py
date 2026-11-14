@@ -22,7 +22,11 @@ businesses it changed; ``<name>.answers.jsonl`` beside it holds their train refe
 - ``readme_paraphrase``: the README describes the columns of its sales line lists in other
   words, each followed by an explanation ("số hoá đơn, ghi ở mọi dòng của hoá đơn").
 - ``status_in_notes``: a sales line list loses its status column; the order state is
-  written in a notes column (blank: completed), as the README then says.
+  written in a notes column whose README lists its possible states. Some notes mention
+  a state that this column does not record.
+- ``order_adjustments``: add two documented non-merchandise rows to an existing order.
+- ``service_tickets``: project an order ledger onto dates, states and ticket totals, retaining
+  only plain revenue and order-count questions.
 - ``short_names``: every other product of a sales line list is written by its initials; a
   ``GhiTat.csv`` list gives the full name of each short form, as the README then says.
 - ``unknown_export``: a shop whose sales come from a POS / sales-software export no longer
@@ -46,9 +50,11 @@ from typing import Any
 from datamate.evaluation.robustness import _link_tree
 from datamate.ingestion.catalog import build_catalog
 from datamate.ingestion.readme_sales import (
+    ReadmeSalesError,
     _classify,
     _matching_tables,
     _records,
+    load_readme_sales,
     parse_amount,
     parse_day,
     parse_sections,
@@ -60,7 +66,8 @@ from datamate.semantics.text import fold
 
 VARIANTS = ("monthly_files", "duplicate_orders", "summary_rows", "no_column_docs",
             "status_labels", "repeated_headers", "cost_convention_only", "catalogue_stock_column",
-            "unknown_export", "readme_paraphrase", "status_in_notes", "short_names")
+            "unknown_export", "readme_paraphrase", "status_in_notes", "short_names",
+            "order_adjustments", "service_tickets")
 STATUS_LABELS = {"tra hang": "Khách trả", "dang giao": "Đang ship"}
 DUPLICATE_EVERY = 25
 FAMILY_NOTE = "Các file `{template}` là dữ liệu chia theo tháng, mỗi tháng một file, cùng cột."
@@ -480,8 +487,10 @@ def readme_paraphrase(source: Path, destination: Path) -> bool:
 
 _NOTE_TEXT = {"huy": "Khách huỷ đơn", "tra hang": "Khách trả lại hàng",
               "dang giao": "Đang giao cho khách", "hoan thanh": None}
-_NOTE_MEANING = ("ghi chú của đơn; đơn huỷ, đơn trả hàng, đơn đang giao được ghi ở đây, "
-                 "không có cột trạng thái riêng")
+_NOTE_STATES = {"huy": "huỷ", "tra hang": "trả hàng", "dang giao": "đang giao"}
+_OTHER_NOTES = {"huy": "Nhắc khách kiểm tra yêu cầu huỷ của tuần trước",
+                "tra hang": "Khách hỏi nơi trả lại vỏ rỗng",
+                "dang giao": "Bạn đang giao đơn khác"}
 
 
 def _one_table_lists(readme: str, catalog: Any, need: str) -> list[tuple[Any, Any]]:
@@ -520,7 +529,7 @@ def status_in_notes(source: Path, destination: Path) -> bool:
     readme = (source / "README.md").read_text(encoding="utf-8-sig")
     catalog = build_catalog(source.parent, source.name)
     rewritten: dict[Path, tuple[Any, list[str], list[dict[str, Any]]]] = {}
-    notes: dict[str, str] = {}
+    notes: dict[str, tuple[str, str]] = {}
     for section, table in _one_table_lists(readme, catalog, "status"):
         column = section.fields["status"]
         if table.path in rewritten:
@@ -532,31 +541,39 @@ def status_in_notes(source: Path, destination: Path) -> bool:
             return False
         header: list[str] = []
         rows: list[dict[str, Any]] = []
+        states = []
         for row in records:
-            label = row.pop(column, None)
+            label = row.get(column)
             state = None
             if label not in (None, "") and str(label).strip():
                 state = order_state(label) or eliminated.get(normalize_label(label))
                 if state is None:
                     return False
-            row[note] = _NOTE_TEXT[state] if state else None
+            states.append(state)
+        actual = set(states) & _NOTE_STATES.keys()
+        declared = actual or {"huy"}
+        other = next((v for k, v in _OTHER_NOTES.items() if k not in declared), "Đổi size")
+        for row, state in zip(records, states):
+            row.pop(column, None)
+            row[note] = other if state == "hoan thanh" else _NOTE_TEXT.get(state)
             header += [name for name in row if name not in header]
             rows.append(row)
         rewritten[table.path] = (table, header, rows)
-        notes[section.label] = column
+        labels = ", ".join(_NOTE_STATES[state] for state in sorted(declared))
+        notes[section.label] = (column, f"ghi chú của đơn; chỉ ghi trạng thái {labels}")
     if not rewritten:
         return False
     sections = [s for s in _sales_line_sections(readme) if s.label in notes]
 
     def change(column: str, meaning: str) -> str | None:
-        return None if column in notes.values() else meaning
+        return None if column in {c for c, _ in notes.values()} else meaning
 
     text = _rewrite_meanings(readme, sections, change)
     for label in notes:
         file = label.split("::")[0]
         heading = next(line for line in text.splitlines()
                        if re.match(r"##\s+Cột trong\s+`" + re.escape(file) + "`", line))
-        text = text.replace(heading + "\n", f"{heading}\n- **Ghi chú đơn**: {_NOTE_MEANING}\n", 1)
+        text = text.replace(heading + "\n", f"{heading}\n- **Ghi chú đơn**: {notes[label][1]}\n", 1)
     _rewrite_tables(source, destination, text, rewritten)
     return True
 
@@ -628,13 +645,82 @@ def short_names(source: Path, destination: Path) -> bool:
     return True
 
 
+def order_adjustments(source: Path, destination: Path) -> bool:
+    readme = (source / "README.md").read_text(encoding="utf-8-sig")
+    catalog = build_catalog(source.parent, source.name)
+    for section, table in _one_table_lists(readme, catalog, "product_name"):
+        fields = section.fields
+        if not {"order_id", "quantity"} <= fields.keys():
+            continue
+        name = fields["product_name"]
+        rows = [row for _, row in _records(table, section.columns)]
+        if not rows or any(fold(str(row.get(name))) in {"uu dai quy", "cuoc tan noi"}
+                           for row in rows):
+            continue
+        for index, row in enumerate(rows):
+            if not all(row.get(fields[field]) for field in ("order_id", "product_name", "quantity")):
+                continue
+            adjustments = []
+            for label, amount in (("Ưu đãi quý", "-4300"), ("Cước tận nơi", "7900")):
+                extra = {column: row.get(column) for field, column in fields.items()
+                         if field in {"order_id", "date", "status", "staff_id", "customer_id",
+                                      "customer_name", "customer_group", "channel", "time",
+                                      "payment_method"}}
+                adjustments.append({**extra, name: label, fields["amount"]: amount})
+            rows[index + 1:index + 1] = adjustments
+            text = _rewrite_meanings(readme, [section], lambda column, meaning: (
+                f"{meaning}; dòng không phải mặt hàng: `Ưu đãi quý` là giảm giá cả đơn; "
+                "`Cước tận nơi` là phí giao hàng" if column == name else meaning))
+            _rewrite_tables(source, destination, text,
+                            {table.path: (table, list(row), rows)})
+            return True
+    return False
+
+
+def service_tickets(source: Path, destination: Path) -> bool:
+    """Project a verified TRAIN line ledger down to one row per ticket."""
+    readme = (source / "README.md").read_text(encoding="utf-8-sig")
+    catalog = build_catalog(source.parent, source.name)
+    if not _one_table_lists(readme, catalog, "status"):
+        return False
+    try:
+        sales, _, _ = load_readme_sales(
+            catalog, (source.parents[1] / "rulebook.md").read_text(encoding="utf-8"))
+    except ReadmeSalesError:
+        return False
+    orders: dict[str, tuple[date, str, Any]] = {}
+    for sale in sales:
+        old = orders.get(sale.order_id)
+        orders[sale.order_id] = (sale.day, sale.status, sale.amount + (old[2] if old else 0))
+    if not orders:
+        return False
+    statuses = {"valid": "Hoàn thành", "returned": "Trả hàng", "cancelled": "Huỷ"}
+    if not {status for _, status, _ in orders.values()} <= statuses.keys():
+        return False
+    destination.mkdir(parents=True)
+    with (destination / "tickets.csv").open("x", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(("Ngày phiếu", "Tổng", "Kết quả"))
+        for day, status, amount in orders.values():
+            writer.writerow((day.isoformat(), str(amount), statuses[status]))
+    coverage = "\n".join(line for line in readme.splitlines()
+                          if "du lieu co den het" in fold(line))
+    (destination / "README.md").write_text(
+        "## File\n- `tickets.csv` (csv)\n\n## Cột trong `tickets.csv`\n"
+        "- **Ngày phiếu**: ngày bán; mỗi dòng là một phiếu dịch vụ\n"
+        "- **Tổng**: tổng tiền phiếu; trước giảm giá cả đơn, không gồm phí giao, không gồm thuế\n"
+        "- **Kết quả**: trạng thái đơn\n\n## Quy ước\n" + coverage + "\n", encoding="utf-8")
+    return True
+
+
 _BUILDERS = {"monthly_files": monthly_files, "duplicate_orders": duplicate_orders,
              "summary_rows": summary_rows, "no_column_docs": no_column_docs,
              "status_labels": status_labels, "repeated_headers": repeated_headers,
              "cost_convention_only": cost_convention_only,
              "catalogue_stock_column": catalogue_stock_column, "unknown_export": unknown_export,
              "readme_paraphrase": readme_paraphrase, "status_in_notes": status_in_notes,
-             "short_names": short_names}
+             "short_names": short_names, "order_adjustments": order_adjustments,
+             "service_tickets": service_tickets}
 
 
 def build_variant(train: Path, output: Path, name: str) -> dict[str, Any]:
@@ -657,6 +743,15 @@ def build_variant(train: Path, output: Path, name: str) -> dict[str, Any]:
     questions = [json.loads(line) for line in
                  (train / "questions.jsonl").read_text(encoding="utf-8").splitlines() if line]
     kept = [q for q in questions if q["business_id"] in changed]
+    if name == "service_tickets":
+        from datamate.contracts import Question
+        from datamate.semantics.planner import plan_question
+        from datamate.semantics.rules import read_rules
+
+        rules = read_rules((train / "rulebook.md").read_text(encoding="utf-8"))
+        kept = [q for q in kept if (plan := plan_question(Question(
+            q["id"], q["business_id"], q["question"], date.fromisoformat(q["as_of_date"])),
+            rules)) and plan.intent in {"revenue", "order_count"} and not plan.filters]
     answers = {json.loads(line)["id"]: line for line in
                (train / "answers.jsonl").read_text(encoding="utf-8").splitlines() if line}
     (split / "questions.jsonl").write_text(

@@ -168,25 +168,34 @@ _HEAD_AMOUNT = re.compile(r"^thanh tien(?: cua)? (?:dong|moi dong|ca dong)$")
 # state is written in its notes (status_note). A blank note is a completed order.
 _NOTE_HEADS = frozenset({"ghi chu", "ghi chu cua don", "ghi chu don", "ghi chu cua hoa don",
                          "note", "notes"})
-_NOTE_STATES = re.compile(r"\b(?:huy|tra lai|tra hang|dang giao)\b")
 _NOTE_LABELS = (
     ("huy", re.compile(r"\bhuy\b")),
     ("tra hang", re.compile(r"\b(?:tra lai|tra hang|doi tra|hoan tra|hoan hang)\b")),
     ("dang giao", re.compile(r"\bdang (?:giao|ship|van chuyen)\b")),
 )
-_NOTE_NEGATION = re.compile(r"\b(?:khong|chua|ko) (?:huy|tra|giao)\b")
+_NOTE_NEGATIONS = {
+    state: re.compile(rf"\b(?:khong|chua|ko) {verb}\b")
+    for state, verb in (("huy", "huy"), ("tra hang", "tra"), ("dang giao", "giao"))
+}
 
 
-def note_state(note: Any) -> str | None:
+def _note_labels(text: str) -> frozenset[str]:
+    return frozenset(state for state, pattern in _NOTE_LABELS if pattern.search(text))
+
+
+def note_state(note: Any, allowed: frozenset[str] | None = None) -> str | None:
     """The order state a note names ("Khách trả lại hàng" -> "tra hang"), None for a note
     that names none; a note naming several states, or a negated one, raises."""
     whole = order_state(note)  # the note is a status label itself ("Khách huỷ")
-    if whole and whole != "hoan thanh":
+    if whole and whole != "hoan thanh" and (allowed is None or whole in allowed):
         return whole
     text = fold(str(note))
-    if _NOTE_NEGATION.search(text):
+    if any(pattern.search(text) for state, pattern in _NOTE_NEGATIONS.items()
+           if allowed is None or state in allowed):
         raise ReadmeSalesError("STATUS_AMBIGUOUS", "An order note negates a state")
-    found = {state for state, pattern in _NOTE_LABELS if pattern.search(text)}
+    found = _note_labels(text)
+    if allowed is not None:
+        found &= allowed
     if len(found) > 1:
         raise ReadmeSalesError("STATUS_AMBIGUOUS", "An order note names several states")
     return next(iter(found), None)
@@ -198,7 +207,7 @@ def _states_from_notes(lines: list[dict[str, Any]]) -> None:
     for line in lines:
         note = line.get("status_note")
         if not _blank(note):
-            state = note_state(note)
+            state = note_state(note, line.get("_note_labels"))
             if state:
                 by_order[line["_order"]].add(state)
     for line in lines:
@@ -273,12 +282,31 @@ _HEAD_FIELDS = frozenset({"order_id", "date", "product_id", "product_name", "qua
                           "channel", "payment_method", "staff_id"})
 
 
+_SERVICE_AMOUNT = re.compile(r"^(?:tong tien|thanh tien)(?: cua)? (?:phieu|phieu dich vu)$")
+_SERVICE_GRAIN = re.compile(r"\bmoi dong (?:la|tuong ung) (?:voi )?mot phieu(?: dich vu)?\b")
+_ONLY_COMPLETE = re.compile(
+    r"\bchi ghi (?:cac )?phieu (?:da )?(?:hoan thanh|thanh toan)\b")
+
+
+def _service_sheet(section: Section, readme: str) -> bool:
+    # A grain statement from the README's general conventions is safe only when the
+    # same README documents a single table of this shape (checked by the loader).
+    if section.origin != "readme":
+        return False
+    fields = section.fields
+    if ("date" not in fields or not fields.keys() & {"order_goods", "service_goods"}
+            or fields.keys() & {"product_id", "product_name", "quantity", "order_id", "amount"}):
+        return False
+    return bool(_SERVICE_GRAIN.search(fold(" ".join(section.columns.values())))
+                or (len(parse_sections(readme)) == 1 and _SERVICE_GRAIN.search(fold(readme))))
+
+
 def _meaning_head_field(meaning: str) -> str | None:
     raw = re.sub(r"\([^)]*\)", " ", re.split(r"[:;,]", meaning, maxsplit=1)[0])
     if re.search(r"\bhãng\b", unicodedata.normalize("NFC", raw.lower())):
         return None  # "hãng" (brand) folds to the same letters as "hàng" (goods)
     head = fold(raw).strip()
-    if head in _NOTE_HEADS and _NOTE_STATES.search(fold(meaning)):
+    if head in _NOTE_HEADS and _note_labels(fold(meaning)):
         return "status_note"
     if not head or head in _MEANINGS:
         return _MEANINGS.get(head)
@@ -286,6 +314,8 @@ def _meaning_head_field(meaning: str) -> str | None:
         return "order_id"
     if _HEAD_AMOUNT.match(head):
         return "amount"
+    if _SERVICE_AMOUNT.fullmatch(head):
+        return "service_goods"
     field = header_field(head)
     return field if field in _HEAD_FIELDS else None
 
@@ -473,6 +503,32 @@ def profile_sections(catalog: Catalog, documented: list[Section]) -> list[Sectio
     return []
 
 
+def sqlite_staff_codes(catalog: Catalog) -> dict[str, str]:
+    """Verified name-to-code map from the staff table paired with SQLite POS orders."""
+    if "`nhan_vien`" not in catalog.readme.lower() or "pos" not in fold(catalog.readme).split():
+        return {}
+    order_keys = _SQLITE_POS[0][0] | {"MaNhanVien"}
+    databases = {table.path for table in catalog.tables if table.path.suffix == ".sqlite"
+                 and order_keys <= set(table.columns)}
+    if len(databases) != 1:
+        return {}
+    tables = [table for table in catalog.tables if table.path in databases
+              and table.name.lower() == "nhan_vien"
+              and {"MaNhanVien", "TenGoi"} <= set(table.columns)]
+    if len(tables) != 1:
+        return {}
+    by_name: dict[str, set[str]] = defaultdict(set)
+    by_code: dict[str, set[str]] = defaultdict(set)
+    for _, row in _records(tables[0], ("MaNhanVien", "TenGoi")):
+        code, name = _text(row["MaNhanVien"]), _text(row["TenGoi"])
+        if code and name:
+            name = _name_key(name)
+            by_name[name].add(code)
+            by_code[code.upper()].add(name)
+    return {name: code for name, codes in by_name.items() if len(codes) == 1
+            for code in codes if len(by_code[code.upper()]) == 1}
+
+
 # amount = unit price x quantity - line discount on most rows, and never more than price x
 # quantity on (almost) all: an unlisted discount may lower a line, nothing raises it.
 _EXACT_SHARE, _AT_MOST_SHARE = Decimal("0.90"), Decimal("0.99")
@@ -526,7 +582,13 @@ def convention_columns(readme: str) -> dict[str, str]:
     một đơn" (the order id) and a notes column the conventions say records an order state
     ("**Đơn khách trả lại**: **Ghi chú** của đơn ghi khách trả lại")."""
     found: dict[str, str] = {}
+    note_states: dict[str, set[str]] = defaultdict(set)
+    in_columns = False
     for line in readme.splitlines():
+        if line.startswith("## "):
+            in_columns = line.startswith("## Cột trong ")
+        if in_columns:
+            continue
         text = fold(line)
         for match in re.finditer(r"\*\*([^*]+)\*\*", line):
             column = match.group(1).strip()
@@ -534,11 +596,11 @@ def convention_columns(readme: str) -> dict[str, str]:
             after = fold(line[match.end():])
             if before.endswith("cac dong cung") and after.startswith("la mot don"):
                 found[column] = "mã đơn"
-            elif (fold(column) in _NOTE_HEADS and _NOTE_STATES.search(text)
+            elif (fold(column) in _NOTE_HEADS and _note_labels(text)
                   and fold(column) not in fold(line.split(":", 1)[0])):
-                found[column] = "ghi chú của đơn; ghi đơn " + ", ".join(
-                    state for state in ("huỷ", "trả lại", "đang giao")
-                    if re.search(rf"\b{fold(state)}\b", text))
+                note_states[column].update(_note_labels(text))
+    found.update({column: "ghi chú của đơn; ghi đơn " + ", ".join(sorted(states))
+                  for column, states in note_states.items()})
     return found
 
 
@@ -578,12 +640,61 @@ def _joined_header_sections(headers: list[tuple[Table, set[str]]],
     return sections
 
 
+# Read literal labels from the product column only after the README says they are not
+# products. Require a delivery fee or an explicitly whole-order discount, not a line
+# discount or a fee whose treatment the rulebook includes in revenue.
+_NOT_PRODUCTS = re.compile(r"\bkhong phai (?:dong hang|mat hang|hang|san pham)\b")
+_ORDER_ADJUSTMENT = re.compile(
+    r"\b(?:phi giao(?: hang)?|(?:giam gia|chiet khau) "
+    r"(?:(?:tren |cua |cho )?(?:ca |toan bo )|ca )?(?:don(?: hang)?|hoa don))\b")
+_LITERAL_LABEL = re.compile(r'`([^`]+)`|"([^"]+)"|“([^”]+)”')
+_LISTED_ADJUSTMENT = re.compile(
+    rf"(?:{_ORDER_ADJUSTMENT.pattern}|(?:su dung|dung|doi|tru) diem(?: tich luy)?)")
+
+
+def _adjustment_labels(section: Section, fields: dict[str, str]) -> frozenset[str]:
+    meaning = section.columns.get(fields.get("product_name", ""), "")
+    if section.origin != "readme" or not _NOT_PRODUCTS.search(fold(meaning)):
+        return frozenset()
+    labels = set()
+    # A list introduced by "not products" can use a colon or parentheses, without
+    # quoting each label. Keep only whole entries, never substrings of item names.
+    for separator in re.finditer(r"[:(]", meaning):
+        head = re.split(r"[;.)]", meaning[:separator.start()])[-1]
+        if not _NOT_PRODUCTS.search(fold(head)):
+            continue
+        end = re.split(r"[.;)]", meaning[separator.end():], maxsplit=1)[0]
+        for name in re.split(r"[,/]", end):
+            key = _name_key(name)
+            if _LISTED_ADJUSTMENT.fullmatch(key):
+                labels.add(key)
+    for clause in meaning.split(";"):
+        matches = list(_LITERAL_LABEL.finditer(clause))
+        for match in matches:
+            label = next(part for part in match.groups() if part is not None)
+            # Evidence is local to the label so a documented shipping fee does not classify
+            # any other adjustment in the same column description.
+            direct = _LISTED_ADJUSTMENT.fullmatch(fold(label))
+            explanation = (len(matches) == 1 and _ORDER_ADJUSTMENT.search(
+                fold(clause[:match.start()] + " " + clause[match.end():])))
+            if direct or explanation:
+                labels.add(_name_key(label))
+    return frozenset(labels)
+
+
+def has_documented_order_adjustments(readme: str) -> bool:
+    return any(_adjustment_labels(section, section.fields) for section in parse_sections(readme))
+
+
 def _amounts_check_out(table: Table, section: Section) -> bool:
     fields = section.fields
     if not {"unit_price", "quantity", "amount"} <= set(fields):
         return False  # nothing to check the guessed amount against
     checked = exact = at_most = 0
+    adjustments = _adjustment_labels(section, fields)
     for _, raw in _records(table, section.columns):
+        if adjustments and _name_key(raw.get(fields["product_name"])) in adjustments:
+            continue
         try:
             price = parse_amount(raw.get(fields["unit_price"]))
             quantity = parse_quantity(raw.get(fields["quantity"]))
@@ -928,6 +1039,8 @@ def _classify(sections: list[Section], catalog: Catalog) -> dict[str, _Role]:
             role = "lots"
         elif "amount" in fields and fields & {"product_name", "product_id"}:
             role = "lines"
+        elif _service_sheet(section, catalog.readme):
+            role = "service_orders"
         elif "order_id" in fields and fields & {"date", "status"} and "quantity" not in fields:
             role = "orders"
         elif ("customer_id" in fields and "customer_group" in fields
@@ -976,12 +1089,18 @@ def _role_rows(
         key = (table.path, table.name)
         price_column = fields.get("unit_price", "")
         price_is_base = fold(section.columns.get(price_column, "")) in _BASE_PRICE_MEANINGS
+        notes = _note_labels(fold(section.columns.get(fields.get("status_note", ""), "")))
+        adjustments = _adjustment_labels(section, fields)
         for ordinal, raw in _records(table, section.columns):
             if headers is not None and key not in headers:
                 headers[key] = {name for name in raw if not re.fullmatch(r"_empty_\d+", name)}
             row = {key: raw.get(column) for key, column in fields.items()}
             if price_is_base:
                 row["_unit_price_is_base"] = True
+            if notes:
+                row["_note_labels"] = notes
+            if adjustments and _name_key(row.get("product_name")) in adjustments:
+                row["_order_adjustment"] = True
             # Rulebook §8 compares *every* cell, not only the mapped ones.
             row["_cells"] = tuple(sorted((str(k), repr(v)) for k, v in raw.items()))
             if with_file:
@@ -998,6 +1117,7 @@ class _Rules:
     duplicate_rows_once: str | None
     whole_order_returns: str | None
     service_fee: str | None
+    order_goods: str | None
     evidence: tuple[str, ...]
 
 
@@ -1012,8 +1132,10 @@ def _rules(rulebook: str) -> _Rules:
                             "tinh mot lan")
     returns = rule_line(rulebook, "don tinh vao doanh thu", "ca don")
     fee = rule_line(rulebook, "mat hang", "phi phuc vu", "khong xep hang")
+    order_goods = rule_line(rulebook, "doanh thu mot don", "tong thanh tien cac dong hang",
+                            "khong tru giam gia tren ca don", "khong gom phi giao hang")
     evidence = tuple(x for x in (*status.evidence, blank, duplicates, returns, fee) if x)
-    return _Rules(status, blank, duplicates, returns, fee, evidence)
+    return _Rules(status, blank, duplicates, returns, fee, order_goods, evidence)
 
 
 # ---------------------------------------------------------------- loading
@@ -1042,6 +1164,16 @@ def load_readme_sales(catalog: Catalog, rulebook: str
     Returns ``(sales, evidence, ranking_eligible)``.
     """
     sections = parse_sections(catalog.readme)
+    notes = {column: meaning for column, meaning in convention_columns(catalog.readme).items()
+             if meaning_field(meaning) == "status_note"}
+    for column, meaning in notes.items():
+        owners = [i for i, section in enumerate(sections) if column in section.columns]
+        if len(owners) == 1:
+            i = owners[0]
+            section = sections[i]
+            # Clear ownership and no more specific mapping in the column meaning itself.
+            if fold(section.columns[column]) in _NOTE_HEADS:
+                sections[i] = replace(section, columns={**section.columns, column: meaning})
     sections += profile_sections(catalog, sections)
     if not any({"order_id", "amount"} <= set(s.fields) or "order_goods" in s.fields
                for s in sections):
@@ -1052,6 +1184,10 @@ def load_readme_sales(catalog: Catalog, rulebook: str
     _check_read_amounts(roles)
     rules = _rules(rulebook)
     conventions = parse_conventions(catalog.readme)
+    if "service_orders" in roles:
+        if set(roles) & {"lines", "orders"}:
+            raise ReadmeSalesError("AMBIGUOUS_ROLE", "Ticket ledger coexists with a sales list")
+        return _from_service_orders(catalog, roles["service_orders"], rules)
     if "lines" in roles:
         return _from_lines(catalog, roles, rules, conventions)
     if "orders" in roles and "order_goods" in roles["orders"].sections[0].fields:
@@ -1257,6 +1393,13 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
             counts["summary_rows_skipped"] += 1
             continue
         cells = row.pop("_cells")
+        if row.get("_order_adjustment"):
+            if not (rules.order_goods and rules.service_fee):
+                raise ReadmeSalesError("RULE_CAPABILITY_MISSING",
+                                       "Order adjustments need both the revenue and item rules")
+            if not has_order_ids:
+                raise ReadmeSalesError("MAPPING_INCOMPLETE",
+                                       "Order adjustments need a documented order key")
         if has_order_ids:
             if _blank(row.get("order_id")):
                 if not group or rules.blank_cells_inherit is None:
@@ -1290,7 +1433,8 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
     if "status" not in line_fields and "status_note" in line_fields:
         _states_from_notes(lines)
         line_fields = line_fields | {"status"}
-    names_resolved = _expand_abbreviations(catalog, roles["lines"], lines)
+    merchandise = [line for line in lines if not line.get("_order_adjustment")]
+    names_resolved = _expand_abbreviations(catalog, roles["lines"], merchandise)
     if names_resolved is not None:
         line_fields = line_fields | {"product_group"}
 
@@ -1324,7 +1468,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
             raise ReadmeSalesError("DATE_INVALID", "Order date could not be parsed") from exc
         line["_status"], line["_day"] = status, day
         quantity = None
-        if not _blank(line.get("quantity")):
+        if not line.get("_order_adjustment") and not _blank(line.get("quantity")):
             try:
                 quantity = parse_quantity(line["quantity"])
             except ValueError as exc:
@@ -1385,14 +1529,25 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
     # "Bia  Tiger lon") is one product, identified by its most frequent spelling.
     spellings: dict[str, Counter[str]] = defaultdict(Counter)
     if not products_by_id:
-        for line in lines:
+        for line in merchandise:
             if _blank(line.get("product_id")) and not _blank(line.get("product_name")):
                 name = str(line["product_name"]).strip()
                 spellings[_name_key(name)][name] += 1
     canonical = {key: counts.most_common(1)[0][0] for key, counts in spellings.items()}
     merged_spellings = sum(len(counts) - 1 for counts in spellings.values())
+    merchandise_orders = {line["_order"] for line in merchandise}
+    adjustment_orders_kept = set()
     for line in lines:
         key = line["_order"]
+        if line.get("_order_adjustment"):
+            counts["order_adjustment_rows_excluded"] += 1
+            if key not in merchandise_orders and key not in adjustment_orders_kept:
+                adjustment_orders_kept.add(key)
+                amount_by_order[key] = Decimal(0)
+                context = _line_context(line, orders.get(key, {}), line_fields, customer_groups)
+                sales.append(Sale(key, final_day[key], final_status[key], Decimal(0),
+                                  None, None, None, minute=final_time[key], **context))
+            continue
         try:
             amount = parse_amount(line.get("amount"))
         except ValueError as exc:
@@ -1423,14 +1578,7 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         is_fee = product_name is not None and _name_key(product_name) == "phi phuc vu"
         fee_rows += is_fee
         index = len(sales)
-        parent = orders.get(key) or {}
-        context = {name: _text(line.get(name) if name in line_fields else parent.get(name))
-                   for name in ("customer_id", "customer_name", "customer_group", "channel",
-                                "staff_id", "payment_method")}
-        listed = customer_groups.get(context["customer_id"] or "")
-        if listed:
-            context["customer_group"] = context["customer_group"] or listed["group"]
-            context["customer_name"] = context["customer_name"] or listed["name"]
+        context = _line_context(line, orders.get(key, {}), line_fields, customer_groups)
         sales.append(Sale(key, final_day[key], final_status[key], amount, product_id,
                           product_name, quantity_base, minute=final_time[key],
                           quantity_sold=line["_quantity"],
@@ -1471,6 +1619,8 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         "readme_conventions": list(conventions.evidence),
         "status_by_elimination": dict(policy.eliminated),
     }
+    if counts["order_adjustment_rows_excluded"]:
+        evidence["rules"].append(rules.order_goods)
     if headers is not None:
         evidence["tables_without_customer_identity"] = _customer_identity_absence(
             catalog, roles, headers)
@@ -1482,6 +1632,18 @@ def _from_lines(catalog: Catalog, roles: dict[str, _Role], rules: _Rules,
         # are one product or breaks ties by code. Product rankings, counts and filters abstain.
         evidence["product_identity"] = "names_unverified"
     return sales, evidence, frozenset(eligible)
+
+
+def _line_context(line: dict[str, Any], parent: dict[str, Any], line_fields: set[str],
+                  customer_groups: dict[str, dict[str, str | None]]) -> dict[str, str | None]:
+    context = {name: _text(line.get(name) if name in line_fields else parent.get(name))
+               for name in ("customer_id", "customer_name", "customer_group", "channel",
+                            "staff_id", "payment_method")}
+    listed = customer_groups.get(context["customer_id"] or "")
+    if listed:
+        context["customer_group"] = context["customer_group"] or listed["group"]
+        context["customer_name"] = context["customer_name"] or listed["name"]
+    return context
 
 
 def _text(value: Any) -> str | None:
@@ -1570,6 +1732,65 @@ def _reconcile_totals(orders: dict[str, dict[str, Any]], amount_by_order: dict[s
     return {"order_goods_vs_line_sum": {"compared": compared, "differs": differs,
                                         "unparsed": unparsed},
             "orders_without_lines": len(set(orders) - set(amount_by_order))}
+
+
+def _from_service_orders(catalog: Catalog, role: _Role, rules: _Rules
+                         ) -> tuple[list[Sale], dict[str, Any], frozenset[int]]:
+    """A service register with an explicit one-ticket-per-row grain and no product facts."""
+    if not rules.order_goods:
+        raise ReadmeSalesError("RULE_CAPABILITY_MISSING", "Service tickets need the revenue rule")
+    fields = role.sections[0].fields
+    amount_field = "order_goods" if "order_goods" in fields else "service_goods"
+    for section in role.sections:
+        amount_meaning = fold(section.columns[section.fields[amount_field]])
+        gross = ("truoc giam gia" in amount_meaning or "khong tru giam gia" in amount_meaning)
+        net_of_fees = ("khong gom phi giao" in amount_meaning
+                       and "khong gom thue" in amount_meaning)
+        if not (gross and net_of_fees):
+            raise ReadmeSalesError("AMOUNT_UNVERIFIED",
+                                   "Ticket totals must document discount, tax and fee treatment")
+    written_status = "status" in fields
+    documented_notes = "status_note" in fields
+    if not (written_status or documented_notes or
+            (len(role.sections) == 1 and len(parse_sections(catalog.readme)) == 1
+             and _ONLY_COMPLETE.search(fold(catalog.readme)))):
+        raise ReadmeSalesError("MISSING_VALUE", "Ticket status or completion is undocumented")
+    rows = []
+    for sheet, ordinal, row in _role_rows(role, with_file=True):
+        if _blank(row.get("date")) and not _blank(row.get(amount_field)):
+            raise ReadmeSalesError("MISSING_VALUE", "Ticket amount without a date")
+        if is_total_label(row.get("date")) or (
+                _blank(row.get("date")) and _blank(row.get(amount_field))):
+            continue
+        key = f"{row['_file']}::{sheet}#{ordinal}"
+        rows.append((key, sheet, {**row, "_order": key}))
+    if not written_status and documented_notes:
+        _states_from_notes([row for _, _, row in rows])
+    policy = by_elimination(rules.status, {r.get("status") for _, _, r in rows})
+    sales = []
+    statuses = Counter()
+    for key, sheet, row in rows:
+        try:
+            status = policy.resolve(row.get("status") if written_status or documented_notes
+                                    else "hoan thanh")
+            day = parse_day(row.get("date"), sheet)
+            amount = parse_amount(row.get(amount_field))
+        except (TypeError, ValueError, StatusError) as exc:
+            raise ReadmeSalesError("VALUE_INVALID", "Ticket date, status or amount unreadable") from exc
+        sales.append(Sale(key, day, status, amount, None, None, None,
+                          minute=parse_minute(row.get("time")), staff_id=_text(row.get("staff_id"))))
+        statuses[status] += 1
+    evidence = {
+        "adapter_version": ADAPTER_VERSION,
+        "sources": {"service_orders": [s.label for s in role.sections]},
+        "tables": sorted({table.key for _, table in role.tables}),
+        "sales_rows": len(sales),
+        "status_counts": dict(statuses),
+        "order_ids": "one_record_per_row",
+        "grain": "service_tickets",
+        "rules": [*rules.evidence, rules.order_goods],
+    }
+    return sales, evidence, frozenset()
 
 
 def _from_orders(roles: dict[str, _Role], rules: _Rules

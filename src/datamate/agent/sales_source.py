@@ -34,6 +34,7 @@ from datamate.ingestion.joined_sales import (
 from datamate.ingestion.readme_sales import (
     ReadmeSalesError,
     enrich_sales_from_readme_products,
+    has_documented_order_adjustments,
     load_readme_sales,
     parse_sections,
 )
@@ -306,6 +307,11 @@ def load_business_sales(
     may (flat schema). A partial or ambiguous joined schema raises instead of falling
     back to another adapter.
     """
+    if has_documented_order_adjustments(catalog.readme):
+        # Flat and joined exports do not distinguish documented adjustments from items.
+        # A missing rule or a failed read must not silently fall back to their totals.
+        sales, evidence, eligible = load_readme_sales(catalog, rulebook)
+        return sales, {**evidence, "adapter": "readme_sales"}, eligible
     mapping = _joined_mapping(catalog)
     if mapping is not None:
         return _joined_result(catalog, mapping, _file_labels(_joined_rules(rulebook), rulebook,
