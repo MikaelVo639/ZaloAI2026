@@ -184,5 +184,15 @@ class JoinedHeaderSectionTests(_Shop):
         self.assertEqual(caught.exception.code, "README_COLUMNS_MISSING")
 
 
+class BlankFirstRowTests(_Shop):
+    def test_a_sheet_whose_first_row_is_blank_is_still_read(self):
+        readme = README.replace("`ban_hang.csv` (csv)", "`ban_hang.xlsx` (xlsx)")
+        catalog = self.shop(readme, {"ban_hang.xlsx": {"T01": [[None], *rows()],
+                                                       "Trống": [[None], [None]]}})
+        self.assertEqual([t.name for t in catalog.tables], ["T01"])
+        sales, _, _ = load_readme_sales(catalog, RULEBOOK)
+        self.assertEqual(sum(s.amount for s in sales), Decimal(24 * 30000))
+
+
 if __name__ == "__main__":
     unittest.main()

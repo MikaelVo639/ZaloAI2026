@@ -12,6 +12,9 @@ from datamate.contracts import Catalog, Table
 from datamate.io import contained_path
 
 
+_BLANK_TOP_ROWS = 14  # rows looked at below a blank first row (15 in all)
+
+
 def _headers(values: tuple[Any, ...]) -> tuple[str, ...]:
     headers = tuple(str(x).strip() if x is not None else f"_empty_{i}"
                     for i, x in enumerate(values))
@@ -130,6 +133,12 @@ def build_catalog(data_root: Path, business_id: str, sample_size: int = 3) -> Ca
                         sample = tuple(dict(zip(columns, values))
                                        for values in itertools.islice(reader, sample_size))
                         tables.append(Table(path, sheet.title, columns, sample))
+                    elif any(any(x is not None for x in values)
+                             for values in itertools.islice(reader, _BLANK_TOP_ROWS)):
+                        # Blank first row, header further down: the sheet is kept with
+                        # placeholder columns; readers that look below title rows
+                        # (readme_sales._table_headers / _records) find its header.
+                        tables.append(Table(path, sheet.title, _headers(first or ())))
                     reader.close()
             finally:
                 book.close()
