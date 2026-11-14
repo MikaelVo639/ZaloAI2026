@@ -221,6 +221,24 @@ LENIENT_PROMPT = SYSTEM_PROMPT.replace(
     "changing a condition, filter, period or requested output.")
 assert LENIENT_PROMPT != SYSTEM_PROMPT
 
+# Experimental (rewrite_style_prompt): the model often kept the asker's own name for the
+# figure, answered KHONG_RO to a question framed as "can it be found", or moved a relative
+# period. Generic guidance only: never the wording of the TRAIN model benchmark.
+STYLE_PROMPT = LENIENT_PROMPT.replace(
+    "- Do not answer the question.",
+    "- Do not answer the question.\n"
+    "- Name the figure asked for with the example's words for it (doanh thu, số đơn, giá trị "
+    "trung bình một đơn, tỉ lệ huỷ đơn, tiền khách trả nợ...), never with the asker's own "
+    "description of it.\n"
+    "- Leave out requests, politeness and context about why the asker wants the figure, and a "
+    "framing that only asks whether the figure exists before asking for it: restate the "
+    "question for the figure itself.\n"
+    "- A condition may be written anywhere, also as a closing clause; restate it where the "
+    "examples put it, unchanged.\n"
+    "- A relative period stays the same period: tuần rồi/tuần trước is never tuần này or "
+    "tuần tới, hôm qua is never hôm nay.")
+assert STYLE_PROMPT != LENIENT_PROMPT
+
 # normalize_question writes "500.000" as "500 000".
 _NUMBER_SEPARATOR = re.compile(r"(?<=\d)[ .,](?=\d{3}(?!\d))")
 # Amounts: "500k", "1k5", "1tr5", "1,5 triệu", "2 triệu rưỡi", "3 trăm nghìn", "2 tỷ".
@@ -586,11 +604,13 @@ def select_examples(question: str, k: int = 6) -> list[tuple[str, str]]:
 
 def build_rewrite_messages(question: str, examples: list[tuple[str, str]],
                            rule_names: Iterable[str] = (), *,
-                           lenient: bool = False) -> list[dict[str, str]]:
+                           lenient: bool = False, style: bool = False) -> list[dict[str, str]]:
     """Prompt; ``rule_names`` are the split's enabled named rankings, offered as standard
     wordings ("<tên luật> tháng 2/2026 là ai?") for questions with the same meaning."""
     shots = "\n".join(f"Câu hỏi: {raw}\nViết lại: {standard}" for raw, standard in examples)
-    system = LENIENT_PROMPT if lenient else SYSTEM_PROMPT
+    if style and not lenient:
+        raise ValueError("The style prompt extends the lenient prompt")
+    system = STYLE_PROMPT if style else LENIENT_PROMPT if lenient else SYSTEM_PROMPT
     names = [name for name in rule_names if name]
     if names:
         system += ("\nThis shop's rulebook also names these rankings; when the question asks "
@@ -677,13 +697,18 @@ class RewriteAgent(LocalPlanAgent):
                  retry_rejected: bool = False, code_fallback: bool = False,
                  code_only: bool = False, single_vote: bool = False,
                  firm_retry: bool = False, firm_rejected_retry: bool = False,
+                 style_prompt: bool = False,
                  **kwargs: Any) -> None:
         super().__init__(model_path, **kwargs)
         if any(type(flag) is not bool for flag in (lenient, retry_rejected, code_fallback,
                                                    code_only, single_vote, firm_retry,
-                                                   firm_rejected_retry)):
+                                                   firm_rejected_retry, style_prompt)):
             raise ValueError("lenient, retry_rejected, code_fallback, code_only, single_vote and "
-                             "firm_retry and firm_rejected_retry must be true or false")
+                             "firm_retry, firm_rejected_retry and style_prompt must be true or "
+                             "false")
+        if style_prompt and not lenient:
+            raise ValueError("style_prompt needs lenient")
+        self.style_prompt = style_prompt
         self.single_vote, self.firm_retry = single_vote, firm_retry
         self.firm_rejected_retry = firm_retry and firm_rejected_retry
         self.lenient, self.retry_rejected = lenient, retry_rejected
@@ -919,7 +944,8 @@ class RewriteAgent(LocalPlanAgent):
         # Independent restatements: the same examples, most similar first, then last; a
         # third vote (votes=3) interleaves them and is asked only when the first two differ.
         orders = [chosen, chosen[::-1], chosen[1::2] + chosen[::2]][:self.votes]
-        prompts = [build_rewrite_messages(asked, order, rule_names, lenient=self.lenient)
+        prompts = [build_rewrite_messages(asked, order, rule_names, lenient=self.lenient,
+                                          style=self.style_prompt)
                    for order in orders]
         evidence: dict[str, Any] = {"model": self._model_info,
                                     "planner_confidence": REWRITE_CONFIDENCE,

@@ -54,6 +54,8 @@ class Config:
     # allows KHONG_RO only when a condition would be lost (not merely when unsure).
     rewrite_firm_retry: bool = False
     rewrite_firm_rejected_retry: bool = False
+    # Extra prompt guidance on naming the figure, framings and periods (needs lenient).
+    rewrite_style_prompt: bool = False
 
     def __post_init__(self) -> None:
         if self.backend not in ("baseline", "abstain", "local_plan", "rewrite"):
@@ -79,7 +81,7 @@ class Config:
             raise ValueError("rewrite_votes must be 1, 2 or 3")
         for name in ("rewrite_lenient", "rewrite_retry_rejected", "rewrite_code_fallback",
                      "rewrite_code_only", "rewrite_single_vote", "rewrite_firm_retry",
-                     "rewrite_firm_rejected_retry"):
+                     "rewrite_firm_rejected_retry", "rewrite_style_prompt"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be true or false")
         if self.max_input_tokens + self.max_new_tokens > 32768:
@@ -116,7 +118,8 @@ def predict(data_dir: Path, output_dir: Path, config: Config,
                                 code_only=config.rewrite_code_only,
                                 single_vote=config.rewrite_single_vote,
                                 firm_retry=config.rewrite_firm_retry,
-                                firm_rejected_retry=config.rewrite_firm_rejected_retry)
+                                firm_rejected_retry=config.rewrite_firm_rejected_retry,
+                                style_prompt=config.rewrite_style_prompt)
             agent = model_agent(config.model_path, model_load_timeout=config.model_load_timeout,
                                 model_timeout=config.model_timeout,
                                 max_input_tokens=config.max_input_tokens,

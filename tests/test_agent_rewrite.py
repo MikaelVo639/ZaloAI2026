@@ -1,6 +1,7 @@
 """Model rewrite layer. Fake models test plumbing and safety checks, never model quality."""
 
 import json
+import re
 import tempfile
 import unittest
 from dataclasses import replace
@@ -28,6 +29,7 @@ from datamate.io import load_split
 from datamate.pipeline import Config
 from datamate.semantics.planner import plan_question, unread_words
 from datamate.semantics.rules import read_rules
+from datamate.semantics.text import fold
 
 # Invented catalogue entries used by EXAMPLES.
 NAMES = ("Bánh quy bơ", "Kẹo gừng hộp 10 gói", "Trà mây tía")
@@ -597,6 +599,31 @@ class RewriteAgentTests(unittest.TestCase):
         lenient_messages = build_rewrite_messages("dthu thang nay", examples, lenient=True)
         self.assertEqual(strict_messages[1], lenient_messages[1])
         self.assertIn(UNSURE, lenient_messages[0]["content"])
+        style_messages = build_rewrite_messages("dthu thang nay", examples, lenient=True,
+                                                style=True)
+        self.assertEqual(style_messages[1], lenient_messages[1])  # same examples and question
+        self.assertTrue(style_messages[0]["content"].startswith(
+            lenient_messages[0]["content"].split("- Do not answer the question.")[0]))
+        self.assertIn("relative period", style_messages[0]["content"])
+        with self.assertRaises(ValueError):
+            build_rewrite_messages("dthu thang nay", examples, style=True)
+        with self.assertRaises(ValueError):
+            self.agent(unsure_generate, style_prompt=True)
+        styled = self.agent(standard_generate, lenient=True, style_prompt=True).answer(
+            self.question, self.context)
+        self.assertEqual((styled.type, styled.answer), (expected.type, expected.answer))
+
+    def test_style_prompt_uses_no_benchmark_wording(self):
+        from datamate.agent.rewrite import STYLE_PROMPT
+        from datamate.evaluation.robustness import perturb
+        prompt = fold(STYLE_PROMPT)
+        for kind in ("report_wording", "yes_no_wording", "condition_last", "indirect_wording"):
+            for key in ("a", "b", "c", "d", "e", "f"):
+                changed = perturb(kind, "Tháng 4/2026 doanh thu của cửa hàng là bao nhiêu?", key)
+                frame = fold(changed or "").replace(fold("Tháng 4/2026"), " ")
+                for phrase in re.findall(r"[a-z]+(?: [a-z]+){3}", frame):
+                    if phrase not in fold("doanh thu cua cua hang la bao nhieu"):
+                        self.assertNotIn(phrase, prompt, (kind, phrase))
 
     def test_rejected_rewrites_retry_only_when_enabled(self):
         off = self.agent(rejected_then_standard_generate).answer(self.question, self.context)

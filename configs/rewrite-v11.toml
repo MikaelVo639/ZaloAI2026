@@ -1,0 +1,22 @@
+# Rewrite, version 11: configs/rewrite-v8.toml plus the style prompt (agent/rewrite.py STYLE_PROMPT):
+# name the figure with the examples' words, leave out requests and "does it exist" framings,
+# keep conditions written as a closing clause and relative periods. Not measured yet: choose it
+# only when cell 8 shows more correct and no more wrong than rewrite-v8 (TRAIN, LOCAL PROXY).
+backend = "rewrite"
+min_confidence = 0.5
+max_seconds = 20000
+model_path = "models/qwen2.5-coder-7b-instruct"
+question_timeout = 30
+ingestion_timeout = 300
+model_load_timeout = 600
+model_timeout = 30
+max_input_tokens = 8192
+max_new_tokens = 128
+rewrite_retries = 1
+rewrite_examples = 80
+rewrite_lenient = true
+rewrite_retry_rejected = true
+rewrite_votes = 3
+rewrite_single_vote = true
+rewrite_code_fallback = false
+rewrite_style_prompt = true
