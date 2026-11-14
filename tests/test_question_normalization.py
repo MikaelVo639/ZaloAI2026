@@ -199,7 +199,16 @@ class EverydayWordingTests(unittest.TestCase):
                 ("Trong khoảng thời gian từ 20/06/2026 đến hết 26/06/2026, có bao nhiêu mặt hàng"
                  " bị ế?", "Từ ngày 20/06/2026 đến hết ngày 26/06/2026, có mấy mặt hàng ế hẳn?"),
                 ("Doanh thu tháng 10/2025 từ khách trả nợ là bao nhiêu?",
-                 "Tháng 10/2025 cửa hàng thu được bao nhiêu tiền khách trả nợ?")):
+                 "Tháng 10/2025 cửa hàng thu được bao nhiêu tiền khách trả nợ?"),
+                # Cell 8 of 0ae1793 (the model's own words on TRAIN questions).
+                ("Tỷ lệ đơn hàng đã hủy trong tháng 2/2025 là bao nhiêu phần trăm?",
+                 "Tỷ lệ đơn hàng bị hủy trong tháng 2/2025 là bao nhiêu phần trăm?"),
+                ("Tháng 6/2026 có bao nhiêu ngày doanh thu đạt hoặc vượt 10.000.000 đồng?",
+                 "Tháng 6/2026 có bao nhiêu ngày doanh thu từ 10.000.000 đồng trở lên?"),
+                ("Số đơn bán tại ca sáng tháng 8/2025 là bao nhiêu?",
+                 "Số đơn bán trong ca sáng tháng 8/2025 là bao nhiêu?"),
+                ("Trung bình mỗi đơn hàng tháng 5/2025 bán được bao nhiêu tiền?",
+                 "Giá trị trung bình một đơn tháng 5/2025 là bao nhiêu?")):
             with self.subTest(restated=restated):
                 self.assertEqual(normalize_question(restated), normalize_question(standard))
         # Kept: the question's own wording, "giá vốn" never added, "lần nhất" keeps its count.

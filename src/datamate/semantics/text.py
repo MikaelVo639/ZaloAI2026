@@ -406,6 +406,15 @@ _STANDARD: tuple[tuple[str, str], ...] = (
      r"co bao nhieu don co doanh thu tu \1 tro len"),
     (r"\bso don (ca (?:sang|chieu|toi)) co bao nhieu " + _ORDER + r"\b", r"\1 co bao nhieu don hang"),
     (r"\bco bao nhieu hoa don bi huy\b", "co bao nhieu don bi huy"),
+    # Model restatements of TRAIN questions (cell 8 of 0ae1793, LOCAL PROXY): the model's own
+    # words, not the benchmark's. "tỷ lệ đơn đã hủy" is the cancelled share; "đạt hoặc vượt N",
+    # "lớn hơn hoặc bằng N" include N; "tại ca sáng" is the shift.
+    (r"\b(ti le|ty le) (" + _ORDER + r") da (?:bi )?huy\b", r"\1 \2 bi huy"),
+    (r"\b(?:dat hoac vuot|bang hoac vuot|lon hon hoac bang) ((?:\d{1,3}(?: \d{3})+|\d+)"
+     r"(?: (?:trieu|tr|k|nghin|ngan|ty|cu))?(?: dong)?)(?! tro len)\b", r"tu \1 tro len"),
+    (r"\btai (ca (?:sang|chieu|toi))\b", r"trong \1"),
+    (r"\btrung binh (?:moi|mot) " + _ORDER + r" (" + _P + r") (?:ban duoc|mang ve|thu ve) "
+     r"(bao nhieu|bao nhiu|bnhiu|bn) tien\b", r"gia tri trung binh mot don \1 la \2"),
     (r"\b(ca (?:sang|chieu)) co bao nhieu hoa don$", r"\1 co bao nhieu don"),
     # Cups of one size over every drink.
     (r"^(" + _P + r") (?:tong so luong ly size (\w+) ban duoc la bao nhieu|tong cong cua hang ban "
