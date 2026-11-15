@@ -66,6 +66,9 @@ from datamate.semantics.payment import FIELDS as PAYMENT_FIELDS
 from datamate.semantics.payment import label_terms
 from datamate.semantics.rule_spec import RuleSpec, enabled_specs, ground
 from datamate.semantics.rules import DEBT_TABLE_FEATURES, line_with, read_rules
+from datamate.ingestion.side_ledgers import (Instalment, SideLedgerError, TradeIn,
+                                             instalments, trade_ins)
+from datamate.semantics.planner import SIDE_INTENTS
 from datamate.semantics.text import fold
 
 
@@ -321,10 +324,31 @@ def vocabulary(cache: dict[str, Any], catalog: Catalog, rulebook: str = "") -> d
     reserved = {name for row in sales for name in (row.product_name, row.product_id,
                 row.product_group, row.customer_group) if name}
     staff = sorted(staff_codes(catalog, reserved_names=reserved).items())
+    if not staff:
+        staff = _worker_names(cache["sales"][1], sales, reserved)
     if staff:
         result["staff_names"] = [name for name, _ in staff]
         result["staff_codes"] = [code for _, code in staff]
     return result
+
+
+def _worker_names(source: dict[str, Any], sales: list[Sale],
+                  reserved: set[str]) -> list[tuple[str, str]]:
+    """Ticket workers joined to the README's worker list: the full name, and its last one or
+    two words where they name only that worker, each pointing to the full name."""
+    if source.get("grain") != "service_tickets" or source.get("staff_unresolved") \
+            or not source.get("staff_list"):
+        return []
+    workers = sorted({s.staff_id for s in sales if s.staff_id})
+    blocked = {fold(name) for name in reserved}
+    keys: dict[str, set[str]] = defaultdict(set)
+    for name in workers:
+        words = fold(name).split()
+        for size in (len(words), 1, 2):
+            if 0 < size <= len(words):
+                keys[" ".join(words[-size:])].add(name)
+    return sorted((key, next(iter(names))) for key, names in keys.items()
+                  if len(names) == 1 and key not in blocked)
 
 
 def rewrite_identity_names(cache: dict[str, Any], catalog: Catalog, rulebook: str) -> list[str]:
@@ -394,13 +418,14 @@ INTENTS = (frozenset({"revenue", "order_count", "top_products", "average_order",
                      "top_customers", "count_where", "quantity", "top_staff", "stock", "stock_split",
                      "purchase_total", "top_supplier", "avg_purchase_price", "daily_sale_price",
                      "net_purchase",
-                     "rule_rank"})
+                     "rule_rank", "staff_commission", "top_commission"})
+           | SIDE_INTENTS
            | C01_INTENTS | DEBT_INTENTS | INDEPENDENT_INTENTS | SALES_MEASURE_INTENTS)
 # Plan filters this backend applies, and the intents each one may be combined with.
 FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock", "stock_split",
                                      "avg_purchase_price", "net_purchase", "earliest_expiry"}),
               "shift": frozenset({"revenue", "order_count"}),
-              "staff": frozenset({"revenue", "order_count"}),
+              "staff": frozenset({"revenue", "order_count", "staff_commission"}),
               "size": frozenset({"quantity"}),
               "product_group": frozenset({"revenue"}),
               "customer_group": frozenset({"revenue", "average_order"}),
@@ -422,6 +447,15 @@ def unsupported(plan: Plan) -> str:
     """
     if plan.intent not in INTENTS:
         return f"Intent {plan.intent!r} not supported by baseline agent"
+    if plan.intent in SIDE_INTENTS | {"staff_commission", "top_commission"}:
+        fields = ("staff",) if plan.intent == "staff_commission" else ()
+        if (tuple(f.field for f in plan.filters) != fields or plan.periods or plan.shape
+                or plan.threshold or plan.comparison or plan.compare_start or plan.compare_end
+                or plan.unit or plan.rank_by or plan.top_k != 1 or plan.start > plan.end):
+            return f"Unsupported fields for {plan.intent}"
+        if plan.intent == "instalment_outstanding" and plan.start != plan.end:
+            return "Instalment balance requires one snapshot day"
+        return ""
     if plan.intent == "rule_rank":
         if (plan.filters or plan.periods or plan.shape or plan.threshold or plan.comparison
                 or plan.compare_start or plan.compare_end or plan.unit or not plan.rank_by
@@ -1139,6 +1173,64 @@ def _answer_purchase(cache: dict[str, Any], catalog: Catalog, plan: Plan) -> Can
     return Candidate("string", leaders[0], 1.0, "", evidence)
 
 
+def trade_in_measure(books: tuple[TradeIn, ...], start: date, end: date, count: bool) -> int:
+    """Phones taken in on days of the period: how many, or the money paid for them."""
+    rows = [t for t in books if start <= t.day <= end]
+    return len(rows) if count else int(_vnd(sum((t.price for t in rows), Decimal(0))))
+
+
+def instalment_measure(plans: tuple[Instalment, ...], start: date, end: date, intent: str) -> int:
+    """Plans opened in the period; payments made in it; or what is still owed at ``end``
+    (price - down payment - payments up to ``end``, of plans opened by then)."""
+    if intent == "instalment_count":
+        return sum(start <= p.day <= end for p in plans)
+    if intent == "instalment_collected":
+        return int(_vnd(sum((amount for p in plans for day, amount in p.payments
+                             if start <= day <= end), Decimal(0))))
+    owed = Decimal(0)
+    for p in plans:
+        if p.day <= end:
+            owed += p.price - p.down_payment - sum(
+                (amount for day, amount in p.payments if day <= end), Decimal(0))
+    return int(_vnd(owed))
+
+
+def _answer_side_book(cache: dict[str, Any], catalog: Catalog, plan: Plan) -> Candidate:
+    evidence: dict[str, Any] = {"intent": plan.intent, "start": plan.start.isoformat(),
+                                "end": plan.end.isoformat(), "rules": plan.evidence}
+    trade = plan.intent.startswith("trade_in")
+    key = ("side", trade, _catalog_key(catalog), catalog.readme)
+    if cache.get("side_key") != key:
+        try:
+            cache["side"] = trade_ins(catalog) if trade else instalments(catalog)
+        except SideLedgerError as exc:
+            cache["side"] = exc
+        cache["side_key"] = key
+    book = cache["side"]
+    if isinstance(book, SideLedgerError):
+        return Candidate(reason=str(book), evidence=evidence)
+    last = _coverage_day(catalog.readme)
+    first = min(row.day for row in book)
+    if last is None or plan.end > last or (plan.intent != "instalment_outstanding"
+                                           and plan.start < first.replace(day=1)):
+        return Candidate(reason="Period outside the side book", evidence=evidence)
+    window = (f"date.fromisoformat({plan.start.isoformat()!r}), "
+              f"date.fromisoformat({plan.end.isoformat()!r})")
+    if trade:
+        count = plan.intent == "trade_in_count"
+        value = trade_in_measure(book, plan.start, plan.end, count)
+        call = f"trade_in_measure(book, {window}, {count})"
+        function = trade_in_measure
+    else:
+        value = instalment_measure(book, plan.start, plan.end, plan.intent)
+        call = f"instalment_measure(plans, {window}, {plan.intent!r})"
+        function = instalment_measure
+    if value < 0:
+        return Candidate(reason="Payments exceed what was owed", evidence=evidence)
+    evidence.update(rows=len(book), code=_code(call, function, _vnd), result=value)
+    return Candidate("number", value, 1.0, "", evidence)
+
+
 def purchase_lines_of(lines: tuple[PurchaseLine, ...], name: str, codes: set[str]
                       ) -> list[PurchaseLine]:
     """Lines of one product: by its sales code when lines carry codes, else by folded name."""
@@ -1439,6 +1531,59 @@ def best_staff(selected: list[Sale]) -> tuple[str, Decimal]:
     return code, totals[code]
 
 
+def worker_commission(selected: list[Sale], rates: dict[str, Decimal]) -> dict[str, Decimal]:
+    """Each worker's rate (upper-cased name -> %) times the revenue of their tickets."""
+    earned: dict[str, Decimal] = defaultdict(Decimal)
+    for sale in selected:
+        if sale.staff_id is not None:
+            earned[sale.staff_id] += sale.amount
+    return {name: (total * rates[name.upper()] / 100).quantize(Decimal(1), rounding=ROUND_HALF_UP)
+            for name, total in earned.items()}
+
+
+def _answer_commission(plan: Plan, sales: list[Sale], source: dict[str, Any],
+                       evidence: dict[str, Any]) -> Candidate:
+    """Commission = the worker's listed rate x revenue of the tickets they did (README: a
+    rate on the month's ticket totals, so a longer period is the sum of its months)."""
+    rates = {name.upper(): Decimal(rate) for name, rate in
+             (source.get("commission_percent") or {}).items()}
+    if not rates:
+        return Candidate(reason="No documented commission rate", evidence=evidence)
+    selected = select_valid(sales, plan.start, plan.end)
+    if any(s.staff_id is None and s.amount for s in selected):
+        return Candidate(reason="A paid ticket names no worker", evidence=evidence)
+    earned: dict[str, Decimal] = defaultdict(Decimal)
+    for sale in selected:
+        if sale.staff_id is not None:
+            earned[sale.staff_id] += sale.amount
+    if any(name.upper() not in rates for name in earned):
+        return Candidate(reason="A worker has no documented commission rate", evidence=evidence)
+    commission = worker_commission(selected, rates)
+    window = (f"date.fromisoformat({plan.start.isoformat()!r}), "
+              f"date.fromisoformat({plan.end.isoformat()!r})")
+    evidence.update(calculation="listed commission % x revenue of the worker's valid tickets",
+                    revenue={k: str(v) for k, v in earned.items()},
+                    commission={k: str(v) for k, v in commission.items()},
+                    code=_code(f"worker_commission(select_valid(sales, {window}), rates)",
+                               select_valid, worker_commission))
+    if plan.intent == "staff_commission":
+        code = plan.filters[0].value
+        match = [name for name in rates if name == code.upper()]
+        if not match:
+            return Candidate(reason="Worker is not in the commission list", evidence=evidence)
+        value = int(next((v for k, v in commission.items() if k.upper() == code.upper()),
+                         Decimal(0)))
+        evidence["result"] = value
+        return Candidate("number", value, 1.0, "", evidence)
+    if not commission:
+        return Candidate(reason="No valid tickets in period", evidence=evidence)
+    ranked = sorted(commission.items(), key=lambda item: (-item[1], item[0]))
+    if len(ranked) > 1 and ranked[1][1] == ranked[0][1]:
+        return Candidate(reason="Tie for the highest commission", evidence=evidence)
+    evidence["result"] = ranked[0][0]
+    return Candidate("string", ranked[0][0], 1.0, "", evidence)
+
+
 def _answer_staff(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Candidate:
     """Revenue / orders of one staff code, or the staff code with the most revenue."""
     selected = select_valid(sales, plan.start, plan.end)
@@ -1689,6 +1834,11 @@ def _ambiguous_state_affects(sales: list[Sale], plan: Plan, rulebook: str) -> bo
             and not plan.threshold and all(f.field not in DRUG_FIELDS for f in plan.filters)):
         # A row with zero revenue cannot change the simple total.
         return any(s.amount for s in rows)
+    if (plan.intent in ("top_staff", "best_day", "top_commission", "staff_commission")
+            and not plan.shape and not plan.comparison and not plan.threshold
+            and all(f.field == "staff" for f in plan.filters)):
+        # Nor a ranking by revenue: a zero row adds nothing to any staff member or day.
+        return any(s.amount for s in rows)
     return True
 
 
@@ -1736,6 +1886,8 @@ def _answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
         return _answer_stock(cache, catalog, plan, rulebook)
     if plan.intent in ("purchase_total", "top_supplier"):
         return _answer_purchase(cache, catalog, plan)
+    if plan.intent in SIDE_INTENTS:
+        return _answer_side_book(cache, catalog, plan)
     if plan.intent == "rule_rank":
         return _answer_rule_rank(cache, catalog, plan, rulebook, specs)
     if plan.intent == "avg_purchase_price":
@@ -1762,8 +1914,15 @@ def _answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
     uncertain = _uncertain_order_answer(sales, plan, rulebook, evidence)
     if uncertain is not None:
         return uncertain
+    staff_question = (plan.intent in ("top_staff", "staff_commission", "top_commission")
+                      or any(f.field == "staff" for f in plan.filters))
+    if staff_question and source.get("staff_unresolved"):
+        return Candidate(reason="Worker spellings do not each name one listed worker",
+                         evidence=evidence)
     if source.get("grain") == "service_tickets" and (
-            plan.intent not in {"revenue", "order_count"} or plan.filters or plan.threshold):
+            plan.intent not in {"revenue", "order_count", "average_order", "best_day", "top_staff",
+                                "staff_commission", "top_commission"}
+            or any(f.field != "staff" for f in plan.filters) or plan.threshold):
         return Candidate(reason="Service tickets document only order revenue and counts",
                          evidence=evidence)
     if plan.intent == "revenue_increasing":
@@ -1804,6 +1963,8 @@ def _answer_plan(cache: dict[str, Any], catalog: Catalog, plan: Plan,
                                  "Kỳ hỏi nằm hoàn toàn trước ngày bắt đầu ghi bán hàng", evidence)
             return Candidate(reason="No sales in period; business coverage is not established",
                              evidence=evidence)
+    if plan.intent in ("staff_commission", "top_commission"):
+        return _answer_commission(plan, sales, source, evidence)
     if source.get("product_identity") == "names_unverified" and _needs_product_identity(plan):
         return Candidate(reason="Products known only by names in header-guessed columns; "
                                 "no catalogue tells which spellings are one product",
@@ -2172,6 +2333,11 @@ def _answer_group(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Ca
     if (item.field == "customer_group" and evidence.get("customer_order_columns")
             and any(s.customer_id and not s.customer_group for s in valid)):
         return Candidate(reason="A recorded customer's group is unknown in the period",
+                         evidence=evidence)
+    if item.field == "product_group" and any(
+            s.amount and not s.product_group and (s.product_id or s.product_name) for s in valid):
+        # A catalogue that misses some sold products would silently leave them out.
+        return Candidate(reason="A sold product's group is unknown in the period",
                          evidence=evidence)
     part_rows = select_group(valid, item.field, item.value)
     evidence["inputs"].update(selected_rows=len(valid), group_rows=len(part_rows))

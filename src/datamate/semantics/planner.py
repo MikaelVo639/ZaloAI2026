@@ -164,8 +164,15 @@ def plan_question(question: Question, rules: Rules, names: Iterable[str] = (),
                    for label in (vocabulary or {}).get(field, ()))
     corrected = _repair_grammar_tokens(text, names + labels)
     if corrected != text:
-        return _plan_question(question, corrected, rules, names, vocabulary, price_increases,
+        plan = _plan_question(question, corrected, rules, names, vocabulary, price_increases,
                               price_source)
+        if plan is not None:
+            return plan
+    if rules.product_group and vocabulary:
+        group = _group(corrected, vocabulary, bare=True)
+        if group is not None and group is not _AMBIGUOUS:
+            return _plan_question(question, corrected, rules, names, vocabulary, price_increases,
+                                  price_source, detected_group=group)
     return None
 
 
@@ -201,7 +208,8 @@ def _repair_grammar_tokens(text: str, names: tuple[str, ...]) -> str:
 def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str, ...],
                    vocabulary: dict[str, Iterable[str]] | None,
                    price_increases: dict[tuple[str, Decimal], date] | None,
-                   price_source: str, *, unread: list[str] | None = None) -> Plan | None:
+                   price_source: str, *, unread: list[str] | None = None,
+                   detected_group: tuple | None = None) -> Plan | None:
     today = question.as_of_date
     out_of_stock = re.fullmatch(
         rf"(?:den |vao )?cuoi ngay {_DATE} (?:shop |cua hang )?co {_AMOUNT} "
@@ -226,6 +234,8 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
     share = False
     if _PURCHASE_TOTAL.search(text) or _TOP_SUPPLIER.search(text):
         return _purchase(text, today, rules)
+    if _SIDE_CUE.search(text):
+        return _side_book(text, today, rules)
     if _AVG_PURCHASE_CUE.search(text):
         return _avg_purchase(text, today, rules, names)
     if _NET_PURCHASE_CUE.search(text):
@@ -238,7 +248,7 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
             return price
     if _DRUG_CUE.search(text):
         return _drug_revenue(question, rules)
-    group = _group(text, vocabulary or {})
+    group = detected_group if detected_group is not None else _group(text, vocabulary or {})
     if group is _AMBIGUOUS:
         return None
     if group:
@@ -357,6 +367,19 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
                     special.threshold is not None and special.threshold.subject == "customer")):
                 return None
             return special
+    commission = _COMMISSION.search(text)
+    if commission:
+        if reference or group or shift or (filters and not staff):
+            return None
+        top = re.search(r"\b(?:nao|ai)\b", text) and re.search(r"\b(?:nhieu|cao|lon) nhat\b", text)
+        if not staff and not top:
+            return None
+        rest = text[:commission.start()] + " " + text[commission.end():]
+        resolved = _period(_COMMISSION_WORDS.sub(" ", rest), today, rules)
+        if resolved is None or " ".join(_FILLERS.sub(" ", resolved[2]).split()):
+            return None
+        return Plan("staff_commission" if staff else "top_commission", resolved[0], resolved[1],
+                    filters=tuple(filters), evidence=rules.source_rows)
     intent = ""
     top_k = 1
     best_day = _best_day(text)
@@ -1046,7 +1069,8 @@ _GROUP_PREFIX = {
 }
 
 
-def _group(text: str, vocabulary: dict[str, Iterable[str]]) -> tuple | object | None:
+def _group(text: str, vocabulary: dict[str, Iterable[str]], *,
+           bare: bool = False) -> tuple | object | None:
     """The one product group / customer group the question names, by the shop's own names."""
     found = []
     for field, prefix in _GROUP_PREFIX.items():
@@ -1058,6 +1082,19 @@ def _group(text: str, vocabulary: dict[str, Iterable[str]]) -> tuple | object | 
             suffix = "(?: mua)?" if field == "customer_group" else ""
             for match in re.finditer(rf"\b{prefix}{re.escape(key)}{suffix}(?!\S)", text):
                 found.append((match.start(), match.end(), field, name))
+            if bare and field == "product_group":
+                # "loại máy cũ", or a group name of two words or more without "nhóm":
+                # "doanh thu phụ kiện", "máy cũ chiếm bao nhiêu %".
+                pattern = (rf"\b(?:(?:cua|cac|nhung|mat hang|san pham|hang) )*"
+                           rf"{'(?:loai (?:hang )?)?' if len(key.split()) > 1 else 'loai (?:hang )?'}"
+                           rf"{re.escape(key)}(?!\S)")
+                for match in re.finditer(pattern, text):
+                    before = text[:match.start()]
+                    if re.search(r"\b(?:thu|nhan|mua lai|thu mua|doi|tra|bu)\s*$", before) \
+                            and not before.endswith("doanh thu "):
+                        continue  # "thu máy cũ" is a trade-in, not sales of the group
+                    if not any(start <= match.start() < end for start, end, _, _ in found):
+                        found.append((match.start(), match.end(), field, name))
     if not found:
         return None
     found.sort(key=lambda f: (f[0] - f[1], f[0]))  # longest first ("trà sữa" before "trà")
@@ -1197,6 +1234,59 @@ def _purchase(text: str, today: date, rules: Rules) -> Plan | None:
         return None
     rows = ("purchase_total", "top_supplier") if top else ("purchase_total",)
     return Plan(intent, start, min(end, today), 1, _rows(rules, *rows))
+
+
+# Side books of a phone shop (README): phones taken in, instalment plans.
+_SIDE_CUE = re.compile(r"\b(?:(?<!doanh )thu (?:mua |lai |vao )?(?:duoc )?(?:\S+ ){0,2}(?:chiec |cai )?may cu"
+                       r"|may cu (?:da )?thu|tra gop|tien gop|da gop|khach gop|gop duoc)\b")
+_SIDE = (
+    ("trade_in_total", re.compile(
+        rf"\b(?:tong )?(?:so )?tien (?:da )?(?:chi (?:ra )?(?:de )?)?(?<!doanh )thu (?:mua |lai |vao )?may cu"
+        rf"(?: cua khach)?\b|\bthu (?:mua |lai |vao )?may cu (?:cua khach )?(?:het|mat|ton) "
+        rf"{_AMOUNT} tien\b")),
+    ("trade_in_count", re.compile(
+        rf"\bthu (?:mua |lai |vao )?(?:duoc )?{_AMOUNT} (?:chiec |cai )?may cu(?: cua khach)?\b"
+        rf"|\b(?:so (?:luong )?)?may cu (?:da )?thu (?:mua |lai |vao )?(?:duoc )?(?:la )?"
+        rf"{_AMOUNT}(?: chiec| cai| may)?\b")),
+    ("instalment_count", re.compile(
+        rf"\b(?:co )?{_AMOUNT} (?:don|hop dong|may|chiec may)(?: hang)? (?:mua |ban )?tra gop\b"
+        rf"|\bso (?:don|hop dong) (?:mua )?tra gop\b")),
+    ("instalment_collected", re.compile(
+        rf"\b(?:tong )?(?:so )?tien (?:tra )?gop (?:khach )?(?:da )?(?:thu (?:duoc|ve)|nhan duoc|"
+        rf"tra)\b|\b(?:tong )?(?:so )?tien (?:khach )?(?:da )?(?:tra )?gop\b(?! con)"
+        rf"|\bkhach (?:da )?(?:tra )?gop (?:duoc )?{_AMOUNT} tien\b"
+        rf"|\bthu (?:duoc )?{_AMOUNT} tien (?:tra )?gop\b")),
+    ("instalment_outstanding", re.compile(
+        rf"\b(?:tong )?(?:so )?tien (?:tra )?gop (?:khach |ma khach )?con (?:phai (?:thu|tra|gop)|no|lai|thieu)\b"
+        rf"|\bkhach con (?:no|phai (?:tra|gop)) (?:tien )?(?:tra )?gop\b"
+        rf"|\bcon (?:phai thu|no) {_AMOUNT} tien (?:tra )?gop\b")),
+)
+SIDE_INTENTS = frozenset(intent for intent, _ in _SIDE)
+
+
+def _side_book(text: str, today: date, rules: Rules) -> Plan | None:
+    """Phones taken in and instalments, from the side books a README describes."""
+    found = [(intent, match) for intent, pattern in _SIDE for match in [pattern.search(text)]
+             if match]
+    if any(intent == "instalment_outstanding" for intent, _ in found):
+        # "tiền góp khách còn phải trả" also contains the words of the paid instalments.
+        found = [f for f in found if f[0] != "instalment_collected"]
+    if len({intent for intent, _ in found}) != 1:
+        return None
+    intent, match = found[0]
+    rest = text[:match.start()] + " " + text[match.end():]
+    snapshot = intent == "instalment_outstanding"
+    if snapshot:
+        rest = re.sub(r"\b(?:tinh )?(?:den|toi) (?:het )?(?=ngay|thang|nam|cuoi|hom)", " ", rest)
+    resolved = _period(rest, today, rules)
+    if resolved is None:
+        return None
+    start, end, leftover = resolved
+    leftover = re.sub(r"\b(?:tiem|cua hang|shop|tong|khach|cua khach|cac)\b", " ", leftover)
+    if _FILLERS.sub(" ", leftover).strip() or start > min(end, today):
+        return None
+    end = min(end, today)
+    return Plan(intent, end if snapshot else start, end, evidence=rules.source_rows)
 
 
 _AVG_PURCHASE_CUE = re.compile(r"\bnhap\b.*\bbinh quan\b|\bbinh quan\b.*\bnhap\b")
@@ -1498,7 +1588,15 @@ _STAFF = re.compile(r"\b(?:cac )?don (?:hang )?do nhan vien (?:ma )?(nv\d{1,4}) 
                     r"|\b(?:cua )?nhan vien (?:ma )?(nv\d{1,4})\b")
 _BEST_STAFF = re.compile(
     r"\b(?:ai la )?nhan vien ban gioi nhat(?: la ai)?\b"
-    r"|\b(?:ai la )?(?:nhan vien|nguoi ban) (?:nao )?co doanh thu cao nhat(?: la ai)?\b")
+    r"|\b(?:ai la )?(?:nhan vien|nguoi ban|tho|ky thuat vien) (?:nao )?co doanh thu "
+    r"(?:cao|lon) nhat(?: la ai)?\b"
+    r"|\b(?:ai la )?(?:tho|ky thuat vien) (?:nao )?(?:lam|sua|mang ve|thu ve|lam ra|lam duoc)"
+    r"(?: duoc| ra| ve)? (?:nhieu tien|nhieu doanh thu|doanh thu cao) nhat(?: la ai)?\b")
+# Commission of a worker (README worker list with a commission rate), or the top earner.
+_COMMISSION = re.compile(r"\b(?:so )?(?:tien )?hoa hong\b")
+_COMMISSION_WORDS = re.compile(
+    r"\b(?:(?:tho|nhan vien|ky thuat vien) nao|ai|la ai|ai la|duoc huong|duoc nhan|nhan duoc|"
+    r"duoc|huong|nhan|lanh|co|(?:nhieu|cao|lon) nhat|tong|tong cong|bao nhieu|la|tien)\b")
 
 
 def _staff(text: str, vocabulary: dict[str, Iterable[str]]) -> tuple[str, str] | None | bool:
@@ -1507,7 +1605,8 @@ def _staff(text: str, vocabulary: dict[str, Iterable[str]]) -> tuple[str, str] |
     names = dict(zip(vocabulary.get("staff_names", ()), vocabulary.get("staff_codes", ())))
     if names:
         choices = "|".join(re.escape(name) for name in sorted(names, key=lambda n: (-len(n), n)))
-        named = re.compile(rf"\b(?:(?:cac )?don (?:hang )?do |cua )?nhan vien ({choices})\b")
+        named = re.compile(rf"\b(?:(?:cac )?(?:don|phieu) (?:hang )?do |cua )?"
+                           rf"(?:nhan vien|tho|ky thuat vien) ({choices})\b")
         found.extend((match.span(), names[match.group(1)]) for match in named.finditer(text))
     if not found:
         return None

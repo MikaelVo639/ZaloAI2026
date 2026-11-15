@@ -3,6 +3,7 @@ product names, conventions that name the order column, total and note rows."""
 
 import sqlite3
 import unittest
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -53,6 +54,19 @@ TICKETS = """## File
 
 ## Quy ước
 - Mỗi dòng là một phiếu dịch vụ. Chỉ ghi phiếu đã hoàn thành.
+"""
+# A register that names no price adjustment and no ticket state anywhere.
+PLAIN_TICKETS = """## File
+- `register.csv` (csv)
+
+## Cột trong `register.csv`
+- **Ngày**: ngày làm
+- **Người làm**: người làm phiếu
+- **Tiền**: tổng tiền cả phiếu
+- **Ghi chú**: ghi chú
+
+## Quy ước
+- Mỗi dòng là một phiếu sửa.
 """
 HEADER = ["Ngày", "Số", "Món", "SL", "Giá", "Tiền", "Note"]
 SHORT = [["Viết tắt", "Tên hàng", "Loại"], ["TX", "Trà xanh", "Đồ uống"],
@@ -105,6 +119,13 @@ class MeaningTests(unittest.TestCase):
         self.assertEqual(parse_day("5-3", "Thang 03 2026"), date(2026, 3, 5))
         with self.assertRaises(ValueError):
             parse_day("7", "Sheet1")
+        for written in ("Thứ 2, 03/08", "T2 3/8", "CN - 3/8", "3/8 (T2)", "ngày 3", "Ngày 03",
+                        "3/8/26", "03-08-26", "thứ hai 3/8"):
+            with self.subTest(written=written):
+                self.assertEqual(parse_day(written, "T8-2026"), date(2026, 8, 3))
+        for wrong in ("3/8/25", "T9 3/8", "tháng 3"):
+            with self.subTest(wrong=wrong), self.assertRaises(ValueError):
+                parse_day(wrong, "T8-2026")
 
 
 class LedgerTests(_Shop):
@@ -240,6 +261,112 @@ class LedgerTests(_Shop):
             with self.subTest(error=error), self.assertRaisesRegex(ReadmeSalesError, error):
                 load_readme_sales(catalog, GROSS_RULEBOOK)
 
+    def test_plain_ticket_register_reads_totals_and_withholds_counts_of_free_tickets(self):
+        rows = [["Ngày", "Người làm", "Tiền", "Ghi chú"], ["10/01/2026", "Ba", 40000, ""],
+                ["10/01/2026", "Tư", 60000, ""], ["11/01/2026", "Ba", 50000, ""]]
+        day = date(2026, 1, 10)
+        catalog = self.shop(PLAIN_TICKETS, {"register.csv": rows})
+        sales, source, _ = load_readme_sales(catalog, GROSS_RULEBOOK)
+        self.assertEqual(source["grain"], "service_tickets")
+        self.assertEqual({s.staff_id for s in sales}, {"Ba", "Tư"})
+        for intent, expected in (("revenue", 100000), ("order_count", 2)):
+            answer = answer_plan({}, catalog, Plan(intent, day, day), GROSS_RULEBOOK)
+            self.assertEqual((answer.type, answer.answer), ("number", expected), answer.reason)
+        # A zero ticket with a note (a free return visit) may or may not be a ticket. A note
+        # written across the date column without an amount is not a ticket.
+        free = rows + [["10/01/2026", "Tư", 0, "Quay lại làm lại"],
+                       ["Lưu ý: tháng này nghỉ Tết", "", "", ""]]
+        catalog = self.shop(PLAIN_TICKETS, {"register.csv": free})
+        cache = {}
+        revenue = answer_plan(cache, catalog, Plan("revenue", day, day), GROSS_RULEBOOK)
+        self.assertEqual((revenue.type, revenue.answer), ("number", 100000), revenue.reason)
+        count = answer_plan(cache, catalog, Plan("order_count", day, day), GROSS_RULEBOOK)
+        self.assertEqual(count.type, "abstain")
+        self.assertIn("ambiguous status", count.reason)
+        # Rankings by revenue are not changed by a zero ticket either.
+        month = (date(2026, 1, 1), date(2026, 1, 31))
+        best = answer_plan(cache, catalog, Plan("best_day", *month), GROSS_RULEBOOK)
+        self.assertEqual((best.type, best.answer), ("date", "2026-01-10"), best.reason)
+        top = answer_plan(cache, catalog, Plan("top_staff", *month), GROSS_RULEBOOK)
+        self.assertEqual((top.type, top.answer), ("string", "Ba"), top.reason)
+
+    def test_worker_spellings_join_the_worker_list_for_commission_and_rankings(self):
+        readme = (PLAIN_TICKETS.replace("- `register.csv` (csv)\n",
+                                        "- `register.csv` (csv)\n- `tho.csv` (csv)\n")
+                  .replace("- **Người làm**: người làm phiếu", "- **Thợ**: thợ làm phiếu, ghi tên gọi")
+                  .replace("## Quy ước", "## Cột trong `tho.csv`\n- **Họ tên**: họ tên thợ\n"
+                           "- **Hoa hồng (%)**: phần trăm hoa hồng của thợ, tính trên tổng Tiền "
+                           "các phiếu thợ làm trong tháng\n\n## Quy ước"))
+        rows = [["Ngày", "Thợ", "Tiền", "Ghi chú"], ["03/01/2026", "a Bình", 300000, ""],
+                ["04/01/2026", "bình", 200000, ""], ["05/01/2026", "Chú Ba", 400000, ""],
+                ["05/01/2026", "Ba", 0, "Bảo hành phiếu trước"]]
+        workers = [["Họ tên", "Hoa hồng (%)"], ["Trần Văn Bình", 10], ["Lê Thị Ba", "15%"]]
+        catalog = self.shop(readme, {"register.csv": rows, "tho.csv": workers})
+        split = Split(self.data, (), GROSS_RULEBOOK, self.data / "calendar.csv")
+        agent = BaselineAgent()
+        self.addCleanup(agent.close)
+        context = BusinessContext(split, catalog)
+        day = date(2026, 1, 31)
+        for text, expected in (
+                ("Hoa hồng của thợ Bình tháng 1/2026 là bao nhiêu?", ("number", 50000)),
+                ("Tháng 1/2026 thợ Lê Thị Ba được bao nhiêu tiền hoa hồng?", ("number", 60000)),
+                ("Thợ nào được hoa hồng nhiều nhất tháng 1/2026?", ("string", "Lê Thị Ba")),
+                ("Thợ nào làm được nhiều tiền nhất tháng 1/2026?", ("string", "Trần Văn Bình")),
+                ("Tháng 1/2026 thợ Bình làm được bao nhiêu tiền?", ("number", 500000)),
+                ("Doanh thu sửa xe tháng 1/2026 là bao nhiêu?", ("number", 900000)),
+                ("Tháng 1/2026 có bao nhiêu lượt xe vào sửa?", ("abstain", None))):
+            with self.subTest(text=text):
+                answer = agent.answer(Question("q", "shop", text, day), context)
+                self.assertEqual((answer.type, answer.answer), expected, answer.reason)
+        invalid = answer_plan({}, catalog, Plan("staff_commission", day, day), GROSS_RULEBOOK)
+        self.assertEqual(invalid.type, "abstain")
+        outside = date(2025, 12, 31)
+        uncovered = answer_plan(
+            {}, catalog, Plan("staff_commission", outside, outside,
+                              filters=(Filter("staff", "Trần Văn Bình", ""),)), GROSS_RULEBOOK,
+        )
+        self.assertEqual(uncovered.type, "abstain")
+        # A spelling that names no listed worker leaves every worker question unanswered.
+        catalog = self.shop(readme, {"register.csv": rows + [["06/01/2026", "Tư", 100000, ""]],
+                                     "tho.csv": workers}, business="other")
+        answer = agent.answer(Question("q", "other", "Hoa hồng của thợ Bình tháng 1/2026 là "
+                                       "bao nhiêu?", day), BusinessContext(split, catalog))
+        self.assertEqual(answer.type, "abstain")
+
+    def test_plain_ticket_register_fails_closed_when_the_readme_names_more(self):
+        rows = [["Ngày", "Người làm", "Tiền", "Ghi chú"], ["10/01/2026", "Ba", 40000, ""]]
+        for doc, error in (
+                (PLAIN_TICKETS + "- Khách quen được giảm giá 10%.\n", "AMOUNT_UNVERIFIED"),
+                (PLAIN_TICKETS + "- Phiếu khách huỷ vẫn ghi.\n", "MISSING_VALUE"),
+                (PLAIN_TICKETS.replace("tổng tiền cả phiếu", "tiền công"), "NO_SALES_LIST|AMOUNT"),
+                (PLAIN_TICKETS.replace("ngày làm", "ngày làm, mỗi dòng một phiếu")
+                 .replace("## Cột trong `register.csv`", "## Cột trong `register.csv`\n"
+                          "- **Trạng thái**: trạng thái phiếu"), "MISSING_VALUE|UNKNOWN|STATUS")):
+            catalog = self.shop(doc, {"register.csv": rows})
+            with self.subTest(doc=doc[-60:]), self.assertRaisesRegex(ReadmeSalesError, error):
+                load_readme_sales(catalog, GROSS_RULEBOOK)
+
+    def test_catalogue_without_codes_gives_groups_by_name_and_gaps_withhold_group_answers(self):
+        readme = LEDGER.replace("- `tat.csv` (csv)\n", "- `tat.csv` (csv)\n- `hang.csv` (csv)\n")
+        readme = readme.replace("## Quy ước", "## Cột trong `hang.csv`\n- **Tên hàng**: tên hàng\n"
+                                "- **Nhóm**: nhóm hàng\n\n## Quy ước")
+        groups = [["Tên hàng", "Nhóm"], ["Trà xanh", "Đồ uống"], ["Bánh mì", "Đồ ăn"]]
+        short = [row[:2] for row in SHORT]  # the short-name list gives no group here
+        catalog = self.shop(readme, {"so.csv": ledger(notes=("",)), "tat.csv": short,
+                                     "hang.csv": groups})
+        sales, _, _ = load_readme_sales(catalog, RULEBOOK)
+        self.assertEqual({s.product_group for s in sales}, {"Đồ uống", "Đồ ăn"})
+        month = (date(2026, 1, 1), date(2026, 1, 31))
+        plan = Plan("revenue", *month, filters=(Filter("product_group", "Đồ ăn", ""),))
+        answer = answer_plan({}, catalog, plan, RULEBOOK)
+        self.assertEqual((answer.type, answer.answer), ("number", 24 * 10000), answer.reason)
+        # A sold product missing from the catalogue: its group is unknown, so no group total.
+        catalog = self.shop(readme, {"so.csv": ledger(notes=("",)), "tat.csv": short,
+                                     "hang.csv": groups[:2]}, business="gap")
+        answer = answer_plan({}, catalog, plan, RULEBOOK)
+        self.assertEqual(answer.type, "abstain")
+        self.assertIn("group is unknown", answer.reason)
+
     def test_staff_name_must_map_uniquely_in_documented_pos_table(self):
         from datamate.semantics.planner import plan_question
         from datamate.semantics.rules import read_rules
@@ -302,6 +429,33 @@ class LedgerTests(_Shop):
                          {str(i) for i in range(1, 24, 2)})
         self.assertEqual({s.product_name for s in sales}, {"Trà xanh", "Bánh mì"})
         self.assertEqual(evidence["order_ids"], "from_file")
+
+    def test_header_catalogue_supplies_groups_without_replacing_sales_identity(self):
+        readme = ("## File\n- `so_ban_hang.csv` (csv)\n"
+                  "## Quy ước\n- Dữ liệu có đến hết 31/01/2026.\n"
+                  "- **Đơn**: các dòng cùng **Số** là một đơn.\n"
+                  "- **Đơn trả lại**: **Note** của đơn ghi khách trả lại.\n")
+        files = {"so_ban_hang.csv": ledger(notes=("",), name="Trà xanh")}
+        base, _, eligible = load_readme_sales(self.shop(readme, files), RULEBOOK)
+        groups = [["Mã hàng", "Tên hàng", "Nhóm hàng"], ["SP01", "Trà xanh", "Đồ uống"],
+                  ["SP02", "Bánh mì", "Đồ ăn"]]
+        catalog = self.shop(readme, {**files, "danh_muc.csv": groups}, business="with_groups")
+        sales, evidence, enriched_eligible = load_readme_sales(catalog, RULEBOOK)
+        self.assertEqual({s.product_group for s in sales}, {"Đồ uống", "Đồ ăn"})
+        self.assertEqual([replace(s, product_group=None) for s in sales], base)
+        self.assertEqual(enriched_eligible, eligible)
+        self.assertEqual(evidence["product_groups_from_headers"]["matched_rows"], len(base))
+        period = date(2026, 1, 1), date(2026, 1, 31)
+        plan = Plan("revenue", *period, filters=(Filter("product_group", "Đồ ăn", ""),))
+        answer = answer_plan({}, catalog, plan, RULEBOOK)
+        self.assertEqual((answer.type, answer.answer), ("number", 24 * 10000), answer.reason)
+
+        duplicate = [*groups, ["SP01", "Trà sữa", "Đồ uống"]]
+        catalog = self.shop(readme, {**files, "danh_muc.csv": duplicate}, business="duplicate_code")
+        sales, evidence, enriched_eligible = load_readme_sales(catalog, RULEBOOK)
+        self.assertEqual(sales, base)
+        self.assertEqual(enriched_eligible, eligible)
+        self.assertNotIn("product_groups_from_headers", evidence)
 
 
 class NameSpellingTests(_Shop):

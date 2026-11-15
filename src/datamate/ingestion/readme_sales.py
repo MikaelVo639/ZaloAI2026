@@ -300,6 +300,17 @@ _SERVICE_GRAIN = re.compile(
     r"\bmoi dong (?:la |ghi |ghi lai |luu |luu lai |tuong ung (?:voi )?)?"
     r"(?:mot |1 )(?:phieu|hoa don)\b"
     r"|\bmoi dong (?:mot|1) (?:[^ ;.]+ ){1,5}(?:mot|1) phieu\b")
+# A ticket register whose README names no price adjustment and no ticket state at all: the
+# ticket total is what the shop takes and every written ticket is a done job.
+_TICKET_TOTAL = re.compile(r"^tong tien (?:ca |cua )?phieu$")
+_PRICE_ADJUSTMENT = re.compile(
+    r"\b(?:giam gia|giam tru|chiet khau|khuyen mai|uu dai|bot|phi (?:giao|ship|van chuyen|dich vu)"
+    r"|thue|vat|phu thu|tien coc|dat coc)\b")
+_TICKET_STATE = re.compile(
+    r"\b(?:huy|tra lai|tra hang|trang thai|hoan tien|hoan tra|tam tinh|bao gia|cho (?:sua|lay|xu ly)"
+    r"|dang (?:sua|lam)|chua (?:xong|lam|lay|hoan thanh|thanh toan))\b")
+_SERVICE_STAFF = re.compile(r"^(?:tho|ky thuat vien|nguoi (?:lam|sua))(?: (?:lam|sua))?(?: phieu)?$")
+_SERVICE_NOTE = re.compile(r"^ghi chu(?: (?:cua )?phieu)?$")
 _ONLY_COMPLETE = re.compile(
     r"\b(?:chi (?:ghi|luu) (?:lai )?(?:cac )?phieu|(?:tat ca|moi) (?:cac )?phieu) "
     r"(?:deu )?(?:da )?(?:hoan thanh|thanh toan)\b")
@@ -335,6 +346,12 @@ def _service_fields(section: Section) -> dict[str, str]:
                     and not re.search(r"\b(?:giao|du kien|hen|han|nhap|tra|sinh)\b", fold(meaning)))]
         if len(days) == 1:
             fields["date"] = days[0]
+    for column, meaning in section.columns.items():
+        head = fold(re.split(r"[:;,]", meaning, maxsplit=1)[0]).strip()
+        if "staff_id" not in fields and _SERVICE_STAFF.fullmatch(head):
+            fields["staff_id"] = column
+        elif "ticket_note" not in fields and _SERVICE_NOTE.fullmatch(head):
+            fields["ticket_note"] = column
     return fields
 
 
@@ -644,7 +661,38 @@ def header_sections(catalog: Catalog, documented: list[Section]) -> list[Section
         sections.append(section)
     documented_orders = any("order_id" in s.fields and s.fields.keys() & {"date", "status"}
                             and "quantity" not in s.fields for s in documented)
+    if sections and not any("product_group" in s.fields for s in documented):
+        sections += _header_catalogue(headers)
     return sections or _joined_header_sections(headers, documented_orders)
+
+
+# A product list the README does not describe: a table named as goods whose headers name
+# the product code, the product name and the product group exactly once each.
+_CATALOGUE_NAME = re.compile(r"\b(?:hang hoa|hanghoa|danh muc|danhmuc|san pham|sanpham)\b")
+_CATALOGUE_HEADS = {
+    "mã hàng": re.compile(r"ma (?:h ?hoa|hang(?: hoa)?|san pham|sp)"),
+    "tên hàng": re.compile(r"ten (?:hang(?: hoa)?|san pham|sp)"),
+    "nhóm hàng": re.compile(r"nhom (?:hang(?: hoa)?|san pham|sp)"),
+}
+_HEADER_GROUPS = "header_product_groups"
+
+
+def _header_catalogue(headers: list[tuple[Table, set[str]]]) -> list[Section]:
+    found = []
+    for table, header in headers:
+        name = fold(re.sub(r"[_\-.]", " ", f"{table.path.stem} {table.name}"))
+        name = re.sub(r"(?<=[a-z])(?=hang|hoa)", " ", name)
+        if not _CATALOGUE_NAME.search(name) or looks_like_sales_lines(sorted(header)):
+            continue
+        columns = {}
+        for meaning, pattern in _CATALOGUE_HEADS.items():
+            hits = [c for c in header if pattern.fullmatch(fold(re.sub(r"[.]", " ", c)).strip())]
+            if len(hits) != 1:
+                break
+            columns[hits[0]] = meaning
+        else:
+            found.append(Section(table.path.name, table.name, columns, origin=_HEADER_GROUPS))
+    return found if len(found) == 1 else []
 
 
 def convention_columns(readme: str) -> dict[str, str]:
@@ -938,6 +986,13 @@ def _plain_number(text: str, decimal_comma: bool = False) -> Decimal:
         raise ValueError("invalid number") from exc
 
 
+# Hand-written day cells: "Thứ 2, 03/08", "T2 3/8", "CN - 3/8", "3/8 (T2)", "ngày 3".
+_WEEKDAY = r"(?:thu (?:hai|ba|tu|nam|sau|bay|[2-7])|t[2-7]|cn|chu nhat)"
+_DAY_PREFIX = re.compile(rf"^(?:{_WEEKDAY}\s*[,:-]?\s*(?:ngay\s+)?|ngay\s+)(?=\d)")
+_DAY_SUFFIX = re.compile(rf"\s*(?:\(\s*{_WEEKDAY}\s*\)|[,-]\s*{_WEEKDAY})$")
+_TWO_DIGIT_YEAR = re.compile(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{2})")
+
+
 def parse_day(value: Any, sheet: str = "") -> date:
     if isinstance(value, datetime):
         return value.date()
@@ -946,6 +1001,18 @@ def parse_day(value: Any, sheet: str = "") -> date:
     if isinstance(value, (int, float)) and not isinstance(value, bool) and 20000 < value < 80000:
         return date(1899, 12, 30) + timedelta(days=int(value))
     text = str(value).strip()
+    # Lower case without accents, punctuation kept (fold drops "-" and brackets).
+    plain = "".join(c for c in unicodedata.normalize("NFD", text.lower().replace("đ", "d"))
+                    if not unicodedata.combining(c))
+    if _DAY_PREFIX.search(plain) or _DAY_SUFFIX.search(plain):
+        text = _DAY_SUFFIX.sub("", _DAY_PREFIX.sub("", plain)).strip()
+    two = _TWO_DIGIT_YEAR.fullmatch(text)
+    if two:
+        year = 2000 + int(two.group(3))
+        named = re.search(r"(?<!\d)(20\d{2})(?!\d)", sheet)
+        if named and int(named.group(1)) != year:
+            raise ValueError("Two-digit year disagrees with the sheet")
+        return date(year, int(two.group(2)), int(two.group(1)))
     if re.fullmatch(r"\d{5}", text) and 20000 < int(text) < 80000:
         return date(1899, 12, 30) + timedelta(days=int(text))
     short = re.fullmatch(r"(\d{1,2})[/.-](\d{1,2})", text)
@@ -1119,6 +1186,9 @@ def _classify(sections: list[Section], catalog: Catalog) -> dict[str, _Role]:
         elif ("product_id" in fields and fields & {"product_name", "name"}
               and not fields & {"order_id", "quantity"}):
             role = "products"
+        elif ({"product_name", "product_group"} <= fields
+              and not fields & {"product_id", "order_id", "quantity", "amount", "date"}):
+            role = "products"  # a catalogue without codes: joined by unambiguous name
         else:
             continue
         if role == "service_orders":
@@ -1258,9 +1328,14 @@ def load_readme_sales(catalog: Catalog, rulebook: str
             if fold(section.columns[column]) in _NOTE_HEADS:
                 sections[i] = replace(section, columns={**section.columns, column: meaning})
     sections += profile_sections(catalog, sections)
+    header_groups = None
     if not any({"order_id", "amount"} <= set(s.fields) or "order_goods" in s.fields
                for s in sections):
-        sections += header_sections(catalog, sections)
+        for section in header_sections(catalog, sections):
+            if section.origin == _HEADER_GROUPS:
+                header_groups = section
+            else:
+                sections.append(section)
     if not sections:
         raise ReadmeSalesError("README_COLUMNS_MISSING", "README has no column descriptions")
     roles = _classify(sections, catalog)
@@ -1272,7 +1347,14 @@ def load_readme_sales(catalog: Catalog, rulebook: str
             raise ReadmeSalesError("AMBIGUOUS_ROLE", "Ticket ledger coexists with a sales list")
         return _from_service_orders(catalog, roles["service_orders"], rules)
     if "lines" in roles:
-        return _from_lines(catalog, roles, rules, conventions)
+        sales, evidence, eligible = _from_lines(catalog, roles, rules, conventions)
+        if header_groups is not None:
+            sales, matched = _enrich_header_groups(catalog, header_groups, sales)
+            if matched:
+                evidence["product_groups_from_headers"] = {
+                    "source": header_groups.label, "matched_rows": matched,
+                }
+        return sales, evidence, eligible
     if "orders" in roles and "order_goods" in roles["orders"].sections[0].fields:
         return _from_orders(roles, rules)
     raise ReadmeSalesError("NO_SALES_LIST", "README describes no sales line list",
@@ -1316,17 +1398,19 @@ def _products_index(
     if "products" not in roles:
         return by_id, by_name
     ambiguous: set[str] = set()
+    coded = all("product_id" in section.fields for section in roles["products"].sections)
     for _sheet, _ordinal, row in _role_rows(roles["products"], headers):
-        if _blank(row.get("product_id")):
+        if _blank(row.get("product_id")) and coded:
             continue
-        key = str(row["product_id"]).strip()
-        if key in by_id:
+        key = None if not coded else str(row["product_id"]).strip()
+        if key is not None and key in by_id:
             raise ReadmeSalesError("DUPLICATE_PARENT_KEY", "Product list repeats a code",
                                    role="products")
         name = row.get("name", row.get("product_name"))
         record = {"id": key, "name": None if _blank(name) else str(name).strip(),
                   "base_unit": row.get("base_unit"), "group": row.get("product_group")}
-        by_id[key] = record
+        if key is not None:
+            by_id[key] = record
         if record["name"]:
             name_key = _name_key(record["name"])
             if name_key in by_name:
@@ -1335,6 +1419,33 @@ def _products_index(
     for name_key in ambiguous:
         by_name.pop(name_key, None)
     return by_id, by_name
+
+
+def _enrich_header_groups(catalog: Catalog, section: Section,
+                          sales: list[Sale]) -> tuple[list[Sale], int]:
+    """A header-only catalogue can supply missing groups while preserving sales identities."""
+    try:
+        tables = _matching_tables(catalog, section)
+        if len(tables) != 1:
+            return sales, 0
+        groups = _Role([section], [(section, tables[0])])
+        by_id, by_name = _products_index({"products": groups})
+    except (ReadmeSalesError, OSError):
+        return sales, 0
+    enriched = []
+    matched = 0
+    for sale in sales:
+        if sale.product_group:
+            enriched.append(sale)
+            continue
+        if sale.product_id and not sale.product_id_is_name:
+            product = by_id.get(sale.product_id)
+        else:
+            product = by_name.get(_name_key(sale.product_name))
+        group = _text(product["group"]) if product else None
+        enriched.append(replace(sale, product_group=group) if group else sale)
+        matched += group is not None
+    return enriched, matched
 
 
 def _customers_index(roles: dict[str, _Role]) -> dict[str, dict[str, str | None]]:
@@ -1827,18 +1938,28 @@ def _from_service_orders(catalog: Catalog, role: _Role, rules: _Rules
         raise ReadmeSalesError("RULE_CAPABILITY_MISSING", "Service tickets need the revenue rule")
     fields = _service_fields(role.sections[0])
     amount_field = "order_goods" if "order_goods" in fields else "service_goods"
+    readme = fold(catalog.readme)
+    plain = False
     for section in role.sections:
         amount_meaning = fold(section.columns[_service_fields(section)[amount_field]])
         gross = ("truoc giam gia" in amount_meaning or "khong tru giam gia" in amount_meaning)
         net_of_fees = ("khong gom phi giao" in amount_meaning
                        and "khong gom thue" in amount_meaning)
-        if not (gross and net_of_fees):
+        # The README names no discount, fee or tax anywhere: the ticket total is the takings.
+        plain = (_TICKET_TOTAL.fullmatch(amount_meaning.strip()) is not None
+                 and not _PRICE_ADJUSTMENT.search(readme))
+        if not (gross and net_of_fees or plain):
             raise ReadmeSalesError("AMOUNT_UNVERIFIED",
                                    "Ticket totals must document discount, tax and fee treatment")
     written_status = "status" in fields
     documented_notes = "status_note" in fields
-    if not (written_status or documented_notes or
-            (len(role.sections) == 1 and _ONLY_COMPLETE.search(fold(catalog.readme)))):
+    # One register with no state column and no state named anywhere in the README: every
+    # ticket is a done job, except a zero ticket with a note (a free return visit, a quote):
+    # whether it is a ticket is unknown, so it may change a count but never a total.
+    stateless = (plain and len(role.sections) == 1 and not written_status
+                 and not documented_notes and not _TICKET_STATE.search(readme))
+    if not (written_status or documented_notes or stateless or
+            (len(role.sections) == 1 and _ONLY_COMPLETE.search(readme))):
         raise ReadmeSalesError("MISSING_VALUE", "Ticket status or completion is undocumented")
     rows = []
     for sheet, ordinal, row in _role_rows(role, with_file=True, service=True):
@@ -1846,6 +1967,10 @@ def _from_service_orders(catalog: Catalog, role: _Role, rules: _Rules
             raise ReadmeSalesError("MISSING_VALUE", "Ticket amount without a date")
         if is_total_label(row.get("date")) or (
                 _blank(row.get("date")) and _blank(row.get(amount_field))):
+            continue
+        # A note written across the date column ("Ghi chú: ..."), with no amount.
+        if (isinstance(row.get("date"), str) and not re.search(r"\d", row["date"])
+                and _blank(row.get(amount_field))):
             continue
         key = f"{row['_file']}::{sheet}#{ordinal}"
         rows.append((key, sheet, {**row, "_order": key}))
@@ -1855,16 +1980,22 @@ def _from_service_orders(catalog: Catalog, role: _Role, rules: _Rules
     sales = []
     statuses = Counter()
     for key, sheet, row in rows:
+        part = "status"
         try:
             label = row.get("status") if written_status or documented_notes else "hoan thanh"
             status = AMBIGUOUS_STATE if row.get("_state_ambiguous") else policy.resolve(label)
+            part = "date"
             day = parse_day(row.get("date"), sheet)
+            part = "amount"
             amount = parse_amount(row.get(amount_field))
+            if stateless and not amount and not _blank(row.get("ticket_note")):
+                status = AMBIGUOUS_STATE
         except (TypeError, ValueError, StatusError) as exc:
-            raise ReadmeSalesError("VALUE_INVALID", "Ticket date, status or amount unreadable") from exc
+            raise ReadmeSalesError("VALUE_INVALID", f"Ticket {part} unreadable") from exc
         sales.append(Sale(key, day, status, amount, None, None, None,
                           minute=parse_minute(row.get("time")), staff_id=_text(row.get("staff_id"))))
         statuses[status] += 1
+    sales, staff_evidence = _ticket_workers(catalog, sales)
     evidence = {
         "adapter_version": ADAPTER_VERSION,
         "sources": {"service_orders": [s.label for s in role.sections]},
@@ -1874,8 +2005,33 @@ def _from_service_orders(catalog: Catalog, role: _Role, rules: _Rules
         "order_ids": "one_record_per_row",
         "grain": "service_tickets",
         "rules": [*rules.evidence, rules.order_goods],
+        **staff_evidence,
     }
     return sales, evidence, frozenset()
+
+
+def _ticket_workers(catalog: Catalog, sales: list[Sale]) -> tuple[list[Sale], dict[str, Any]]:
+    """Name each ticket's worker as the README's worker list does. Spellings that cannot be
+    joined to exactly one listed worker leave every worker question unanswered."""
+    from datamate.ingestion.service_staff import match_worker, spelling_key, worker_list
+
+    written = {s.staff_id for s in sales if s.staff_id}
+    if not written:
+        return sales, {}
+    workers = worker_list(catalog)
+    if workers is None:
+        keys = [spelling_key(name) for name in written]
+        # Without a list, two spellings of one person would split that person's tickets.
+        merged = len(set(keys)) != len(keys)
+        return sales, ({"staff_unresolved": len(keys) - len(set(keys))} if merged else {})
+    joined = {name: match_worker(name, workers) for name in written}
+    unresolved = sum(worker is None for worker in joined.values())
+    if unresolved:
+        return sales, {"staff_unresolved": unresolved, "staff_list": len(workers)}
+    sales = [replace(s, staff_id=joined[s.staff_id].name) if s.staff_id else s for s in sales]
+    return sales, {"staff_list": len(workers), "staff_spellings": len(written),
+                   "commission_percent": {w.name: str(w.commission_percent) for w in workers
+                                          if w.commission_percent is not None}}
 
 
 def _from_orders(roles: dict[str, _Role], rules: _Rules

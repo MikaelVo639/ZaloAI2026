@@ -31,6 +31,21 @@ class AbstainAgent:
         return Candidate(reason="Explicit abstain backend")
 
 
+# A service ticket register: one ticket (one visit) is one order.
+_TICKET_WORDS = re.compile(
+    r"\b(?:phieu (?:dich vu|sua chua|sua)(?: xe)?|luot (?:xe|khach)(?: (?:vao |den |duoc |mang )?"
+    r"(?:sua chua|sua|lam))?|(?:chiec )?xe (?:vao|den|mang den) (?:sua chua|sua|lam)|"
+    r"luot sua chua|luot sua)\b")
+# The shop's trade named after a revenue word: "doanh thu sửa xe", "tiền sửa xe".
+_TICKET_TRADE = re.compile(r"(?<=\bdoanh thu )(?:sua chua|sua)(?: xe)?\b"
+                           r"|(?<=\btien )(?:sua chua|sua)(?: xe)?\b")
+# What a worker brought in: "thợ X làm được bao nhiêu tiền" is the revenue of their tickets.
+_TICKET_EARNED = re.compile(r"\b(?:lam|sua|kiem|mang ve|thu ve) (?:duoc |ra |ve )?"
+                            r"(bao nhieu|bn) tien\b")
+_TICKET_INTENTS = frozenset({"order_count", "revenue", "average_order", "best_day", "top_staff",
+                             "staff_commission", "top_commission"})
+
+
 class BaselineAgent:
     """Plans in-process (pure, fast); loads data and calculates in a deadline worker.
 
@@ -122,7 +137,7 @@ class BaselineAgent:
             # Retry with this business's product names/codes ("doanh thu <mặt hàng> …").
             names = self._product_names(context)
             folded = fold(question.question)
-            if names or "nhan vien" in folded:
+            if names or re.search(r"\b(?:nhan vien|tho|ky thuat vien|hoa hong)\b", folded):
                 vocabulary = self._vocabulary(context)
                 plan = plan_question(question, rules, names, vocabulary)
                 if plan is None and price_history_question(question, rules):
@@ -134,13 +149,17 @@ class BaselineAgent:
                     increases, source = context.cache["price_history"]
                     plan = plan_question(question, rules, names, vocabulary,
                                          price_increases=increases, price_source=source)
-        if plan is None and re.search(r"\bphieu dich vu\b", fold(question.question)):
+        asked = normalize_question(question.question)
+        if plan is None and (_TICKET_WORDS.search(asked) or _TICKET_TRADE.search(asked)
+                             or _TICKET_EARNED.search(asked)):
             if self._prepare(context) is None and context.cache["worker_sales"].get("service_tickets"):
-                # Only this documented source gives "phiếu dịch vụ" the same grain as an order.
-                normalized = re.sub(r"\bphieu dich vu\b", "don",
-                                    normalize_question(question.question))
-                ticket_plan = plan_question(replace(question, question=normalized), rules)
-                if ticket_plan and ticket_plan.intent in ("order_count", "revenue"):
+                # Only this documented source gives a ticket the same grain as an order.
+                normalized = _TICKET_WORDS.sub("don", asked)
+                normalized = _TICKET_TRADE.sub(" ", normalized)
+                normalized = _TICKET_EARNED.sub(r"doanh thu \1", normalized)
+                ticket_plan = plan_question(replace(question, question=normalized), rules, (),
+                                            self._vocabulary(context))
+                if ticket_plan and ticket_plan.intent in _TICKET_INTENTS:
                     plan = ticket_plan
         if plan is None:
             plan = plan_rule_rank(question, rules, self._rule_specs(context.split.rulebook))
