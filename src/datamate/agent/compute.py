@@ -427,7 +427,7 @@ FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock
               "shift": frozenset({"revenue", "order_count"}),
               "staff": frozenset({"revenue", "order_count", "staff_commission"}),
               "size": frozenset({"quantity"}),
-              "product_group": frozenset({"revenue"}),
+              "product_group": frozenset({"revenue", "order_count", "quantity"}),
               "customer_group": frozenset({"revenue", "average_order"}),
               "ingredient": frozenset({"revenue"}),
               "prescription": frozenset({"revenue"}),
@@ -2345,6 +2345,31 @@ def _answer_group(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Ca
     window = (f"date.fromisoformat({plan.start.isoformat()!r}), "
               f"date.fromisoformat({plan.end.isoformat()!r})")
     group_call = f"select_group(select_valid(sales, {window}), {item.field!r}, {item.value!r})"
+    if plan.intent == "order_count":
+        value = order_count(part_rows)
+        evidence.update(calculation="count distinct valid whole orders holding a product of the group",
+                        code=_code(f"order_count({group_call})",
+                                   select_valid, select_group, order_count),
+                        result=value)
+        return Candidate("number", value, 1.0, "", evidence)
+    if plan.intent == "quantity":
+        if not any(s.base_unit and fold(s.base_unit) == fold(plan.unit) for s in part_rows):
+            return Candidate(reason=f"No product of the group sold in {plan.unit!r}",
+                             evidence=evidence)
+        if any(s.base_unit and fold(s.base_unit) != fold(plan.unit) for s in part_rows):
+            # "nhóm X bán được bao nhiêu ly" leaves out the group's products sold otherwise.
+            return Candidate(reason="The group's products are sold in several units",
+                             evidence=evidence)
+        value = quantity_in_unit(part_rows, plan.unit)
+        if value is None:
+            return Candidate(reason="A product's base unit is unknown", evidence=evidence)
+        result = int(value) if value == value.to_integral() else float(value)
+        evidence.update(calculation="sum(quantity_base) of the group's products in the unit",
+                        unit=plan.unit,
+                        code=_code(f"quantity_in_unit({group_call}, {plan.unit!r})",
+                                   select_valid, select_group, quantity_in_unit),
+                        quantity_base_total=str(value), result=result)
+        return Candidate("number", result, 1.0, "", evidence)
     if plan.intent == "average_order":
         value = average_order_value(part_rows)
         if value is None:

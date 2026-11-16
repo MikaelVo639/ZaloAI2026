@@ -240,7 +240,7 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
         return _avg_purchase(text, today, rules, names)
     if _NET_PURCHASE_CUE.search(text):
         return _net_purchase(text, today, rules, names)
-    if _PRICE_UP.search(text):
+    if _PRICE_UP.search(text) or (_PRICE_UP_K.search(text) and _EFFECT_BEFORE.search(text)):
         return _price_effect(text, today, rules, names, price_increases or {}, price_source)
     if rules.daily_sale_price:
         price = _daily_sale_price(text, today, rules, names)
@@ -395,6 +395,15 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
     elif best_day is not None:
         intent, text = "best_day", best_day
     unit = ""
+    if group and group[1] == "product_group" and not intent:
+        # "số đơn có mua hàng nhóm X", "đơn có ít nhất một mặt hàng nhóm X": orders holding
+        # the group's products; "các mặt hàng nhóm X bán ra …": the group's products.
+        if re.search(rf"\b{_ORDER}\b", text):
+            text = re.sub(r"\b(?:co )?(?:mua(?: hang)?|it nhat (?:mot|1)(?: (?:mat hang|mon|san pham))?)\b",
+                          " ", text)
+        text = re.sub(r"\bcac (?:mat hang|mon|san pham)\b", " ", text)
+    if group and not intent:
+        text = re.sub(r"\bmang ve\b", " ", text)  # "nhóm X mang về bao nhiêu doanh thu"
     for kind, feature, pattern, extras in () if intent else _INTENTS:
         if kind == "average_order" and group and group[1] == "customer_group":
             pattern = rf"(?:{pattern}|{_GROUP_AVERAGE})"
@@ -439,6 +448,9 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
         return None
     if group and intent != "revenue" and not (
         group[1] == "customer_group" and intent == "average_order" and not share
+    ) and not (
+        # Orders that hold the group's products; units of the group's products.
+        group[1] == "product_group" and intent in ("order_count", "quantity") and not share
     ):
         return None
     if (shift or staff) and intent not in ("revenue", "order_count"):
@@ -1156,8 +1168,10 @@ def _share(text: str) -> tuple[str, bool]:
     text = re.sub(rf"\b(?:trong )?(?:{_REVENUE}) ca (?:cua hang|shop)\b"
                   rf"|(?<!\bti )(?<!\bty )\btrong {_REVENUE}\b",
                   " tong doanh thu ", text)
-    if not re.search(rf"\btong {_REVENUE}\b", text) and not re.search(r"\bchiem\b", text):
+    if not re.search(rf"\btong {_REVENUE}\b", text) and not re.search(r"\b(?:chiem|dong gop)\b", text):
         return text, False
+    text = re.sub(rf"\b(?:mang ve )?((?:{_AMOUNT} )?phan tram) (?:tren )?(tong {_REVENUE})\b",
+                  r"\1 \2", text)
     text = re.sub(rf"\bchiem ((?:{_AMOUNT} )?phan tram) ({_REVENUE})\b", r"chiem \1 tong \2",
                   text)
     return re.sub(r"\s+", " ", _SHARE_WORDS.sub(" ", text)).strip(), True
@@ -1412,8 +1426,11 @@ _PRICE_SUFFIX = r"(?: ?d| dong)"
 _PRICE_UP = re.compile(
     rf"\b(?:ngay )?(?:(?:tang|doi) gia(?: tu (?P<old>{_PRICE_VALUE}){_PRICE_SUFFIX})? len"
     rf"|len gia) (?P<new>{_PRICE_VALUE}){_PRICE_SUFFIX}(?:/(?P<unit>[a-z][a-z0-9]*))?\b")
+# A price written with "k" ("lên 25k", "tăng giá từ 20k lên 25k"), read by _price_effect.
+_PRICE_UP_K = re.compile(r"\b(?:(?:tang|doi) gia (?:tu \d{1,3}k )?len|len gia|len) \d{1,3}k\b")
 _EFFECT_UNIT = re.compile(
-    r"\bso ([a-z][a-z0-9]*) ban (?:ra|duoc)\b|\b(?:luong ban )?tinh theo (?:so )?([a-z][a-z0-9]*)\b")
+    r"\b(?:so|luong) ([a-z][a-z0-9]*) ban(?: ra| duoc)?(?= trong\b| |$)"
+    r"|\b(?:luong ban )?tinh theo (?:so )?([a-z][a-z0-9]*)\b")
 _DRUG_CUE = re.compile(r"\b(?:hoat chat|ke don|(?:don|toa) (?:cua )?bac si)\b")
 # "Không cần đơn (toa) bác sĩ" is the plain wording of "không kê đơn"; "cần/phải có đơn bác sĩ"
 # is "kê đơn". Read them as the rulebook's terms before matching the closed wordings.
@@ -1497,7 +1514,8 @@ _EFFECT_WORDS = frozenset("""
     tu ngay so voi vs ke truoc do thi tang hay giam thay doi bao nhieu nhiu bnhiu bn may phan tram
     ban ra duoc trong luong tinh theo cho hoi minh xem coi check giup ta e a nhi vao
 """.split())
-_EFFECT_FROM = re.compile(rf"\b(\d{{1,3}}) ngay (?:ke tu (?:ngay )?(?:{_DATE}|do|(?:tang|doi) gia|tang)|dau)\b")
+_EFFECT_FROM = re.compile(rf"\b(\d{{1,3}}) ngay (?:ke tu (?:ngay )?(?:{_DATE}|do|(?:tang|doi) gia|tang)|dau"
+                          r"|tu (?:hom|bua|ngay) do)\b")
 _EFFECT_BEFORE = re.compile(r"\b(\d{1,3}) ngay (?:ngay |lien )?truoc(?: ngay do| do)?\b")
 _EFFECT_PERCENT = re.compile(rf"\b{_AMOUNT} phan tram\b")
 
@@ -1516,6 +1534,11 @@ def _price_effect(text: str, today: date, rules: Rules, names: Iterable[str],
     if not product or product is _AMBIGUOUS:
         return None
     text = re.sub(r"\s+", " ", text).strip()
+    # "25k" is 25 000 đồng; "<mặt hàng> lên 25k từ ngày …" (the name already taken out) is a
+    # price increase without the word "giá".
+    text = re.sub(r"\b(\d{1,3})k\b", lambda m: f"{int(m[1]) * 1000:,}".replace(",", " ") + "d", text)
+    if not re.search(r"\bgia\b", text):
+        text = re.sub(rf"\blen (?={_PRICE_VALUE}{_PRICE_SUFFIX}\b)", "len gia ", text)
     changes = list(_PRICE_UP.finditer(text))
     if len(changes) != 1:
         return None
@@ -1539,7 +1562,8 @@ def _price_effect(text: str, today: date, rules: Rules, names: Iterable[str],
     rest = re.sub(_DATE, " ", rest)
     rest = _EFFECT_UNIT.sub(" ", rest)
     rest = re.sub(r"\b(?:trung binh moi ngay|nhieu hay it hon|nhiu hay it hon|"
-                  r"tu hoi|ke tu khi)\b", " ", rest)
+                  r"nhieu hon hay it hon|cao hay thap hon|thap hay cao hon|"
+                  r"tu hoi|ke tu khi|tu khi|sau lan|(?:muon|mun) (?:biet|bit))\b", " ", rest)
     if set(rest.split()) - _EFFECT_WORDS:
         return None
     n = int(after[0][1])
