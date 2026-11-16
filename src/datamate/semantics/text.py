@@ -99,7 +99,7 @@ def normalize_question(value: object) -> str:
     raw = str(value).replace("%", " phần trăm ")
     # Regional particles closing a question ("… bao nhiêu rứa?", "… nhiêu hè", "… nghe"). Read
     # with accents: unaccented "rua" may be "rửa" (a wash) and stays.
-    raw = re.sub(r"(?:\s+(?:rứa|hè|hén|nghe|nghen|nè|nhoa|nhen))+\s*([?.!]*)\s*$", r"\1", raw,
+    raw = re.sub(r"(?:\s+(?:rứa|hè|hén|nghe|nghen|nè|nhoa|nhen|thế|ấy))+\s*([?.!]*)\s*$", r"\1", raw,
                  flags=re.I)
     # fold() also drops "≥": "doanh thu ≥ 580.000 đồng", "mua ≥ 4 đơn" are the rulebook's
     # "từ N trở lên" (gồm N). "≤", "<", ">" stay unread, so those questions abstain.
@@ -245,6 +245,40 @@ _EVERYDAY: tuple[tuple[str, Any], ...] = (
     # Rulebook §1: "bán được bao nhiêu tiền, thu về bao nhiêu tiền" is the revenue.
     (r"\bthu ve (bao nhieu|bao nhiu|bnhiu|bn) tien\b", r"ban duoc \1 tien"),
     (r"\bban duoc so luong (bao nhieu|bao nhiu|bnhiu|bn|may)\b", r"ban duoc \1"),
+    # Millions in a threshold: "từ 20 củ / 20tr / 20 triệu trở lên", "từ 9tr5 trở lên".
+    (r"\btu (\d{1,3}) ?(?:cu|trieu|tr)(?: dong)? tro len\b", r"tu \1 000 000 dong tro len"),
+    (r"\btu (\d{1,3}) ?tr ?(\d) tro len\b", r"tu \1 \g<2>00 000 dong tro len"),
+    # Running periods: "(từ) đầu năm tới chừ / giờ / hôm nay", "tuần này tính tới hôm nay".
+    (r"\b(?:tu )?dau nam(?: nay)? (?:toi|den) (?:bay gio|bay chu|gio|chu|het hom nay|hom nay)\b",
+     "tu dau nam den het hom nay"),
+    (r"\btuan nay (?:tinh )?(?:toi|den) (?:het )?hom nay\b", "tuan nay"),
+    # "tổng bao nhiêu đơn", "doanh thu tổng bao nhiêu"; "lên được bao nhiêu đơn".
+    (r"\btong (?=(?:bao nhieu|bao nhiu|bnhiu|bn|may)(?: |$))", ""),
+    # One shift against another: "ca chiều cao hay thấp hơn / nhiều hay ít hơn ca sáng".
+    (r"\b(?:cao hay thap|nhieu hay it|thap hay cao|it hay nhieu)(?: hon)? (?=ca (?:sang|chieu|toi)\b)",
+     "hon hay kem "),
+    (r"\bnhan vien nao ban duoc doanh thu cao nhat\b", "nhan vien nao co doanh thu cao nhat"),
+    # Days by revenue: "có mấy bữa (cửa hàng) bán được từ N trở lên".
+    (r"\b(?:co )?(?:may|bao nhieu|bao nhiu|bnhiu|bn) (?:bua|ngay) (?:cua hang )?"
+     # "đếm số ngày", not "số ngày": "so ngay" alone reads as a comparison ("so ngày …").
+     r"(?:ban duoc|doanh thu (?:cua cua hang )?dat) (?=tu \d)", "dem so ngay co doanh thu "),
+    (r"\blen duoc (?=(?:tong cong )?(?:bao nhieu|bao nhiu|bnhiu|bn|may) don)", "co "),
+    # Customers ranked by orders or by money.
+    (r"\b(?:ai la )?khach(?: hang)?(?: nao)? mua nhieu lan nhat(?: nhi)? dem theo (?:so|xo) don(?: ay)?\b",
+     "khach nao mua nhieu don nhat"),
+    (r"\bkhach(?: hang)? nao co nhieu don(?: hang)? nhat\b", "khach nao mua nhieu don nhat"),
+    (r"\bkhach(?: hang)? nao (?:co )?tong tien mua(?: hang)? cao nhat\b",
+     "khach nao co tong tien mua cao nhat"),
+    # Units over every product sold in that unit (the rulebook's own reading of the unit).
+    (r"\b(?:tinh|cong) (?:het|tat ca) (?:cac )?mat hang ban theo [a-z]+\b", ""),
+    (r"\btat ca (?:cac )?mat hang tinh theo [a-z]+\b", ""),
+    # The best day by revenue; the average order value.
+    (r"\bngay nao ban dat nhat tinh theo doanh thu\b", "ngay nao doanh thu cao nhat"),
+    (r"\bbua nao (?:cua hang )?ban duoc nhieu tien nhat\b", "ngay nao doanh thu cao nhat"),
+    (r"\btrung binh (?:1|mot|moi) don(?: hang)? (?:duoc|mang lai|mang ve) "
+     r"(?:bao nhieu|bao nhiu|bnhiu|bn) doanh thu\b", "gia tri trung binh mot don"),
+    (r"\bkhach mua trung binh (?:moi|mot) don(?: hang)? het (?:bao nhieu|bao nhiu|bnhiu|bn) tien\b",
+     "gia tri trung binh mot don"),
     # Not "bán đắt nhất": it may be the dearest item, and the rulebook lists it nowhere.
 )
 _EVERYDAY_RULES = tuple((re.compile(pattern), repl) for pattern, repl in _EVERYDAY)
