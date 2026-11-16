@@ -571,15 +571,44 @@ _MONTH_WORDS = re.compile(
     r"(?:\d+|hai|ba|bon|nam|sau) thang|thang)\b")
 
 
+_MONTH_RUN = re.compile(
+    r"\b(?:(?:cac )?(?:thang|th) ?)((?:\d{1,2} (?:(?:va|wa|qua|roi|rui) )?(?:(?:thang|th) ?)?)+)"
+    r"(\d{1,2})(?:/| nam )(\d{4})\b")
+
+
+def _carry_year(text: str) -> str:
+    """A list of months whose year is written once, on the last: "th2 th3 tháng 4/2026",
+    "các tháng 10 11 12 năm 2025". Each earlier month takes the year of the month after it,
+    one year less when it is a later month of the calendar ("tháng 11 12 1/2026")."""
+    def fill(match: re.Match) -> str:
+        months = [int(x) for x in re.findall(r"\d{1,2}", match.group(1))] + [int(match.group(2))]
+        if any(not 1 <= month <= 12 for month in months):
+            return match.group()
+        year, following, dated = int(match.group(3)), months[-1], [(months[-1], int(match.group(3)))]
+        for month in reversed(months[:-1]):
+            if month > following:
+                year -= 1
+            dated.insert(0, (month, year))
+            following = month
+        return " ".join(f"thang {month}/{year}" for month, year in dated)
+    return _MONTH_RUN.sub(fill, text)
+
+
 def _months(text: str, today: date, rules: Rules) -> Plan | None | bool:
     """Several months: their revenues in question order, or the best of them.
 
     None: not this kind of question; False: understood as several months but not answerable
     under the current rulebook (e.g. "tăng liên tục" has no rule)."""
-    text = re.sub(r"\s+", " ", text).strip()
-    run = re.search(r"\b(\d+|hai|ba|bon|nam|sau) thang lien (?:nhau|tiep) ket thuc (?:o|vao|tai) "
-                    + _MONTH, text)
-    span = re.search(r"\btu " + _MONTH + r" (?:den|toi|qua) (?:het )?" + _MONTH, text)
+    text = re.sub(r"\s+", " ", _carry_year(text)).strip()
+    # "kể lần lượt", "ghi theo đúng thứ tự (đó)": the months' revenues in question order.
+    text = re.sub(r"\b(?:ke )?lan luot\b|\bghi theo dung thu tu(?: do)?\b", "lan luot", text)
+    text = re.sub(r"^(?:liet )?ke (?:giup|ra)(?: minh)? ", " ", text)  # "kê giúp …" opens a list
+    # "xếp từ tháng cũ tới tháng gần nhất" is the chronological order.
+    text = re.sub(r"\b(?:xep )?tu thang cu (?:den|toi) thang (?:gan nhat|moi nhat|moi)\b",
+                  "theo thu tu thoi gian", text)
+    run = re.search(r"\b(\d+|hai|ba|bon|nam|sau) thang lien (?:nhau|tiep) "
+                    r"(?:ket thuc (?:o|vao|tai)|tinh (?:den|toi)) " + _MONTH, text)
+    span = re.search(r"\b(?:(?:lien )?tu )?" + _MONTH + r" (?:den|toi|qua) (?:het )?" + _MONTH, text)
     listed = re.findall(_BARE_MONTH, text)
     if not run and not span and len(listed) < 2:
         return None
@@ -667,7 +696,7 @@ _NEGATIVE_TREND = re.compile(
 
 def _increasing(text: str, today: date, rules: Rules) -> Plan | None | bool:
     """None: not a trend question; False: a trend question this grammar must not answer."""
-    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+", " ", _carry_year(text)).strip()
     trend = _TREND.search(text)
     pairs = _PAIR.findall(text)
     if not trend and not (pairs and re.search(r"\bco phai\b", text)):
@@ -894,7 +923,12 @@ _TOP_CUSTOMERS = re.compile(
     r"|mua (?:nhieu|nhiu) lan nhat tinh theo so don(?: hang)?)\b")
 _WHO_BY_REVENUE = re.compile(r"\bai mua hang (?:nhieu|nhiu) tien nhat\b")
 _CUSTOMER_PERCENT = re.compile(rf"\bphan tram {_CUSTOMER}\b")
-_BOUGHT_CUSTOMERS = re.compile(rf"\b(?:trong )?so {_CUSTOMER} (?:da|co) mua(?: hang)?\b")
+# The customers who bought, as the denominator of a share: "(trong) số khách đã mua", "tất cả
+# khách đã mua tháng đó", "tổng số khách mua", "tính trên số khách có mua", "khách có mua hồi …".
+_BOUGHT_CUSTOMERS = re.compile(
+    rf"\b(?:tinh tren |trong )?(?:tat ca (?:cac )?|tong so |so ){_CUSTOMER}(?: hang)?"
+    rf" (?:(?:da|co) )?mua(?: hang)?(?: (?:trong |cua )?thang do)?\b"
+    rf"|\b{_CUSTOMER}(?: hang)? co mua(?: hang)?(?: hoi)?\b")
 _AT_LEAST = re.compile(r"\b(?:mua )?(?:tu (\d+) don(?: hang)? tro (?:len|leen)|it nhat (\d+) don(?: hang)?)\b")
 _CUSTOMER_WORDS = re.compile(
     rf"\b(?:trong so {_CUSTOMER} (?:da|co) mua(?: hang)?|(?:dem )?so {_CUSTOMER} da mua(?: hang)?|"
@@ -1189,14 +1223,22 @@ def _product(text: str, names: Iterable[str]) -> tuple[str, object]:
 
 
 _COMPARE_WORDS = re.compile(r"\b(?:so voi|so vs|cung ky|cung thang|tang hay giam|tang/giam|"
-                            r"tang giam|hon hay kem|thay doi|tang truong|chenh lech)\b")
+                            r"tang giam|hon hay kem|thay doi|tang truong|chenh lech|"
+                            r"cung so ngay)\b")
+# Other words for "tăng hay giảm": "cao hay thấp hơn", "nhiều hay ít hơn", "lên xuống".
+_CHANGE_WORDS = re.compile(r"\b(?:cao hay thap|nhieu hay it|thap hay cao|it hay nhieu)(?: hon)?\b"
+                           r"|\blen xuong\b")
 _CHANGE = re.compile(r"\b(?:tang hay giam|tang/giam|tang giam|hon hay kem|thay doi|tang truong)\b")
 _PERCENT = re.compile(rf"\b(?:{_AMOUNT} )?phan tram\b")
 _REFERENCES = (
-    ("month", re.compile(r"\bso (?:voi|vs) thang (\d{1,2})/(\d{4})\b")),
-    ("prev_year", re.compile(r"\b(?:so (?:voi |vs )?)?cung (?:ky|thang) nam (?:ngoai|truoc)\b")),
+    ("month", re.compile(r"\bso (?:voi|vs) thang (\d{1,2})/(\d{4})(?: nam (?:ngoai|roi|truoc))?"
+                         r"(?: thi)?\b")),
+    ("prev_year", re.compile(r"\b(?:so (?:voi |vs )?)?cung (?:ky|thang) nam(?: (?:ngoai|truoc|roi))?\b")),
+    # "so với cùng số ngày (đầu) (của) tháng trước": a month to date against the same days.
+    ("prev_month", re.compile(r"\b(?:so (?:voi |vs )?)?cung so ngay (?:dau )?(?:cua )?thang "
+                              r"(?:truoc|roi)\b")),
     ("prev_month", re.compile(r"\b(?:so (?:voi |vs )?)?cung ky thang (?:truoc|roi)\b")),
-    ("prev_month", re.compile(r"\bso (?:voi|vs) thang (?:lien truoc|truoc do|truoc|roi)\b")),
+    ("prev_month", re.compile(r"\bso (?:(?:voi|vs) )?thang (?:lien truoc|truoc do|truoc|roi)\b")),
     ("prev_month", re.compile(r"\bthang (?:lien truoc|truoc do)\b")),
     ("prev_month", re.compile(r"(?<=hon hay kem )thang (?:truoc|roi)\b")),
 )
@@ -1657,8 +1699,10 @@ def _shift(text: str, rules: Rules) -> tuple[str, str, bool] | None | bool:
 
 def _comparison(text: str) -> tuple[str, tuple] | None | bool:
     """None: no comparison; False: comparison words not understood; else (text, reference)."""
-    if not _COMPARE_WORDS.search(text):
+    if not _COMPARE_WORDS.search(text) and not (
+            _CHANGE_WORDS.search(text) and any(p.search(text) for _, p in _REFERENCES)):
         return None
+    text = _CHANGE_WORDS.sub("tang hay giam", text)
     for kind, pattern in _REFERENCES:
         match = pattern.search(text)
         if match:
@@ -1742,11 +1786,16 @@ def _period(text: str, today: date, rules: Rules, used: list[str] | None = None,
         (r"thang (\d{1,2})/(\d{4})", None),
         (r"quy ([1-4])/(\d{4})", "calendar_quarter"),
         (rf"ngay {_DATE}", None),
-        (r"(\d{1,3}) ngay gan nhat", None),
-        (r"(?:tinh )?tu dau nam(?: (?:toi|den) (?:nay|hien tai|(?:het )?hom nay))?"
+        (r"(?:(?:tinh|ke) (?:ca|luon) hom nay (?:thi )?)?(\d{1,3}) ngay gan nhat"
+         r"|(\d{1,3}) ngay qua (?:ke ca|tinh ca|tinh luon) hom nay", None),
+        (r"(?:tinh )?tu dau nam(?: nay)?(?: (?:toi|den) (?:nay|hien tai|(?:het )?hom nay"
+         r"|bay gio|bay chu|gio))?"
+         r"|nam nay (?:tinh )?(?:toi|den) (?:het )?hom nay"
          r"|(?:tinh )?tu (?:ngay )?1/1(?: nam nay)? (?:toi|den) (?:het )?(?:ngay )?hom nay",
          "year_to_date"),
-        (r"tu dau thang(?: nay)?(?: (?:toi|den) (?:nay|(?:het )?hom nay))?", "month_to_date"),
+        (r"tu dau thang(?: nay)?(?: (?:toi|den) (?:nay|(?:het )?hom nay))?"
+         r"|thang nay (?:tinh )?(?:toi|den) (?:het )?hom nay"
+         r"|tu (?:mung|ngay) 1 thang nay (?:toi|den) (?:het )?hom nay", "month_to_date"),
         (r"thang nay|thang truoc|tuan nay|tuan truoc|tuan roi|hom nay|hom qua", None),
         (r"thang (\d{1,2})\b(?!/)", "implicit_year"),
         (r"quy ([1-4])\b(?!/)", "implicit_year"),
@@ -1775,7 +1824,7 @@ def _period(text: str, today: date, rules: Rules, used: list[str] | None = None,
             elif index == 3:
                 start = end = date(int(groups[2]), int(groups[1]), int(groups[0]))
             elif index == 4:
-                days = int(groups[0])
+                days = int(groups[0] or groups[1])
                 if days < 1:
                     return None
                 start, end = today - timedelta(days=days - 1), today

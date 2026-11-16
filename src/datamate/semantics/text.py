@@ -97,6 +97,10 @@ def normalize_question(value: object) -> str:
     """
     # fold() drops "%", which would turn "bao nhiêu % đơn bị huỷ" into a count question.
     raw = str(value).replace("%", " phần trăm ")
+    # Regional particles closing a question ("… bao nhiêu rứa?", "… nhiêu hè", "… nghe"). Read
+    # with accents: unaccented "rua" may be "rửa" (a wash) and stays.
+    raw = re.sub(r"(?:\s+(?:rứa|hè|hén|nghe|nghen|nè|nhoa|nhen))+\s*([?.!]*)\s*$", r"\1", raw,
+                 flags=re.I)
     # fold() also drops "≥": "doanh thu ≥ 580.000 đồng", "mua ≥ 4 đơn" are the rulebook's
     # "từ N trở lên" (gồm N). "≤", "<", ">" stay unread, so those questions abstain.
     raw = re.sub(r"(?:≥|>=|⩾)\s*(\d[\d.,]*)\s*((?:đồng|dong|đ|vnđ|vnd|"
