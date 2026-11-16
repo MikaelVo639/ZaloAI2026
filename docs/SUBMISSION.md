@@ -26,7 +26,7 @@ train/holdout; không coi việc portal nhận file là bằng chứng mô hình
 
 Image đọc split tại `/data` và ghi `/result/submission.jsonl`, `/result/logs/` qua
 `bash /code/predict.sh` không tham số. `Dockerfile` là bản có model: base
-`pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime`, chạy `configs/rewrite-v8.toml` với
+`pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime`, chạy `configs/rewrite-v11.toml` với
 Qwen2.5-Coder-7B-Instruct (khai báo ở `models/README.md`). Build không cần GPU; chạy model
 cần GPU NVIDIA (máy chấm: RTX 5090). `Dockerfile.cpu` chỉ có ngữ pháp.
 

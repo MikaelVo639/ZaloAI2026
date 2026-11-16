@@ -107,7 +107,7 @@ Có lệnh cho PowerShell và Linux/macOS trong [docs/VALIDATION.md](docs/VALIDA
 CI có job Python trên Windows/Linux và job Docker chạy offline.
 
 `Dockerfile` là image nộp bài: base GPU CUDA 12.8 + PyTorch 2.7.1, chạy ngữ pháp và model
-viết lại câu (`configs/rewrite-v8.toml`, Qwen2.5-Coder-7B-Instruct) từ `/code/predict.sh`
+viết lại câu (`configs/rewrite-v11.toml`, Qwen2.5-Coder-7B-Instruct) từ `/code/predict.sh`
 theo guideline BTC. Weights không nằm trong Git: tải vào `models/qwen2.5-coder-7b-instruct`
 trước khi build (xem `docs/SUBMISSION.md`). `Dockerfile.cpu` là bản chỉ có ngữ pháp, CI dùng.
 Baseline không train hay sinh dữ liệu training; xem `training_code/README.md` và
