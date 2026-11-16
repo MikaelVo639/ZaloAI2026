@@ -254,6 +254,17 @@ _EVERYDAY: tuple[tuple[str, Any], ...] = (
     (r"\btuan nay (?:tinh )?(?:toi|den) (?:het )?hom nay\b", "tuan nay"),
     # "tổng bao nhiêu đơn", "doanh thu tổng bao nhiêu"; "lên được bao nhiêu đơn".
     (r"\btong (?=(?:bao nhieu|bao nhiu|bnhiu|bn|may)(?: |$))", ""),
+    # Stock at cost: "hàng còn dư / tồn trong kho (của cửa hàng) tính (theo) giá vốn".
+    # Not after "giá trị": "giá trị hàng còn trong kho …" is already the stock-value wording.
+    (r"(?<!gia tri )\bhang (?:con du|con|ton) trong kho(?: cua cua hang)? tinh (?:theo )?gia von"
+     r"(?: (?:dang|la))?"
+     r"(?= (?:bao nhieu|bao nhiu|bnhiu|bn) tien\b)", "tinh theo gia von tien hang nam trong kho la"),
+    # The supplier bought from most, by money.
+    (r"\bnhap (?:tien hang )?cua nha cung cap nao (?:nhieu tien|lon|cao) nhat\b",
+     "tien nhap hang tu nha cung cap nao cao nhat"),
+    # Cancelled orders as a share of all orders.
+    (r"\bdon huy chiem (?:bao nhieu|bao nhiu|bnhiu|bn|may|nhieu) phan tram "
+     r"(?:toan bo|tong so|tat ca(?: cac)?) don(?: hang)?\b", "ti le huy don"),
     # One shift against another: "ca chiều cao hay thấp hơn / nhiều hay ít hơn ca sáng".
     (r"\b(?:cao hay thap|nhieu hay it|thap hay cao|it hay nhieu)(?: hon)? (?=ca (?:sang|chieu|toi)\b)",
      "hon hay kem "),

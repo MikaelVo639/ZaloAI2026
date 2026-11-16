@@ -52,8 +52,9 @@ class GroupPlanTests(unittest.TestCase):
         self.assertEqual(plan("tháng 3/2026 nhóm gỏi mang về bao nhiêu doanh thu").comparison, "")
 
     def test_other_group_measures_still_abstain(self):
+        # (The group's product sold most is answered since bản 24.)
         for text in ("tháng 3/2026 nhóm bánh chiếm bao nhiêu phần trăm số đơn",
-                     "tháng 3/2026 nhóm bánh có mặt hàng nào bán được nhiều cái nhất"):
+                     "tháng 3/2026 nhóm bánh có mặt hàng nào bán chậm nhất"):
             with self.subTest(text=text):
                 self.assertIsNone(plan(text))
 

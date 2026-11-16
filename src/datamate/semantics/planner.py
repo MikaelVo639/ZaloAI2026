@@ -395,6 +395,25 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
     elif best_day is not None:
         intent, text = "best_day", best_day
     unit = ""
+    rank_by = ""
+    if group and group[1] == "product_group" and not intent and not share:
+        # The group's product sold most: "(trong nhóm X) mặt hàng nào bán được nhiều ly nhất",
+        # "… nhiều tiền / thu về nhiều tiền / có doanh thu cao nhất".
+        item = r"(?:(?:co|thi|cua) )?(?:mat hang|san pham|mon)(?: nao)?"
+        by_unit = re.search(rf"\b{item} ban(?: duoc)? (?:nhieu|nhiu) ([a-z][a-z0-9]*) nhat\b", text)
+        by_money = re.search(
+            # "bán được nhiều tiền" may already read as "doanh thu" (rulebook synonym).
+            rf"\b{item} (?:(?:ban duoc|thu ve|mang ve) (?:nhieu|nhiu) tien"
+            rf"|(?:co )?{_REVENUE}(?: (?:cao|lon))?) nhat"
+            r"(?: la (?:mat hang|san pham|mon) nao)?\b", text)
+        if by_unit and by_unit.group(1) not in _NOT_UNITS and rules.quantity_ranking:
+            intent, rank_by = "top_products", f"quantity:{by_unit.group(1)}"
+            text = text[:by_unit.start()] + " " + text[by_unit.end():]
+            used.append("quantity_ranking")
+        elif by_money and rules.revenue:
+            intent, rank_by = "top_products", "revenue"
+            text = text[:by_money.start()] + " " + text[by_money.end():]
+            text = re.sub(rf"\b{_REVENUE}\b", " ", text)
     if group and group[1] == "product_group" and not intent:
         # "số đơn có mua hàng nhóm X", "đơn có ít nhất một mặt hàng nhóm X": orders holding
         # the group's products; "các mặt hàng nhóm X bán ra …": the group's products.
@@ -451,7 +470,7 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
     ) and not (
         # Orders that hold the group's products; units of the group's products.
         group[1] == "product_group" and intent in ("order_count", "quantity") and not share
-    ):
+    ) and not (group[1] == "product_group" and rank_by):
         return None
     if (shift or staff) and intent not in ("revenue", "order_count"):
         return None
@@ -479,7 +498,7 @@ def _plan_question(question: Question, text: str, rules: Rules, names: tuple[str
                 "change_percent" if reference else ("shift_change_percent" if shift_compare
                                                     else ("share" if share else "")),
                 tuple(filters),
-                unit=unit, shape="by_filter" if pair else "")
+                unit=unit, shape="by_filter" if pair else "", rank_by=rank_by)
 
 
 def _rows(rules: Rules, *features: str) -> tuple[str, ...]:

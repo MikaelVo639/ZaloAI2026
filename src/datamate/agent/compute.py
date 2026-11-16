@@ -427,7 +427,7 @@ FILTERABLE = {"product": frozenset({"revenue", "order_count", "quantity", "stock
               "shift": frozenset({"revenue", "order_count"}),
               "staff": frozenset({"revenue", "order_count", "staff_commission"}),
               "size": frozenset({"quantity"}),
-              "product_group": frozenset({"revenue", "order_count", "quantity"}),
+              "product_group": frozenset({"revenue", "order_count", "quantity", "top_products"}),
               "customer_group": frozenset({"revenue", "average_order"}),
               "ingredient": frozenset({"revenue"}),
               "prescription": frozenset({"revenue"}),
@@ -595,8 +595,11 @@ def unsupported(plan: Plan) -> str:
         units = plan.unit.split("|")
         if len(units) != 2 or not all(units) or units[0] == units[1]:
             return "Stock split needs two distinct units"
-    if plan.rank_by and (plan.intent != "top_customers"
-                         or plan.rank_by not in ("revenue", "order_count")):
+    group_top = (plan.intent == "top_products" and len(plan.filters) == 1
+                 and plan.filters[0].field == "product_group" and plan.top_k == 1
+                 and (plan.rank_by == "revenue" or plan.rank_by.startswith("quantity:")))
+    if plan.rank_by and not group_top and (plan.intent != "top_customers"
+                                           or plan.rank_by not in ("revenue", "order_count")):
         return f"Ranking by {plan.rank_by!r} not supported"
     if plan.intent == "top_customers" and not plan.rank_by:
         return "Customer ranking needs its measure"
@@ -2345,6 +2348,8 @@ def _answer_group(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Ca
     window = (f"date.fromisoformat({plan.start.isoformat()!r}), "
               f"date.fromisoformat({plan.end.isoformat()!r})")
     group_call = f"select_group(select_valid(sales, {window}), {item.field!r}, {item.value!r})"
+    if plan.intent == "top_products":
+        return _group_top_product(plan, part_rows, group_call, evidence)
     if plan.intent == "order_count":
         value = order_count(part_rows)
         evidence.update(calculation="count distinct valid whole orders holding a product of the group",
@@ -2396,6 +2401,49 @@ def _answer_group(plan: Plan, sales: list[Sale], evidence: dict[str, Any]) -> Ca
     if value is None:
         return Candidate(reason="No revenue in the period; share undefined", evidence=evidence)
     return Candidate("percent", value, 1.0, "", evidence)
+
+
+def product_revenue_ranking(selected: list[Sale]) -> list[tuple[str, str, Decimal]]:
+    """Products by their line amounts on valid whole orders, descending; ties by id."""
+    totals: dict[str, Decimal] = defaultdict(Decimal)
+    names: dict[str, str] = {}
+    for sale in selected:
+        totals[sale.product_id] += sale.amount
+        names.setdefault(sale.product_id, sale.product_name)
+    ranked = sorted(totals, key=lambda key: (-totals[key], key))
+    return [(key, names[key], totals[key]) for key in ranked]
+
+
+def _group_top_product(plan: Plan, rows: list[Sale], group_call: str,
+                       evidence: dict[str, Any]) -> Candidate:
+    """The group's product sold most: in base units (every product of the group sold in the
+    unit asked), or by money (a tie at the top abstains: no rule breaks it)."""
+    if not rows or any(s.quantity_base is None or not s.product_id or not s.product_name
+                       for s in rows):
+        return Candidate(reason="Ranking needs explicit base quantities and product ids/names",
+                         evidence=evidence)
+    if plan.rank_by == "revenue":
+        ranking = product_revenue_ranking(rows)
+        if len(ranking) > 1 and ranking[1][2] == ranking[0][2]:
+            return Candidate(reason="Tie for the group's top product by money", evidence=evidence)
+        calculation, function = "sum(line amount) by product_id in the group, descending", \
+            product_revenue_ranking
+    else:
+        unit = plan.rank_by.split(":", 1)[1]
+        if any(fold(s.base_unit or "") != fold(unit) for s in rows):
+            return Candidate(reason="The group's products are not all sold in the unit asked",
+                             evidence=evidence)
+        ranking = product_ranking(rows)
+        calculation, function = "sum(quantity_base) by product_id in the group, descending; " \
+            "ties by id", product_ranking
+    result = ranking[0][1]
+    evidence.update(calculation=calculation,
+                    code=_code(f"{function.__name__}({group_call})[:1]", select_valid,
+                               select_group, function),
+                    ranking=[{"product_id": key, "product_name": name, "value": str(value)}
+                             for key, name, value in ranking[:2]],
+                    result=result)
+    return Candidate("string", result, 1.0, "", evidence)
 
 
 def select_label(sales: list[Sale], attribute: str, label: str) -> list[Sale]:
