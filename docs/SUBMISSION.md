@@ -25,7 +25,26 @@ train/holdout; không coi việc portal nhận file là bằng chứng mô hình
 ## Solution Docker
 
 Image đọc split tại `/data` và ghi `/result/submission.jsonl`, `/result/logs/` qua
-`bash /code/predict.sh` không tham số. Trước khi đóng băng image:
+`bash /code/predict.sh` không tham số. `Dockerfile` là bản có model: base
+`pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime`, chạy `configs/rewrite-v8.toml` với
+Qwen2.5-Coder-7B-Instruct (khai báo ở `models/README.md`). Build không cần GPU; chạy model
+cần GPU NVIDIA (máy chấm: RTX 5090). `Dockerfile.cpu` chỉ có ngữ pháp.
+
+Build bản có model (máy có Docker, ~80 GB đĩa trống, mạng để tải ~25 GB):
+
+```sh
+uv sync --locked
+uv pip install --python .venv/bin/python huggingface-hub==0.31.4
+uv run --no-sync python scripts/prepare_agent_model.py --output models/qwen2.5-coder-7b-instruct
+docker build --platform linux/amd64 -t datamate:<revision> .
+docker save datamate:<revision> -o datamate-<revision>.tar
+gzip -k datamate-<revision>.tar
+```
+
+Build dừng với lỗi nếu chưa tải weights. Không có GPU thì thử luồng ngữ pháp bằng
+`-e CONFIG_PATH=configs/baseline.toml`; phần model đã kiểm trên Colab GPU với cùng phiên
+bản torch/transformers. Gửi BTC link `.tar.gz`, MD5 của `.tar.gz` và kích thước `.tar`.
+Trước khi đóng băng image:
 
 - Chạy quy trình offline ở `docs/VALIDATION.md`, gồm data read-only và network tắt.
 - Khai báo model/revision/licence/parameter count và đóng đủ weights vào image.
